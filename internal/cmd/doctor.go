@@ -26,6 +26,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checks.DockerDaemon(),
 		checks.ComposePlugin(),
 		checks.PortFree(8080),
+		checks.DockerMemory(),
+		checks.DiskSpace(),
 	}
 
 	failed := 0

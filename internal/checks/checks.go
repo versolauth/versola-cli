@@ -11,6 +11,7 @@ import (
 	"net"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -152,6 +153,119 @@ func dockerPortInUse(port int) (owner string, used bool) {
 		}
 	}
 	return "", false
+}
+
+// DockerMemory checks how much memory the Docker daemon reports having.
+// On macOS and Windows (Docker Desktop) this is the memory given to
+// Docker's own VM, not the host's total RAM — which is the number that
+// actually matters: three JVMs plus Postgres need real room, and Docker
+// Desktop's default VM allocation is often well under what's needed.
+//
+// If the daemon isn't reachable, or its report can't be parsed, this
+// check reports OK rather than failing — DockerDaemon() already reports
+// an unreachable daemon on its own, and this check has nothing reliable
+// to say in that case.
+func DockerMemory() Result {
+	const name = "Docker memory"
+	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB, per the project design doc's estimate
+
+	out, err := run(5*time.Second, "docker", "info", "--format", "{{.MemTotal}}")
+	if err != nil {
+		return Result{Name: name, OK: true, Detail: "skipped (daemon unreachable)"}
+	}
+	total, convErr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if convErr != nil {
+		return Result{Name: name, OK: true, Detail: "skipped (couldn't read `docker info`)"}
+	}
+
+	gib := float64(total) / (1024 * 1024 * 1024)
+	if total < minBytes {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); raise Docker's memory limit", gib),
+		}
+	}
+	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
+}
+
+// DiskSpace checks free disk space at the CLI's current working
+// directory, as a rough proxy for whether there's room to pull Versola's
+// images (~4 GiB, per the project design doc).
+//
+// This is an approximation, not an exact check: on macOS and Windows,
+// Docker Desktop stores images inside its own VM's virtual disk, which
+// is a different number from the host's free space checked here — Docker
+// doesn't expose the VM disk's free space through a simple command the
+// way it exposes memory through `docker info`. Good enough as a first
+// warning; worth revisiting if it turns out to give false confidence in
+// practice.
+//
+// Implementation differs by OS (`df` on Linux/macOS, PowerShell on
+// Windows) because there's no single portable way to ask for this. The
+// Windows path in particular has not been run — only reasoned through
+// against PowerShell's documented behavior — so treat a wrong answer
+// there as more likely than in the rest of this package until it's been
+// verified on a real Windows machine.
+func DiskSpace() Result {
+	const name = "Disk space"
+	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB
+
+	free, err := freeDiskBytes(".")
+	if err != nil {
+		return Result{Name: name, OK: true, Detail: "skipped (" + err.Error() + ")"}
+	}
+
+	gib := float64(free) / (1024 * 1024 * 1024)
+	if free < minBytes {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("%.1f GiB free — Versola's images need roughly 4 GiB", gib),
+		}
+	}
+	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB free", gib)}
+}
+
+func freeDiskBytes(path string) (int64, error) {
+	switch runtime.GOOS {
+	case "windows":
+		// Free space, in bytes, of the drive the given path lives on.
+		out, err := run(5*time.Second, "powershell", "-NoProfile", "-Command",
+			"(Get-PSDrive -Name (Get-Location).Drive.Name).Free")
+		if err != nil {
+			return 0, fmt.Errorf("couldn't run PowerShell: %w", err)
+		}
+		return strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+
+	case "linux", "darwin":
+		// -P: POSIX output format, guaranteed one line per filesystem
+		// (plain `df` can wrap onto a second line for a long device
+		// name, which would break the fixed-column parse below).
+		// -k: sizes in 1024-byte blocks, so the arithmetic below is
+		// unambiguous regardless of df's platform-dependent default unit.
+		out, err := run(5*time.Second, "df", "-Pk", path)
+		if err != nil {
+			return 0, fmt.Errorf("couldn't run df: %w", err)
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) < 2 {
+			return 0, fmt.Errorf("unexpected df output")
+		}
+		// Header: Filesystem 1024-blocks Used Available Capacity Mounted-on
+		fields := strings.Fields(lines[len(lines)-1])
+		if len(fields) < 4 {
+			return 0, fmt.Errorf("unexpected df output")
+		}
+		kib, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("couldn't parse df output: %w", err)
+		}
+		return kib * 1024, nil
+
+	default:
+		return 0, fmt.Errorf("unsupported OS %q", runtime.GOOS)
+	}
 }
 
 func run(timeout time.Duration, name string, args ...string) (string, error) {

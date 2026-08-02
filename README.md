@@ -8,10 +8,11 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
-`doctor`, `bootstrap`, `status`, and `down` are all implemented and have
-been tested end-to-end against a real local deployment (Postgres + auth +
-central + edge + the gateway, real browser login through to the admin
-console).
+`doctor`, `bootstrap`, `status`, `down`, and `version` are all implemented
+and have been tested end-to-end against a real local deployment (Postgres +
+auth + central + edge + the gateway, real browser login through to the
+admin console). Releases are automated (see Releasing below) and installed
+via the one-line scripts below.
 
 ## Install
 
@@ -32,10 +33,10 @@ if it isn't, the script prints the exact line to add to your shell
 profile. To pin a specific version instead of the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s v0.1.0-beta
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s v0.1.0
 ```
 ```powershell
-$env:VERSOLA_VERSION = "v0.1.0-beta"
+$env:VERSOLA_VERSION = "v0.1.0"
 iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 ```
 
@@ -133,6 +134,13 @@ Postgres, central, auth, edge, and the gateway (nginx + central-ui) via
 Docker Compose, waiting on readiness at each stage. Prints the admin
 login on success.
 
+`<version>` is a Versola release, which is tagged **without** a leading
+`v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (Don't confuse it
+with versola-cli's own releases, which do use `v`.) Passing a version
+that was never published fails with Docker's raw `manifest unknown`;
+the available versions are the tags published for the `versola-tools`
+package under the organization's GitHub packages.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
@@ -165,18 +173,19 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Tags containing a hyphen (`v0.2.0-beta`, `v1.0.0-rc1`) are published as
-pre-releases. This isn't just a label: GitHub's "latest release" API
-excludes pre-releases, and that's what the install scripts query when no
-version is given — so a repo with only pre-releases requires users to
-pass a version explicitly.
+Nothing is built or uploaded by hand: the tag is the only input, and the
+version it names is compiled into the binaries via ldflags, so
+`versola version` can't disagree with the release it came from.
 
 ## Layout
 
 ```
-cmd/versola/          entry point
-internal/cmd/          cobra commands (doctor, bootstrap, status, down)
+cmd/versola/            entry point
+internal/cmd/           cobra commands (doctor, bootstrap, status, down, version)
 internal/checks/        the actual check logic doctor (and bootstrap) run
 internal/state/         locates ~/.versola/active, the on-disk state bootstrap writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
+install.sh              one-line installer for macOS/Linux
+install.ps1             one-line installer for Windows
+.github/workflows/      release automation (builds binaries + checksums on tag push)
 ```

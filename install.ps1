@@ -9,29 +9,43 @@
 
 $ErrorActionPreference = "Stop"
 
+# On any failure below, use "return" rather than "exit". This script is
+# meant to be run via "iwr ... | iex", which evaluates it in the CURRENT
+# PowerShell session rather than a child process -- "exit" there closes the
+# user's whole terminal window, not just this script.
+
 $Repo = "versolauth/versola-cli"
 $InstallDir = "$env:LOCALAPPDATA\versola"
 $BinName = "versola.exe"
 $Asset = "versola-windows-amd64.exe"
 
-# Only amd64 builds exist today; fail clearly instead of silently installing
-# the wrong architecture if this ever runs on Windows on ARM.
-$Arch = $env:PROCESSOR_ARCHITECTURE
-if ($Arch -ne "AMD64") {
-    Write-Error "Unsupported architecture: $Arch (only amd64 builds are published)"
-    exit 1
+# Only amd64 builds exist today. This only rejects 32-bit Windows -- it does
+# NOT reject Windows on ARM, since Windows 11 on ARM runs x64 binaries via
+# built-in emulation, so the published amd64 .exe works fine there too.
+# Checking the OS via [Environment]::Is64BitOperatingSystem rather than
+# $env:PROCESSOR_ARCHITECTURE -- that env var reflects the current
+# PowerShell *process's* architecture, and under WOW64 (32-bit PowerShell on
+# 64-bit Windows) it reports "x86" even though the OS itself is 64-bit.
+if (-not [Environment]::Is64BitOperatingSystem) {
+    Write-Error "Unsupported architecture: only 64-bit Windows is supported (amd64 builds only)"
+    return
 }
 
 # Resolve version: $env:VERSOLA_VERSION if set, otherwise the latest release.
 # Note: GitHub's "latest release" API excludes pre-releases, so this will
-# fail to find anything until a non-pre-release build is published.
+# fail to find anything until a non-pre-release build is published -- set
+# $env:VERSOLA_VERSION explicitly until then.
 $Version = $env:VERSOLA_VERSION
 if (-not $Version) {
-    $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
-    $Version = $Release.tag_name
+    try {
+        $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $Version = $Release.tag_name
+    } catch {
+        $Version = $null
+    }
     if (-not $Version) {
-        Write-Error "Could not determine the latest versola-cli version"
-        exit 1
+        Write-Error 'Could not determine the latest versola-cli version (no non-pre-release exists yet -- set $env:VERSOLA_VERSION explicitly, e.g. "v0.1.0-beta")'
+        return
     }
 }
 
@@ -48,7 +62,7 @@ try {
         Invoke-WebRequest -Uri "$BaseUrl/$Asset" -OutFile $AssetPath -UseBasicParsing
     } catch {
         Write-Error "Could not download $Asset for release $Version (check that it exists: $BaseUrl)"
-        exit 1
+        return
     }
 
     # Verify checksum if this release published one. Older releases (e.g.
@@ -78,12 +92,19 @@ try {
         Write-Host "Verifying checksum..."
         # Exact filename match per line, not a substring regex search -- avoids
         # matching the wrong entry if two asset names happen to share a substring.
+        # Also strips a leading "*" (sha256sum binary-mode marker) or "./"
+        # (relative-path prefix) before comparing, so verification isn't
+        # silently skipped just because checksums.txt used one of those
+        # conventions.
         $Expected = $null
         foreach ($ChecksumLine in Get-Content $ChecksumsPath) {
             $Fields = $ChecksumLine -split '\s+', 2
-            if ($Fields.Count -eq 2 -and $Fields[1].Trim() -eq $Asset) {
-                $Expected = $Fields[0]
-                break
+            if ($Fields.Count -eq 2) {
+                $Name = $Fields[1].Trim() -replace '^\*', '' -replace '^\./', ''
+                if ($Name -eq $Asset) {
+                    $Expected = $Fields[0]
+                    break
+                }
             }
         }
         if (-not $Expected) {
@@ -92,7 +113,7 @@ try {
             $Actual = (Get-FileHash -Path $AssetPath -Algorithm SHA256).Hash.ToLower()
             if ($Expected.ToLower() -ne $Actual) {
                 Write-Error "Checksum mismatch for $Asset`n  expected: $Expected`n  actual:   $Actual"
-                exit 1
+                return
             }
             Write-Host "Checksum OK."
         }

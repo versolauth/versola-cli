@@ -39,8 +39,9 @@ $env:VERSOLA_VERSION = "v0.1.0-beta"
 iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 ```
 
-After installing, restart your terminal so it picks up the updated PATH,
-then run `versola doctor`.
+On Windows, restart your terminal so it picks up the updated PATH, then
+run `versola doctor`. On macOS/Linux, only do this if `install.sh` printed
+a warning that `~/.local/bin` wasn't already on PATH.
 
 ## Build from source
 

@@ -144,6 +144,33 @@ Stops the locally deployed stack. Pass `--volumes` to also delete the
 Postgres data volume (kept by default, so a later `bootstrap` picks up
 the same data).
 
+### `version`
+
+Prints which versola-cli release this binary was built from, plus the Go
+version and target platform. `versola --version` does the same thing.
+
+This is the CLI's own version, independent of the Versola version it
+deploys — that one is whatever you pass to `bootstrap local <version>`.
+Binaries built from source without release flags report `dev`.
+
+## Releasing
+
+Releases are automated: pushing a `v*` tag triggers
+`.github/workflows/release.yml`, which cross-compiles all four platform
+binaries from that commit, generates `checksums.txt`, and publishes them
+as GitHub Release assets.
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Tags containing a hyphen (`v0.2.0-beta`, `v1.0.0-rc1`) are published as
+pre-releases. This isn't just a label: GitHub's "latest release" API
+excludes pre-releases, and that's what the install scripts query when no
+version is given — so a repo with only pre-releases requires users to
+pass a version explicitly.
+
 ## Layout
 
 ```

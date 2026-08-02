@@ -1,0 +1,85 @@
+# Builds versola-cli for every supported platform and publishes them as
+# GitHub Release assets, plus a checksums.txt that install.sh/install.ps1
+# verify downloads against.
+#
+# Why this exists: these binaries used to be built and uploaded by hand,
+# which went wrong exactly the way hand-built release artifacts do -- a
+# macOS binary once got uploaded under the Windows asset name, and the
+# resulting "not a valid application for this OS platform" error only
+# surfaced after a user had already installed it. Building all four from
+# one commit in one job removes that class of mistake, and it's also what
+# finally makes checksums real: nothing was generating checksums.txt
+# before, so the verification both install scripts implement was always
+# silently skipping.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to commit SHAs, not floating tags.
+      # A tag like @v4 is mutable -- whoever controls that repo can retarget
+      # it at any commit, and this workflow holds contents:write on a repo
+      # whose whole purpose is publishing binaries people download and run.
+      # A SHA can't be retargeted. Bump these deliberately; the trailing
+      # comment records which release each SHA corresponds to.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.22"
+
+      # The tag is the single source of truth for the version, so the
+      # binary can't disagree with the release it's attached to.
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      # Guard before anything is published: the tag is already pushed by the
+      # time this runs, so a commit that doesn't compile would otherwise
+      # leave a tag with no release attached to it. Failing here instead
+      # means deleting one tag, not un-publishing a broken release.
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      # Cross-compiling all four targets from one Linux runner: Go needs no
+      # emulator or cross-toolchain for this, just GOOS/GOARCH. CGO is off
+      # so the binaries are static and don't pick up the runner's libc.
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          LDFLAGS="-s -w -X github.com/versolauth/versola-cli/internal/cmd.version=${VERSION}"
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/versola-windows-amd64.exe ./cmd/versola
+          GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/versola-darwin-amd64      ./cmd/versola
+          GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/versola-darwin-arm64      ./cmd/versola
+          GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/versola-linux-amd64       ./cmd/versola
+
+      # Plain "sha256sum <file>" output ("<hash>  <name>"), which is the
+      # format both install scripts parse. Generated from inside dist/ so
+      # the filename column has no path prefix.
+      - name: Generate checksums
+        run: cd dist && sha256sum versola-* > checksums.txt && cat checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          # Tags containing a hyphen (v0.2.0-beta, v1.0.0-rc1) are
+          # pre-releases; plain vX.Y.Z tags are full releases. This matters
+          # beyond labelling: GitHub's "latest release" API excludes
+          # pre-releases, and that's the endpoint both install scripts hit
+          # when no version is given.
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true

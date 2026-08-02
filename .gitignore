@@ -1,8 +1,8 @@
+# Locally-built binaries. Patterns rather than an explicit list: release
+# binaries are built by CI and published as release assets, never committed,
+# so anything matching these at the repo root is a local build artifact.
 /versola
 /versola.exe
-/versola-windows-amd64.exe
-/versola-darwin-amd64
-/versola-darwin-arm64
-/versola-linux-amd64
+/versola-*
 /dist/
 .idea/

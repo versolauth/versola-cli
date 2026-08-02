@@ -11,12 +11,44 @@ about Versola's own service topology (ports, service names, config schema)
 `doctor`, `bootstrap`, `status`, and `down` are all implemented and have
 been tested end-to-end against a real local deployment (Postgres + auth +
 central + edge + the gateway, real browser login through to the admin
-console). No installer/release pipeline yet — build from source for now.
+console).
 
-## Build
+## Install
 
-Needs Go installed. Builds are cross-platform from any machine — you don't
-need a Mac to produce a macOS binary, or Windows to produce a Windows one.
+**macOS/Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh
+```
+
+**Windows:**
+```powershell
+iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
+```
+
+Both scripts install without needing admin/sudo rights. `install.ps1`
+also adds the install directory to your PATH automatically. `install.sh`
+installs to `~/.local/bin`, which is already on PATH on most systems —
+if it isn't, the script prints the exact line to add to your shell
+profile. To pin a specific version instead of the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s v0.1.0-beta
+```
+```powershell
+$env:VERSOLA_VERSION = "v0.1.0-beta"
+iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
+```
+
+On Windows, restart your terminal so it picks up the updated PATH, then
+run `versola doctor`. On macOS/Linux, only do this if `install.sh` printed
+a warning that `~/.local/bin` wasn't already on PATH.
+
+## Build from source
+
+Only needed if you're contributing to `versola-cli` itself — most users
+should use Install above instead. Needs Go installed. Builds are
+cross-platform from any machine — you don't need a Mac to produce a macOS
+binary, or Windows to produce a Windows one.
 
 ```bash
 go mod tidy   # fetches cobra, generates go.sum — needs network the first time
@@ -50,20 +82,27 @@ chmod +x versola-darwin-arm64
 
 ## Run
 
+If you installed via the Install section above, `versola` is on your PATH
+(unless `install.sh` warned that `~/.local/bin` wasn't on it — in that
+case, add the printed line to your shell profile first):
+```bash
+versola doctor
+versola bootstrap local <version>
+versola status
+versola down
+```
+
+If you built from source instead, run the binary directly from where you
+built it:
+
 **Windows:**
 ```powershell
 .\versola.exe doctor
-.\versola.exe bootstrap local <version>
-.\versola.exe status
-.\versola.exe down
 ```
 
 **macOS/Linux:**
 ```bash
 ./versola-darwin-arm64 doctor
-./versola-darwin-arm64 bootstrap local <version>
-./versola-darwin-arm64 status
-./versola-darwin-arm64 down
 ```
 (substitute whichever binary you built above)
 

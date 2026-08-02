@@ -1,4 +1,7 @@
 /versola
 /versola.exe
+/versola-darwin-amd64
+/versola-darwin-arm64
+/versola-linux-amd64
 /dist/
 .idea/

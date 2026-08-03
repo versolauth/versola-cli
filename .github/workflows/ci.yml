@@ -1,0 +1,41 @@
+# Runs go vet/build/test on every push and pull request -- unlike
+# release.yml (which only triggers on a "v*" tag, i.e. right before
+# publishing), this catches a broken commit on every push/PR, not just the
+# one that happens to get tagged.
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Same pinned-SHA policy as release.yml: floating tags like @v4 are
+      # mutable, so third-party actions are pinned to a specific commit.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.22"
+
+      - name: Vet
+        run: go vet ./...
+
+      # Cross-compile every release target, same as release.yml's build
+      # step -- catches a GOOS/GOARCH-specific compile error (e.g. a
+      # windows-only or darwin-only file) on every push, not just at
+      # release time.
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/versola
+          GOOS=darwin  GOARCH=amd64 go build -o /dev/null ./cmd/versola
+          GOOS=darwin  GOARCH=arm64 go build -o /dev/null ./cmd/versola
+          GOOS=linux   GOARCH=amd64 go build -o /dev/null ./cmd/versola
+
+      - name: Test
+        run: go test ./...

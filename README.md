@@ -91,6 +91,7 @@ versola doctor
 versola bootstrap local <version>
 versola status
 versola down
+versola uninstall
 ```
 
 If you built from source instead, run the binary directly from where you
@@ -109,11 +110,12 @@ built it:
 
 ### `doctor`
 
-Checks this machine has what Versola needs, without installing or changing
-anything:
+Checks this machine has what Versola needs. It never installs anything on
+its own — if Docker isn't found at all, the most it does is offer to open
+an install page in your browser, and only after you confirm:
 - Docker daemon reachable (not just `docker` on PATH)
 - Docker Compose v2 plugin present
-- Port 8080 free on localhost
+- Port 2821 free on localhost
 - Docker has enough memory allocated (~4 GiB — three JVMs + Postgres)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
@@ -121,10 +123,13 @@ Exits non-zero if any check fails. `bootstrap` runs the same checks itself
 before doing anything, so running `doctor` first is optional but gives you
 the same picture ahead of time.
 
-Known gap: if no Docker runtime is found, this doesn't yet offer a choice
-between installing Docker Desktop or Colima on macOS — it just reports
-"not reachable". Worth adding before this goes to users who don't already
-have Docker set up.
+If Docker isn't reachable, `doctor` tells the two possible reasons apart
+and reacts differently: already installed but not running just gets a
+"start it" hint (installing something wouldn't help); not installed at
+all offers to open a download page — a choice between Docker Desktop and
+Colima on macOS, Docker Desktop on Windows, the Docker Engine install
+docs on Linux. It only ever opens a browser tab — never installs or
+downloads anything itself.
 
 ### `bootstrap local <version>`
 
@@ -137,9 +142,14 @@ login on success.
 `<version>` is a Versola release, which is tagged **without** a leading
 `v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (Don't confuse it
 with versola-cli's own releases, which do use `v`.) Passing a version
-that was never published fails with Docker's raw `manifest unknown`;
-the available versions are the tags published for the `versola-tools`
-package under the organization's GitHub packages.
+that was never published fails with a clear error explaining that,
+instead of Docker's raw `manifest unknown`; the available versions are
+the tags published for the `versola-tools` package under the
+organization's GitHub packages.
+
+Once auth and edge are ready, this opens the admin console in your
+default browser automatically. Pass `--no-browser` to skip that (e.g.
+running headless over SSH).
 
 ### `status`
 
@@ -151,6 +161,23 @@ Shows the containers from the last `bootstrap` run and their health
 Stops the locally deployed stack. Pass `--volumes` to also delete the
 Postgres data volume (kept by default, so a later `bootstrap` picks up
 the same data).
+
+### `uninstall`
+
+Removes everything versola deployed locally: stops the stack and deletes
+its Postgres volume, removes the `versola-*` images that were pulled, and
+clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
+to skip that.
+
+If a deployment was recorded but Docker isn't reachable to confirm it's
+actually stopped, `~/.versola` is deliberately left in place rather than
+cleared — deleting it there would remove the only way to properly stop
+that deployment once Docker is reachable again.
+
+Does **not** remove the `versola` binary itself or its PATH entry;
+safely deleting a program's own running executable isn't portable across
+platforms (Windows won't allow it at all). It prints the binary's path
+so you can remove it yourself.
 
 ### `version`
 
@@ -181,11 +208,12 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, status, down, version)
+internal/cmd/           cobra commands (doctor, bootstrap, status, down, uninstall, version)
 internal/checks/        the actual check logic doctor (and bootstrap) run
 internal/state/         locates ~/.versola/active, the on-disk state bootstrap writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
+internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 install.sh              one-line installer for macOS/Linux
 install.ps1             one-line installer for Windows
-.github/workflows/      release automation (builds binaries + checksums on tag push)
+.github/workflows/      ci.yml (vet/build/test on every push+PR), release.yml (builds binaries + checksums on tag push)
 ```

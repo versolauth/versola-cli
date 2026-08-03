@@ -50,8 +50,8 @@ func Prepare(version string) (string, error) {
 }
 
 // ComposeFile returns the path to the compose file bootstrap generates,
-// and whether it currently exists. It existing is how status/down tell
-// whether anything has been deployed yet.
+// and whether it currently exists. It existing is how status/down/uninstall
+// tell whether anything has been deployed yet.
 func ComposeFile() (path string, exists bool, err error) {
 	dir, err := Dir()
 	if err != nil {
@@ -59,7 +59,15 @@ func ComposeFile() (path string, exists bool, err error) {
 	}
 	path = filepath.Join(dir, "compose.yml")
 	if _, statErr := os.Stat(path); statErr != nil {
-		return path, false, nil
+		if os.IsNotExist(statErr) {
+			return path, false, nil
+		}
+		// Something other than "doesn't exist" -- e.g. a permissions
+		// error -- shouldn't be silently treated as "nothing deployed";
+		// every caller (status, down, uninstall) already checks this
+		// error and would otherwise skip real work based on a false
+		// negative here.
+		return path, false, fmt.Errorf("couldn't check %s: %w", path, statErr)
 	}
 	return path, true, nil
 }

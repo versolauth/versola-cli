@@ -8,11 +8,15 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
-`doctor`, `bootstrap`, `status`, `down`, and `version` are all implemented
-and have been tested end-to-end against a real local deployment (Postgres +
-auth + central + edge + the gateway, real browser login through to the
-admin console). Releases are automated (see Releasing below) and installed
-via the one-line scripts below.
+`doctor`, `bootstrap`, `status`, `down`, `uninstall`, and `version` are all
+implemented and have been tested end-to-end against a real local
+deployment (Postgres + auth + central + edge + the gateway, real browser
+login through to the admin console). Releases are automated (see
+Releasing below) and installed via the one-line scripts below.
+
+`upgrade` is newly added and not yet tested against a real published
+release — try it after the next release goes out, and expect rough edges
+before then.
 
 ## Install
 
@@ -92,6 +96,7 @@ versola bootstrap local <version>
 versola status
 versola down
 versola uninstall
+versola upgrade
 ```
 
 If you built from source instead, run the binary directly from where you
@@ -179,6 +184,29 @@ safely deleting a program's own running executable isn't portable across
 platforms (Windows won't allow it at all). It prints the binary's path
 so you can remove it yourself.
 
+### `upgrade`
+
+Checks the latest versola-cli release on GitHub and, if it's different
+from this binary's version, downloads it — verified against that
+release's published `checksums.txt`, the same way install.sh/install.ps1
+verify their own downloads — and replaces the running executable in
+place. Prompts for confirmation first — pass `-y`/`--yes` to skip that.
+
+Deliberately implemented with no new dependencies: it reuses the same
+GitHub API endpoint and checksums.txt convention the install scripts
+already rely on, rather than pulling in a self-update library for one
+command. On Windows, where a running `.exe` can't be overwritten in
+place, it moves the current binary aside, puts the new one in its place,
+and cleans up the leftover on a later run (the OS won't allow deleting it
+while this process is still using it).
+
+Re-running the one-line install command (see Install above) works too;
+`upgrade` is just a shortcut for the same thing.
+
+Refuses to touch a `dev` build (one built from source rather than
+installed from a release) — there's no version to compare it against,
+and no guarantee it's safe to overwrite. Rebuild from source instead.
+
 ### `version`
 
 Prints which versola-cli release this binary was built from, plus the Go
@@ -208,7 +236,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, status, down, uninstall, version)
+internal/cmd/           cobra commands (doctor, bootstrap, status, down, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and bootstrap) run
 internal/state/         locates ~/.versola/active, the on-disk state bootstrap writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out

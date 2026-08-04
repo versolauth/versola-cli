@@ -175,7 +175,16 @@ func pullAndRunTools(dir, image string) error {
 	// unbounded in memory. os.Stderr (the other leg of the MultiWriter
 	// below) still gets every byte, same as a real terminal would.
 	stderrBuf := newCappedBuffer(8 * 1024)
-	c := dockerCmd("run", "--rm", "-v", dir+":/out", image)
+	// --platform linux/amd64: versola-tools, like the rest of the stack
+	// (see compose.fragment.yml.template's platform pins on central/auth/
+	// edge/nginx in the versola repo), is only published for amd64. Without
+	// this, Docker has to guess whether to emulate on non-amd64 hosts (e.g.
+	// Apple Silicon Macs) -- it doesn't always guess right, and the failure
+	// mode when it doesn't is a raw "no matching manifest" error instead of
+	// a working, if slower, emulated container. Being explicit here makes
+	// bootstrap work the same way on arm64 as on amd64, without requiring
+	// DOCKER_DEFAULT_PLATFORM to be set in the environment first.
+	c := dockerCmd("run", "--rm", "--platform", "linux/amd64", "-v", dir+":/out", image)
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := c.Run(); err != nil {

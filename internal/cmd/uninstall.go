@@ -17,7 +17,7 @@ var assumeYes bool
 
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Remove everything versola deployed locally",
+	Short: "Stop the stack and remove its data, images, and local state",
 	Long: `uninstall stops the locally deployed Versola stack (including its
 Postgres data volume), removes the Docker images versola pulled, and
 clears ~/.versola.

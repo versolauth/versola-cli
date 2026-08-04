@@ -14,7 +14,7 @@ var removeVolumes bool
 
 var downCmd = &cobra.Command{
 	Use:   "down",
-	Short: "Stop the locally deployed Versola stack",
+	Short: "Stop the stack (keeps data and images for next bootstrap)",
 	Long: `down stops the containers from the last "versola bootstrap local"
 run. By default the Postgres data volume is kept, so a later bootstrap
 picks up the same data. Pass --volumes to delete it instead.`,

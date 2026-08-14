@@ -1,0 +1,94 @@
+package deploy
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/versolauth/versola-cli/internal/docker"
+)
+
+// ToolsImage returns the versola-tools image for a given Versola release.
+// This is the one image this CLI names by hand; everything else it runs
+// comes out of the compose file that image generates.
+func ToolsImage(version string) string {
+	return "ghcr.io/versolauth/versola-tools:" + version
+}
+
+// manifestUnknownErr wraps a docker failure whose stderr contained
+// Docker's "manifest unknown" text -- i.e. the image (or this tag of it)
+// was never published, as opposed to some other failure (network, daemon
+// down, etc.) that happens to also come back as a non-zero exit.
+type manifestUnknownErr struct{ inner error }
+
+func (e *manifestUnknownErr) Error() string { return e.inner.Error() }
+func (e *manifestUnknownErr) Unwrap() error { return e.inner }
+
+func isManifestUnknown(err error) bool {
+	var m *manifestUnknownErr
+	return errors.As(err, &m)
+}
+
+// pullAndRunTools runs the versola-tools image the same way docker.Run
+// does (stdout/stderr still streamed live to the user), but also tees
+// stderr into a buffer so it can be inspected afterward -- specifically
+// to recognize Docker's "manifest unknown" text and turn it into a
+// clearer error in Configure, without changing behavior for every other
+// docker call site (compose up/down, uninstall's rmi, etc.) that has no
+// need for this.
+func pullAndRunTools(dir, image string) error {
+	// "manifest unknown" (when it happens at all) comes from Docker
+	// failing to resolve the image before any pull output follows, so a
+	// few KB is more than enough to catch it -- capped rather than a plain
+	// bytes.Buffer so a normal, successful pull's progress output (which
+	// can run to tens of KB across an image's layers) can't grow this
+	// unbounded in memory. os.Stderr (the other leg of the MultiWriter
+	// below) still gets every byte, same as a real terminal would.
+	stderrBuf := newCappedBuffer(8 * 1024)
+	// --platform linux/amd64: versola-tools, like the rest of the stack
+	// (see compose.fragment.yml.template's platform pins on central/auth/
+	// edge/nginx in the versola repo), is only published for amd64. Without
+	// this, Docker has to guess whether to emulate on non-amd64 hosts (e.g.
+	// Apple Silicon Macs) -- it doesn't always guess right, and the failure
+	// mode when it doesn't is a raw "no matching manifest" error instead of
+	// a working, if slower, emulated container. Being explicit here makes
+	// configure work the same way on arm64 as on amd64, without requiring
+	// DOCKER_DEFAULT_PLATFORM to be set in the environment first.
+	c := docker.Cmd("run", "--rm", "--platform", "linux/amd64", "-v", dir+":/out", image)
+	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+
+	if err := c.Run(); err != nil {
+		if strings.Contains(stderrBuf.String(), "manifest unknown") {
+			return &manifestUnknownErr{inner: err}
+		}
+		return err
+	}
+	return nil
+}
+
+// cappedBuffer is a bytes.Buffer that silently stops accumulating past a
+// fixed size. It still reports every byte as written (never a short
+// write) so it's safe to use as one leg of an io.MultiWriter -- the other
+// leg (os.Stderr here) keeps receiving the full, uncapped output.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit}
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if remaining := c.limit - c.buf.Len(); remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		c.buf.Write(p[:remaining])
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }

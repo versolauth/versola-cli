@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/docker"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -138,7 +139,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	if stopStack {
 		fmt.Println("Stopping stack and removing volumes...")
-		if err := runDocker("compose", "-f", composePath, "down", "--volumes"); err != nil {
+		if err := docker.Run("compose", "-f", composePath, "down", "--volumes"); err != nil {
 			return fmt.Errorf("docker compose down failed: %w", err)
 		}
 	} else if deployed {
@@ -147,7 +148,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	for _, img := range images {
 		fmt.Printf("Removing image %s...\n", img)
-		if err := runDocker("rmi", img); err != nil {
+		if err := docker.Run("rmi", img); err != nil {
 			// Not fatal -- an image still referenced by something else, or
 			// one already removed by hand, shouldn't stop the rest of the
 			// cleanup.

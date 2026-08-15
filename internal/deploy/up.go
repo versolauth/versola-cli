@@ -48,6 +48,17 @@ func Up(opts UpOptions) error {
 		return fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file) — configure it again")
 	}
 
+	// The compose file declares this volume `external: true` (see the
+	// comment on it in compose.fragment.yml.template) so OpenBao's storage
+	// survives being reconfigured into a fresh bundle directory each run —
+	// but `external: true` also means compose refuses to start anything
+	// that mounts it until it already exists. `docker volume create` is a
+	// no-op if it's already there, so this is safe to run on every `up`,
+	// not just the first one.
+	if err := docker.Run("volume", "create", "versola-openbao-file"); err != nil {
+		return fmt.Errorf("couldn't create the openbao-file volume: %w", err)
+	}
+
 	// Postgres and central go up first, on their own — auth/edge's own
 	// startup fails fatally if central isn't reachable yet, and confirmed
 	// by hand that Docker's restart policy does NOT recover from that

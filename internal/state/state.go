@@ -162,8 +162,22 @@ func Prepare() (string, error) {
 		return "", err
 	}
 
+	// 0700, not 0755: versola-tools writes secret candidate material
+	// straight into this directory (*.generated-secrets.env -- see
+	// resolveServiceSecrets in deploy/secrets.go), sometimes owned by
+	// root rather than this process (the tools container runs without
+	// --user, so on Linux its writes land as whatever user the image
+	// runs as). chmod'ing those individual files after the fact only
+	// works when this process actually owns them, which it may not --
+	// restricting the directory itself sidesteps that entirely: Linux
+	// gates access to a file by whether the *directory* grants
+	// read+execute, not by the file's own owner or mode, so nothing
+	// outside this process (and root, which bypasses permission checks
+	// entirely -- exactly what the tools container needs to write here in
+	// the first place) can read anything inside regardless of who ends up
+	// owning any individual file.
 	bundleDir := filepath.Join(dir, fmt.Sprintf("bundle-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+	if err := os.MkdirAll(bundleDir, 0o700); err != nil {
 		return "", fmt.Errorf("couldn't create %s: %w", bundleDir, err)
 	}
 	return bundleDir, nil

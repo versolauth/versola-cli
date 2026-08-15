@@ -20,7 +20,7 @@ var secretsCmd = &cobra.Command{
 }
 
 var secretsLoginCmd = &cobra.Command{
-	Use:   "login <target> <address> <role-id> <secret-id>",
+	Use:   "login <target> <address> <role-id>",
 	Short: "Store this machine's AppRole credentials for a target's OpenBao",
 	Long: `login stores the AppRole credentials whoever administers OpenBao for
 <target> handed you, so later commands (configure, migrate, "secrets
@@ -29,18 +29,28 @@ test") can authenticate without asking again.
 <address> is where OpenBao listens, e.g. http://localhost:8200 for
 local. <role-id> and <secret-id> come from the AppRole your OpenBao
 administrator created — see develop.md's OpenBao section for how
-that's set up.
+that's set up. secret-id is asked for as a separate prompt, not a
+fourth positional argument: it's effectively this AppRole's password,
+and a positional arg would land it in the invoking shell's history and,
+while this command runs, in anything that can read this process's
+argument list (e.g. "ps"). A prompt avoids both.
 
 Credentials are stored per target in ~/.versola/openbao/<target>.json
 (not under ~/.versola/active, which only ever describes the single
 deployment currently configured) — logging into a different target
 later doesn't discard this one's access.`,
-	Args: cobra.ExactArgs(4),
+	Args: cobra.ExactArgs(3),
 	RunE: runSecretsLogin,
 }
 
 func runSecretsLogin(cmd *cobra.Command, args []string) error {
-	target, address, roleID, secretID := args[0], args[1], args[2], args[3]
+	target, address, roleID := args[0], args[1], args[2]
+
+	fmt.Print("Secret ID: ")
+	secretID := readLine()
+	if secretID == "" {
+		return fmt.Errorf("secret ID is required")
+	}
 
 	creds := &openbao.Credentials{
 		Address:  address,

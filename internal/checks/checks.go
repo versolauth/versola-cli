@@ -107,10 +107,8 @@ func ComposePlugin() Result {
 func PortFree(port int, ownContainer string) Result {
 	name := fmt.Sprintf("Port %d free", port)
 
-	if owner, used := dockerPortInUse(port); used {
-		if owner == ownContainer {
-			return Result{Name: name, OK: true}
-		}
+	owner, used := dockerPortInUse(port)
+	if used && owner != ownContainer {
 		return Result{
 			Name:   name,
 			OK:     false,
@@ -118,8 +116,33 @@ func PortFree(port int, ownContainer string) Result {
 		}
 	}
 
+	// Still attempt the raw bind even when Docker's own bookkeeping says
+	// our own container holds this port (used && owner == ownContainer):
+	// on Docker Desktop's WSL2 backend, a backend restart can leave
+	// `docker ps` still reporting a container's port as published while
+	// the WSL2-side forwarding process behind it has actually died — the
+	// OS-level port is genuinely free again at that point, and another
+	// host process can grab it before Docker gets a chance to restore the
+	// forward on the next compose up/restart. Trusting Docker's
+	// bookkeeping alone here would report this port free right up until
+	// that restore then fails.
+	//
+	// Running this check is safe to interpret in the used-by-us case
+	// specifically because of what's already established in this
+	// function's own doc comment above: a live WSL2 forward normally lets
+	// a plain net.Listen from the host succeed anyway. So a bind failure
+	// here, even though Docker says our own container holds the port,
+	// means something other than our own forwarding is actually squatting
+	// on it — a real conflict, not a false alarm from our own container.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
+		if used {
+			return Result{
+				Name:   name,
+				OK:     false,
+				Detail: fmt.Sprintf("already in use — Docker still reports %q as the owner, but something else is holding the port at the OS level (possibly stale after a Docker Desktop/WSL2 restart)", ownContainer),
+			}
+		}
 		return Result{Name: name, OK: false, Detail: "already in use"}
 	}
 	_ = ln.Close()

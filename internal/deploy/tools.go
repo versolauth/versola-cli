@@ -31,6 +31,20 @@ func isManifestUnknown(err error) bool {
 	return errors.As(err, &m)
 }
 
+// toolsTarget maps this CLI's target names to the TARGET value
+// versola-tools' entrypoint.sh expects (see its own comment on TARGET) --
+// the two aren't spelled the same because "docker-local" is a fact about
+// how the local stack runs (bridge-network Docker containers) that
+// predates "local" vs "vps" existing as CLI target names at all, and
+// renaming gen-env.scala's branch to match now would just be churn for
+// no benefit.
+func toolsTarget(target string) string {
+	if target == "vps" {
+		return "vps"
+	}
+	return "docker-local"
+}
+
 // pullAndRunTools runs the versola-tools image the same way docker.Run
 // does (stdout/stderr still streamed live to the user), but also tees
 // stderr into a buffer so it can be inspected afterward -- specifically
@@ -38,7 +52,7 @@ func isManifestUnknown(err error) bool {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image string) error {
+func pullAndRunTools(dir, image, target string) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -56,7 +70,13 @@ func pullAndRunTools(dir, image string) error {
 	// a working, if slower, emulated container. Being explicit here makes
 	// configure work the same way on arm64 as on amd64, without requiring
 	// DOCKER_DEFAULT_PLATFORM to be set in the environment first.
-	c := docker.Cmd("run", "--rm", "--platform", "linux/amd64", "-v", dir+":/out", image)
+	//
+	// -e TARGET=...: tells entrypoint.sh which of gen-env.scala's
+	// non-interactive branches to generate and which compose fragment to
+	// emit (see its own comment on TARGET) -- without this it always
+	// defaults to docker-local, which was fine back when "local" was the
+	// only target this CLI supported at all.
+	c := docker.Cmd("run", "--rm", "--platform", "linux/amd64", "-e", "TARGET="+toolsTarget(target), "-v", dir+":/out", image)
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := c.Run(); err != nil {

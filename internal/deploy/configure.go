@@ -36,22 +36,28 @@ import (
 // Nothing is running when this returns, on purpose. Configure describes a
 // deployment; the steps after it act on that description.
 func Configure(target, version string) (string, error) {
-	if target != "local" {
-		return "", fmt.Errorf(`unsupported target %q — only "local" is supported today`, target)
+	if target != "local" && target != "vps" {
+		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
 
 	fmt.Println("Checking prerequisites...")
-	for _, r := range []checks.Result{
+	checksToRun := []checks.Result{
 		checks.DockerDaemon(),
 		checks.ComposePlugin(),
-		// The port numbers here are local-deployment facts, and they're
-		// still hardcoded in this CLI rather than coming from the bundle
-		// versola-tools generates. That's a known gap, not a decision:
-		// see the note on readiness URLs in up.go.
-		checks.PortFree(2821),
 		checks.DockerMemory(),
 		checks.DiskSpace(),
-	} {
+	}
+	// Port 2821 is nginx's — local-only, checked here for the same reason
+	// as the readiness URLs in up.go (a local-deployment fact still
+	// hardcoded in this CLI rather than coming from the bundle
+	// versola-tools generates). vps has no nginx service in its compose
+	// file at all (see compose.fragment.vps.yml.template's comment) — the
+	// VPS's real, native nginx already has that port, and that's expected,
+	// not something to fail a prerequisite check over.
+	if target == "local" {
+		checksToRun = append(checksToRun, checks.PortFree(2821))
+	}
+	for _, r := range checksToRun {
 		fmt.Println(r.String())
 		if !r.OK {
 			return "", fmt.Errorf("prerequisite check failed — run `versola doctor` for details")
@@ -65,7 +71,7 @@ func Configure(target, version string) (string, error) {
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version)); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target); err != nil {
 		if isManifestUnknown(err) {
 			return "", fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 

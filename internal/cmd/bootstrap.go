@@ -16,6 +16,12 @@ var bootstrapCmd = &cobra.Command{
 Currently supported:
 
   versola bootstrap local 0.1.1
+  versola bootstrap vps 0.1.1
+
+vps deploys to the one real VPS this is configured for (see deploy.md) —
+it requires OpenBao credentials to already be stored for it first (see
+"versola secrets login vps"), and asks for confirmation before it touches
+the live database.
 
 This CLI doesn't know Versola's own topology (ports, service names,
 config schema) — that lives entirely in the versioned "versola-tools"

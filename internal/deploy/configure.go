@@ -99,9 +99,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// OpenBao section) -- these files sit in the bundle directory for as
 	// long as the one-time setup takes, on a shared machine where "just a
 	// Windows dev box" isn't the threat model.
-	if err := restrictGeneratedSecretsPerms(dir); err != nil {
-		return "", err
-	}
+	restrictGeneratedSecretsPerms(dir)
 
 	// OpenBao has to actually be up before secrets can be resolved against
 	// it — Up (which otherwise starts the whole stack, openbao included)

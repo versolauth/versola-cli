@@ -25,14 +25,26 @@ var secretServices = []string{"auth", "central", "edge"}
 // of these resolveServiceSecrets later resolves successfully, it removes
 // outright; this is what protects the ones still sitting there if that
 // never happens.
-func restrictGeneratedSecretsPerms(dir string) error {
+//
+// Best-effort, not fatal: pullAndRunTools runs the tools container
+// without --user, so on a Linux host these files land owned by whatever
+// user the image runs as (root, with no USER directive in
+// Dockerfile.tools) -- not the CLI's own, unprivileged user. chmod on a
+// file this process doesn't own fails with "operation not permitted"
+// regardless of the directory's own permissions, which the CLI does own
+// (state.Prepare created it). Treating that as fatal would abort every
+// `configure vps` before secret resolution even starts on exactly the
+// machine this matters most for. Deletion doesn't have this problem --
+// removing a file only needs write access to its directory, not
+// ownership of the file itself -- so resolveServiceSecrets' cleanup on
+// the happy path is unaffected either way.
+func restrictGeneratedSecretsPerms(dir string) {
 	for _, service := range secretServices {
 		path := filepath.Join(dir, service+".generated-secrets.env")
 		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("couldn't restrict permissions on %s: %w", path, err)
+			fmt.Printf("  (couldn't restrict permissions on %s: %v)\n", path, err)
 		}
 	}
-	return nil
 }
 
 // resolveSecrets turns each <service>.generated-secrets.env file

@@ -87,6 +87,22 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return "", fmt.Errorf("versola-tools failed: %w", err)
 	}
 
+	// The candidates versola-tools just wrote (*.generated-secrets.env)
+	// can become real, live secret values the first time resolveSecrets
+	// below runs against an empty OpenBao path -- tightened here,
+	// immediately after they're written, rather than only once each is
+	// successfully resolved (resolveServiceSecrets removes each file it
+	// finishes with, but that's no help for whichever ones it never gets
+	// to). That gap matters more than it sounds like it would: the
+	// documented first-ever `configure vps` is EXPECTED to fail right
+	// after this point, before OpenBao is set up at all (see develop.md's
+	// OpenBao section) -- these files sit in the bundle directory for as
+	// long as the one-time setup takes, on a shared machine where "just a
+	// Windows dev box" isn't the threat model.
+	if err := restrictGeneratedSecretsPerms(dir); err != nil {
+		return "", err
+	}
+
 	// OpenBao has to actually be up before secrets can be resolved against
 	// it — Up (which otherwise starts the whole stack, openbao included)
 	// hasn't run yet at this point, so it's started here instead. Starting

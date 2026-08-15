@@ -18,6 +18,23 @@ import (
 // compose.fragment.yml.template.
 var secretServices = []string{"auth", "central", "edge"}
 
+// restrictGeneratedSecretsPerms tightens every *.generated-secrets.env
+// file in dir to 0600, right after versola-tools writes them and before
+// resolveSecrets gets a chance to run (which can fail, or not run at all
+// yet -- see Configure's own comment on why that gap matters). Whichever
+// of these resolveServiceSecrets later resolves successfully, it removes
+// outright; this is what protects the ones still sitting there if that
+// never happens.
+func restrictGeneratedSecretsPerms(dir string) error {
+	for _, service := range secretServices {
+		path := filepath.Join(dir, service+".generated-secrets.env")
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("couldn't restrict permissions on %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // resolveSecrets turns each <service>.generated-secrets.env file
 // versola-tools wrote into dir into a <service>.secrets.env file Compose
 // actually loads into the container -- substituting OpenBao's existing

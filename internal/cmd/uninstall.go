@@ -194,6 +194,27 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")
 	}
 
+	// Independent of everything above: Configure starts versola-openbao
+	// under its fixed container_name *before* anything gets recorded to
+	// state.json (deliberately -- see state.Finalize's comment, and the
+	// develop.md step that expects the very first `configure vps` to fail
+	// once OpenBao is up but before credentials exist). If that run never
+	// reaches a successful Configure, this container ends up running with
+	// no compose.yml or state.json anywhere pointing at it -- deployed
+	// stays false, stopStack above never runs, and this uninstall would
+	// otherwise silently leave it running forever. Only the container is
+	// touched here, never its volume: an orphan like this could belong to
+	// either target, and guessing which one owns the volume is exactly
+	// the kind of decision uninstall shouldn't make on someone's behalf.
+	if dockerUp {
+		if running, err := docker.IsRunning("versola-openbao"); err == nil && running {
+			fmt.Println("Found an OpenBao container not tied to any tracked deployment (likely left over from an incomplete configure) — stopping it...")
+			if err := docker.Run("rm", "-f", "versola-openbao"); err != nil {
+				fmt.Printf("  (couldn't remove versola-openbao: %v)\n", err)
+			}
+		}
+	}
+
 	for _, img := range images {
 		fmt.Printf("Removing image %s...\n", img)
 		if err := docker.Run("rmi", img); err != nil {

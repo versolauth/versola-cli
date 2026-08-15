@@ -117,23 +117,27 @@ func PortFree(port int, ownContainer string) Result {
 	}
 
 	// Still attempt the raw bind even when Docker's own bookkeeping says
-	// our own container holds this port (used && owner == ownContainer):
-	// on Docker Desktop's WSL2 backend, a backend restart can leave
-	// `docker ps` still reporting a container's port as published while
-	// the WSL2-side forwarding process behind it has actually died — the
-	// OS-level port is genuinely free again at that point, and another
-	// host process can grab it before Docker gets a chance to restore the
-	// forward on the next compose up/restart. Trusting Docker's
-	// bookkeeping alone here would report this port free right up until
-	// that restore then fails.
+	// our own container holds this port (used && owner == ownContainer),
+	// but only on Windows: Docker Desktop's WSL2 backend can leave `docker
+	// ps` still reporting a container's port as published after a backend
+	// restart, while the WSL2-side forwarding process behind it has
+	// actually died — the OS-level port is genuinely free again at that
+	// point, and another host process can grab it before Docker restores
+	// the forward on the next compose up/restart.
 	//
-	// Running this check is safe to interpret in the used-by-us case
-	// specifically because of what's already established in this
-	// function's own doc comment above: a live WSL2 forward normally lets
-	// a plain net.Listen from the host succeed anyway. So a bind failure
-	// here, even though Docker says our own container holds the port,
-	// means something other than our own forwarding is actually squatting
-	// on it — a real conflict, not a false alarm from our own container.
+	// This is safe to interpret as "something else must be squatting on
+	// it" specifically on Windows/WSL2, where a live forward normally lets
+	// a plain net.Listen from the host succeed anyway (confirmed by hand).
+	// On native Docker (Linux, and Docker Desktop for Mac's vpnkit, which
+	// doesn't share WSL2's failure mode), Compose's own publish mechanism
+	// routinely DOES hold the actual OS-level port itself for a running
+	// container — every ordinary redeploy of our own, healthy nginx would
+	// then fail this raw bind and get misreported as a conflict, which is
+	// worse than the rare WSL2 case this exists to catch.
+	if used && owner == ownContainer && runtime.GOOS != "windows" {
+		return Result{Name: name, OK: true}
+	}
+
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		if used {

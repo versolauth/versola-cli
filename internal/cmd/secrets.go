@@ -94,7 +94,7 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 	creds, err := openbao.LoadCredentials(target)
 	if err != nil {
 		if errors.Is(err, openbao.ErrNoCredentials) {
-			return fmt.Errorf("no OpenBao credentials stored for %q — run `versola secrets login %s <address> <role-id> <secret-id>` first", target, target)
+			return fmt.Errorf("no OpenBao credentials stored for %q — run `versola secrets login %s <address> <role-id>` first (it prompts for the secret ID separately)", target, target)
 		}
 		return err
 	}

@@ -46,6 +46,15 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Needed below to decide whether it's safe to also remove OpenBao's
+	// data volume (see the comment on that) -- errors here are treated the
+	// same way ComposeFile already treats them internally: no state means
+	// nothing to know a target for, not a reason to fail uninstall itself.
+	var target string
+	if st, loadErr := state.Load(); loadErr == nil {
+		target = st.Target
+	}
+
 	// If the daemon isn't reachable at all, there's nothing "docker compose
 	// down" could stop even if a deployment was recorded -- Docker being
 	// down means nothing is running, full stop. Skip that step instead of
@@ -113,7 +122,11 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("This will remove:")
 	if stopStack {
-		fmt.Println("  - the running Versola stack and its Postgres data volume")
+		if target == "local" {
+			fmt.Println("  - the running Versola stack, its Postgres data volume, and OpenBao's secrets volume")
+		} else {
+			fmt.Println("  - the running Versola stack (OpenBao's secrets volume is left in place — see below)")
+		}
 	} else if deployed {
 		fmt.Println("  - recorded deployment state (Docker isn't reachable, so it can't be confirmed as stopped)")
 	}
@@ -141,6 +154,32 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		fmt.Println("Stopping stack and removing volumes...")
 		if err := docker.Run("compose", "-f", composePath, "down", "--volumes"); err != nil {
 			return fmt.Errorf("docker compose down failed: %w", err)
+		}
+
+		// `down --volumes` only removes volumes Compose itself owns --
+		// versola-openbao-file is declared `external: true` (see
+		// compose.fragment.yml.template's comment on why: so it survives
+		// being reconfigured into a fresh bundle directory), which means
+		// Compose never removes it either, uninstall included. Left alone,
+		// a later fresh install would silently reuse this "uninstalled"
+		// deployment's OpenBao data and every secret already resolved into
+		// it -- surprising for a command whose whole job is a clean slate.
+		//
+		// Only for local: this is the same volume name a vps deployment's
+		// OpenBao uses, and unlike local's throwaway dev secrets, vps's are
+		// the real ones (AppRole credentials, resolved Postgres password,
+		// etc.) -- deleting those should be a deliberate decision someone
+		// makes on purpose, not a side effect of running this general
+		// cleanup command against the wrong target by mistake.
+		if target == "local" {
+			fmt.Println("Removing OpenBao's data volume...")
+			if err := docker.Run("volume", "rm", "versola-openbao-file"); err != nil {
+				// Not fatal -- same reasoning as the image removal loop
+				// below: it might already be gone, or held by something else.
+				fmt.Printf("  (couldn't remove versola-openbao-file: %v)\n", err)
+			}
+		} else if target == "vps" {
+			fmt.Println("Leaving OpenBao's data volume in place (vps target — remove it yourself with `docker volume rm versola-openbao-file` if you really mean to discard it).")
 		}
 	} else if deployed {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")

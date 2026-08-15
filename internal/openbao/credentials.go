@@ -58,7 +58,20 @@ func credentialsDir() (string, error) {
 	return filepath.Join(home, ".versola", "openbao"), nil
 }
 
+// validTargets are the only target names deploy.Configure supports.
+// Enforced here too, not just there: target reaches a filesystem path
+// (credentialsPath, below) directly, and `versola secrets login <target>
+// ...` is a CLI entry point deploy.Configure's own check never sees.
+// Without this, a typo'd or malicious target like "../active/state" would
+// let credentialsPath escape ~/.versola/openbao entirely and overwrite an
+// unrelated file -- state.json, in that example -- instead of writing a
+// credentials file.
+var validTargets = map[string]bool{"local": true, "vps": true}
+
 func credentialsPath(target string) (string, error) {
+	if !validTargets[target] {
+		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported`, target)
+	}
 	dir, err := credentialsDir()
 	if err != nil {
 		return "", err

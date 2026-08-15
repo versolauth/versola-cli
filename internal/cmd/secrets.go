@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/versolauth/versola-cli/internal/openbao"
 )
@@ -46,8 +49,10 @@ later doesn't discard this one's access.`,
 func runSecretsLogin(cmd *cobra.Command, args []string) error {
 	target, address, roleID := args[0], args[1], args[2]
 
-	fmt.Print("Secret ID: ")
-	secretID := readLine()
+	secretID, err := readSecretID()
+	if err != nil {
+		return err
+	}
 	if secretID == "" {
 		return fmt.Errorf("secret ID is required")
 	}
@@ -72,6 +77,30 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Stored OpenBao credentials for %q.\n", target)
 	return nil
+}
+
+// readSecretID prompts for the AppRole secret ID -- this machine's
+// equivalent of a password for whichever OpenBao target it's logging
+// into. Masked (no terminal echo) whenever stdin is a real terminal, so
+// it doesn't end up sitting in scrollback or a session recording the way
+// a plain readLine() would -- the same exposure moving it out of a
+// positional argument already avoided for shell history and "ps".
+//
+// Falls back to a plain, visible read when stdin isn't a terminal (a
+// scripted/CI invocation piping the value in) -- term.ReadPassword
+// requires a real TTY and errors otherwise, and a script feeding this in
+// isn't the case this masking exists for anyway.
+func readSecretID() (string, error) {
+	fmt.Print("Secret ID: ")
+	if !stdinIsInteractive() {
+		return readLine(), nil
+	}
+	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return "", fmt.Errorf("couldn't read secret ID: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 var secretsTestCmd = &cobra.Command{

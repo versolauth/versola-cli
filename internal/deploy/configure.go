@@ -70,7 +70,7 @@ func Configure(target, version string) (string, error) {
 	}
 
 	fmt.Printf("\nPreparing Versola %s...\n", version)
-	dir, err := state.Prepare(target, version)
+	dir, err := state.Prepare()
 	if err != nil {
 		return "", err
 	}
@@ -157,6 +157,15 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	composePath := filepath.Join(dir, "compose.yml")
 	if err := os.Rename(filepath.Join(dir, "compose.fragment.yml"), composePath); err != nil {
 		return "", fmt.Errorf("couldn't finalize compose file: %w", err)
+	}
+
+	// Only now -- everything above has actually succeeded -- does this
+	// deployment become the one status/down/uninstall/up see. See
+	// state.Finalize's own comment for why that ordering matters: it's
+	// what keeps a failed redeploy from costing this machine its record
+	// of whatever deployment was still running before this call started.
+	if err := state.Finalize(target, version, dir); err != nil {
+		return "", fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 
 	return dir, nil

@@ -149,16 +149,17 @@ func Up(opts UpOptions) error {
 		// for the same reason it's hardcoded there.
 		fmt.Printf("\nVersola %s is running at https://id.versola.kz\n", st.Version)
 		// vps doesn't use a fixed literal password the way local's
-		// "Admin1234!" is — it's a real secret Configure resolved against
-		// OpenBao (see gen-env.scala's bootstrapPasswordDefault). Reading
-		// it back out of the resolved secrets file is the only way to
-		// show it, since nothing here ever held it directly.
-		password, err := adminBootstrapPassword(dir)
-		if err != nil {
-			fmt.Printf("Login: admin / (couldn't read the bootstrap password: %v — see auth.secrets.env in %s)\n", err, dir)
-		} else {
-			fmt.Printf("Login: admin / %s\n", password)
-		}
+		// "Admin1234!" is — it's a real, standing admin credential Configure
+		// resolved against OpenBao (see gen-env.scala's
+		// bootstrapPasswordDefault), not a throwaway dev one. Deliberately
+		// NOT echoed to stdout here the way local's fixed password is below:
+		// unlike local, this runs on every redeploy of the same target, not
+		// just the first, and a real production credential printed to a
+		// terminal on every run (often over SSH, sometimes logged or
+		// recorded) is needless repeated exposure for something that's
+		// already sitting in auth.secrets.env for whoever's actually
+		// authorized to read it.
+		fmt.Printf("Login: admin / (see ADMIN_BOOTSTRAP_PASSWORD in %s)\n", filepath.Join(dir, "auth.secrets.env"))
 		// No browser.Open here, unlike local below: this CLI runs on the
 		// VPS itself (typically over SSH), not on the operator's own
 		// desktop -- popping a browser window on the server wouldn't
@@ -197,22 +198,4 @@ func confirmVpsDeploy(version string) error {
 		return fmt.Errorf("aborted")
 	}
 	return nil
-}
-
-// adminBootstrapPassword reads the real admin bootstrap password back out
-// of auth.secrets.env, which Configure's resolveSecrets already resolved
-// against OpenBao (an existing value there wins over a freshly generated
-// one — see gen-env.scala's bootstrapPasswordDefault for why that's safe
-// to do unattended). This is the only place that value exists by the time
-// Up runs; nothing keeps it in memory across the two.
-func adminBootstrapPassword(dir string) (string, error) {
-	values, err := readDotenv(filepath.Join(dir, "auth.secrets.env"))
-	if err != nil {
-		return "", err
-	}
-	password, ok := values["ADMIN_BOOTSTRAP_PASSWORD"]
-	if !ok {
-		return "", fmt.Errorf("ADMIN_BOOTSTRAP_PASSWORD not found in auth.secrets.env")
-	}
-	return password, nil
 }

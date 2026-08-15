@@ -64,14 +64,27 @@ func resolveServiceSecrets(ctx context.Context, client *openbao.Client, dir, tar
 		return fmt.Errorf("couldn't read existing secrets from OpenBao: %w", err)
 	}
 
-	final := make(map[string]string, len(candidates))
+	// Starts as a copy of whatever's already stored, not empty -- the
+	// write below is a full replace (OpenBao's KV v2 "put", not a merge),
+	// so anything already at this path that isn't also touched by the
+	// loop after this has to already be in final or it's gone for good.
+	// Every key this run's candidates file could ever contain currently
+	// also has an entry in existing once seeded by hand (see develop.md's
+	// vps seeding section) or written by a previous run, but that's an
+	// invariant of what gen-env.scala happens to generate today, not
+	// something this function can rely on staying true — starting from
+	// existing instead of from candidates means it doesn't have to.
+	final := make(map[string]string, len(existing)+len(candidates))
+	if found {
+		for key, v := range existing {
+			final[key] = v
+		}
+	}
+
 	wroteAnyNew := false
 	for key, candidate := range candidates {
-		if found {
-			if v, has := existing[key]; has {
-				final[key] = v
-				continue
-			}
+		if _, has := final[key]; has {
+			continue
 		}
 		// Not in OpenBao yet -- this run's freshly generated candidate
 		// becomes the real value from here on.

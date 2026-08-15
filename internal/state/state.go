@@ -133,51 +133,98 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".versola", "active"), nil
 }
 
-// Prepare clears out ~/.versola/active (if it exists from a previous
-// deployment), recreates it, and records the deployment about to be
-// configured. It returns the bundle directory, freshly created and empty,
-// ready for versola-tools to write into.
+// Prepare creates a fresh, empty bundle directory under ~/.versola/active
+// for versola-tools to write this deployment's configs and compose file
+// into, and returns its path.
 //
-// Clearing the top-level directory first matters: a previous run's
-// state.json must not linger if this run fails before writing its own —
-// configure should fail loudly instead of a later command reading stale
-// state and misreporting what's actually deployed.
+// Deliberately does NOT touch state.json or any previous deployment's
+// bundle directory -- only Finalize does that, once versola-tools and
+// secret resolution have both actually succeeded (see its own comment).
+// An earlier version of this function cleared the whole ~/.versola/active
+// directory up front instead, on the theory that a previous run's
+// state.json shouldn't linger if this run fails before writing its own.
+// In practice that traded a small problem for a much bigger one: a
+// redeploy that fails partway through (an image pull that times out, an
+// OpenBao that's still sealed, ...) cost this machine its only record of
+// whatever deployment was still actually running -- status/down/uninstall
+// would all report "nothing deployed" against containers that were very
+// much still up, most consequentially on vps, where those containers are
+// serving real traffic.
 //
-// The bundle directory itself, in contrast, is deliberately never reused
-// across calls — see the comment on State.BundleDir for the Docker
-// Desktop bug this sidesteps. Its name only has to be unique on this
-// machine, not globally, so a nanosecond timestamp is enough; this CLI
-// never runs two configure calls concurrently against the same
-// deployment.
-func Prepare(target, version string) (string, error) {
+// The bundle directory itself is deliberately never reused across calls —
+// see the comment on State.BundleDir for the Docker Desktop bug this
+// sidesteps. Its name only has to be unique on this machine, not
+// globally, so a nanosecond timestamp is enough; this CLI never runs two
+// configure calls concurrently against the same deployment.
+func Prepare() (string, error) {
 	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return "", fmt.Errorf("couldn't clear %s: %w", dir, err)
+
+	bundleDir := filepath.Join(dir, fmt.Sprintf("bundle-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		return "", fmt.Errorf("couldn't create %s: %w", bundleDir, err)
 	}
+	return bundleDir, nil
+}
+
+// Finalize makes the deployment Prepare just built (at bundleDir) the
+// active one: it writes state.json describing it, then -- only once that
+// succeeds -- removes whatever the previous deployment's bundle directory
+// was, if any.
+//
+// Doing the write first is what actually closes the gap described on
+// Prepare: from the moment this is called, state.json only ever points at
+// a bundle directory that either fully exists (the new one, once Finalize
+// returns) or, if removing the old one happens to fail, still fully
+// existed a moment ago -- never at a bundle directory that's only
+// half-written, and never at nothing.
+//
+// bundleDir is the full path Prepare returned; only its base name ends up
+// stored (see State.BundleDir's own comment on why).
+func Finalize(target, version, bundleDir string) error {
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+
+	// Loaded before state.json is overwritten below, and deliberately
+	// tolerant of any error here (including ErrNotConfigured, the common
+	// first-deployment case) -- there being no previous deployment to
+	// clean up afterward isn't this function's problem to report, just
+	// something to skip.
+	prev, prevErr := Load()
 
 	s := &State{
 		SchemaVersion: SchemaVersion,
 		Target:        target,
 		Version:       version,
 		ConfiguredAt:  time.Now().UTC(),
-		BundleDir:     fmt.Sprintf("bundle-%d", time.Now().UnixNano()),
+		BundleDir:     filepath.Base(bundleDir),
 	}
-
-	bundleDir, err := s.bundlePath()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
-		return "", fmt.Errorf("couldn't create %s: %w", bundleDir, err)
-	}
-
 	if err := s.Save(); err != nil {
-		return "", err
+		return err
 	}
-	return bundleDir, nil
+
+	// prev.BundleDir == "" is the legacy, pre-BundleDir layout (see
+	// loadLegacy) where files sit directly in ~/.versola/active itself,
+	// not a subdirectory of it -- bundlePath() would resolve that to dir
+	// itself, and removing dir here would take the brand new bundle this
+	// call just made active down with it. Nothing to clean up from that
+	// layout anyway (just a stray "version" file), so skip it rather than
+	// special-case it.
+	if prevErr == nil && prev.BundleDir != "" && prev.BundleDir != s.BundleDir {
+		oldBundleDir := filepath.Join(dir, prev.BundleDir)
+		if err := os.RemoveAll(oldBundleDir); err != nil {
+			// Not fatal -- state.json above already points at the new,
+			// complete deployment, so a leftover old bundle directory is
+			// wasted disk, not a correctness problem the way losing track
+			// of state.json would have been.
+			fmt.Printf("(couldn't remove the previous deployment's files at %s: %v — safe to delete by hand)\n", oldBundleDir, err)
+		}
+	}
+	return nil
 }
 
 // Save writes the state record, replacing whatever was there.

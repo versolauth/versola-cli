@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,12 +20,17 @@ var uninstallCmd = &cobra.Command{
 	Short: "Stop the stack and remove its data, images, and local state",
 	Long: `uninstall stops the locally deployed Versola stack (including its
 Postgres data volume), removes the Docker images versola pulled, and
-clears ~/.versola.
+clears ~/.versola/active.
+
+~/.versola/openbao is left untouched -- it holds AppRole credentials for
+every target this machine has logged into (see "versola secrets login"),
+and uninstalling one target's stack shouldn't discard another target's
+access.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's
-actually stopped, ~/.versola is deliberately left in place instead of
-cleared -- deleting it there would destroy the only way to properly stop
-that deployment later, if it turns out to still be running somewhere
+actually stopped, ~/.versola/active is deliberately left in place instead
+of cleared -- deleting it there would destroy the only way to properly
+stop that deployment later, if it turns out to still be running somewhere
 uninstall couldn't reach.
 
 It does NOT remove the versola binary itself or its PATH entry — safely
@@ -44,6 +48,15 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	composePath, deployed, err := state.ComposeFile()
 	if err != nil {
 		return err
+	}
+
+	// Needed below to decide whether it's safe to also remove OpenBao's
+	// data volume (see the comment on that) -- errors here are treated the
+	// same way ComposeFile already treats them internally: no state means
+	// nothing to know a target for, not a reason to fail uninstall itself.
+	var target string
+	if st, loadErr := state.Load(); loadErr == nil {
+		target = st.Target
 	}
 
 	// If the daemon isn't reachable at all, there's nothing "docker compose
@@ -70,21 +83,26 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// state.Dir() returns .../.versola/active -- that's what gets removed
+	// below, NOT its parent .../.versola. .../.versola/openbao also lives
+	// under there, holding AppRole credentials for every target this
+	// machine has ever logged into (see openbao.Credentials' own comment:
+	// configuring local after vps, or back again, must not discard either
+	// target's access) -- deleting the whole parent would wipe every
+	// target's credentials just because the active one is being torn
+	// down, defeating that entirely. Removing only "active" leaves
+	// credentials exactly where "versola secrets login" put them.
 	stateDir, err := state.Dir()
 	if err != nil {
 		return err
 	}
-	// state.Dir() returns .../.versola/active; uninstall clears the whole
-	// .versola directory, not just the active deployment, since nothing
-	// else is meant to live there.
-	versolaDir := filepath.Dir(stateDir)
-	_, statErr := os.Stat(versolaDir)
+	_, statErr := os.Stat(stateDir)
 	if statErr != nil && !os.IsNotExist(statErr) {
 		// Something other than "doesn't exist" -- e.g. a permissions
 		// error -- shouldn't be silently treated as "nothing here to
 		// remove"; that could leave real state behind while uninstall
 		// reports success.
-		return fmt.Errorf("couldn't check %s: %w", versolaDir, statErr)
+		return fmt.Errorf("couldn't check %s: %w", stateDir, statErr)
 	}
 	dirExists := statErr == nil
 
@@ -113,7 +131,11 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("This will remove:")
 	if stopStack {
-		fmt.Println("  - the running Versola stack and its Postgres data volume")
+		if target == "local" {
+			fmt.Println("  - the running Versola stack, its Postgres data volume, and OpenBao's secrets volume")
+		} else {
+			fmt.Println("  - the running Versola stack (OpenBao's secrets volume is left in place — see below)")
+		}
 	} else if deployed {
 		fmt.Println("  - recorded deployment state (Docker isn't reachable, so it can't be confirmed as stopped)")
 	}
@@ -126,9 +148,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	}
 	if dirExists {
 		if keepDirForLaterCleanup {
-			fmt.Printf("  - (keeping %s — Docker isn't reachable, so there's no way to confirm the stack is actually stopped)\n", versolaDir)
+			fmt.Printf("  - (keeping %s — Docker isn't reachable, so there's no way to confirm the stack is actually stopped)\n", stateDir)
 		} else {
-			fmt.Printf("  - %s\n", versolaDir)
+			fmt.Printf("  - %s\n", stateDir)
 		}
 	}
 
@@ -142,8 +164,55 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		if err := docker.Run("compose", "-f", composePath, "down", "--volumes"); err != nil {
 			return fmt.Errorf("docker compose down failed: %w", err)
 		}
+
+		// `down --volumes` only removes volumes Compose itself owns --
+		// versola-openbao-file is declared `external: true` (see
+		// compose.fragment.yml.template's comment on why: so it survives
+		// being reconfigured into a fresh bundle directory), which means
+		// Compose never removes it either, uninstall included. Left alone,
+		// a later fresh install would silently reuse this "uninstalled"
+		// deployment's OpenBao data and every secret already resolved into
+		// it -- surprising for a command whose whole job is a clean slate.
+		//
+		// Only for local: this is the same volume name a vps deployment's
+		// OpenBao uses, and unlike local's throwaway dev secrets, vps's are
+		// the real ones (AppRole credentials, resolved Postgres password,
+		// etc.) -- deleting those should be a deliberate decision someone
+		// makes on purpose, not a side effect of running this general
+		// cleanup command against the wrong target by mistake.
+		if target == "local" {
+			fmt.Println("Removing OpenBao's data volume...")
+			if err := docker.Run("volume", "rm", "versola-openbao-file"); err != nil {
+				// Not fatal -- same reasoning as the image removal loop
+				// below: it might already be gone, or held by something else.
+				fmt.Printf("  (couldn't remove versola-openbao-file: %v)\n", err)
+			}
+		} else if target == "vps" {
+			fmt.Println("Leaving OpenBao's data volume in place (vps target — remove it yourself with `docker volume rm versola-openbao-file` if you really mean to discard it).")
+		}
 	} else if deployed {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")
+	}
+
+	// Independent of everything above: Configure starts versola-openbao
+	// under its fixed container_name *before* anything gets recorded to
+	// state.json (deliberately -- see state.Finalize's comment, and the
+	// develop.md step that expects the very first `configure vps` to fail
+	// once OpenBao is up but before credentials exist). If that run never
+	// reaches a successful Configure, this container ends up running with
+	// no compose.yml or state.json anywhere pointing at it -- deployed
+	// stays false, stopStack above never runs, and this uninstall would
+	// otherwise silently leave it running forever. Only the container is
+	// touched here, never its volume: an orphan like this could belong to
+	// either target, and guessing which one owns the volume is exactly
+	// the kind of decision uninstall shouldn't make on someone's behalf.
+	if dockerUp {
+		if running, err := docker.IsRunning("versola-openbao"); err == nil && running {
+			fmt.Println("Found an OpenBao container not tied to any tracked deployment (likely left over from an incomplete configure) — stopping it...")
+			if err := docker.Run("rm", "-f", "versola-openbao"); err != nil {
+				fmt.Printf("  (couldn't remove versola-openbao: %v)\n", err)
+			}
+		}
 	}
 
 	for _, img := range images {
@@ -157,9 +226,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if dirExists && !keepDirForLaterCleanup {
-		fmt.Printf("Removing %s...\n", versolaDir)
-		if err := os.RemoveAll(versolaDir); err != nil {
-			return fmt.Errorf("couldn't remove %s: %w", versolaDir, err)
+		fmt.Printf("Removing %s...\n", stateDir)
+		if err := os.RemoveAll(stateDir); err != nil {
+			return fmt.Errorf("couldn't remove %s: %w", stateDir, err)
 		}
 	}
 

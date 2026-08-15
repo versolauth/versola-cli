@@ -79,37 +79,77 @@ func ComposePlugin() Result {
 // PortFree checks whether a port is free for Versola's gateway to bind.
 // It checks two independent things, because they can disagree:
 //
-//  1. A raw OS-level bind attempt. Catches non-Docker processes (a local
+//  1. Docker's own published-port bookkeeping, via `docker ps`. Checked
+//     first, and separately from (2) below — confirmed by hand while
+//     testing this command: on Windows with Docker Desktop's WSL2 backend,
+//     a container can hold a published port (docker itself refuses to
+//     reuse it, with "port is already allocated") while a plain
+//     `net.Listen` on that same port from the host still succeeds.
+//     Docker's port forwarding there isn't always a literal OS socket a
+//     bind attempt collides with, so relying on (2) alone produced a
+//     false "free" against a container that was actually running and
+//     holding the port.
+//  2. A raw OS-level bind attempt. Catches non-Docker processes (a local
 //     dev server, IIS, etc.) holding the port.
-//  2. Docker's own published-port bookkeeping, via `docker ps`. This is
-//     necessary in addition to (1) — confirmed by hand while testing this
-//     command: on Windows with Docker Desktop's WSL2 backend, a container
-//     can hold a published port (docker itself refuses to reuse it, with
-//     "port is already allocated") while a plain `net.Listen` on that same
-//     port from the host still succeeds. Docker's port forwarding there
-//     isn't always a literal OS socket a bind attempt collides with, so
-//     relying on (1) alone produced a false "free" against a container
-//     that was actually running and holding the port.
 //
-// A busy port is the most common reason a fresh bootstrap fails on
-// someone's machine — see the port 5432 conflict found during the
-// project's manual test.
-func PortFree(port int) Result {
+// ownContainer names the one Docker container it's fine for this port to
+// already belong to — the compose file's fixed project name (see
+// compose.fragment.yml.template's `name:`) means Up will update or
+// restart that container in place on a second `configure`/`up`, not
+// conflict with it, so finding it here isn't a real problem the way any
+// other owner is. Without this, a redeploy while the previous one was
+// still running would fail this check even though it would have worked
+// fine.
+//
+// A busy port held by something else is the most common reason a fresh
+// bootstrap fails on someone's machine — see the port 5432 conflict found
+// during the project's manual test.
+func PortFree(port int, ownContainer string) Result {
 	name := fmt.Sprintf("Port %d free", port)
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return Result{Name: name, OK: false, Detail: "already in use"}
-	}
-	_ = ln.Close()
-
-	if owner, used := dockerPortInUse(port); used {
+	owner, used := dockerPortInUse(port)
+	if used && owner != ownContainer {
 		return Result{
 			Name:   name,
 			OK:     false,
 			Detail: fmt.Sprintf("already used by Docker container %q", owner),
 		}
 	}
+
+	// Still attempt the raw bind even when Docker's own bookkeeping says
+	// our own container holds this port (used && owner == ownContainer),
+	// but only on Windows: Docker Desktop's WSL2 backend can leave `docker
+	// ps` still reporting a container's port as published after a backend
+	// restart, while the WSL2-side forwarding process behind it has
+	// actually died — the OS-level port is genuinely free again at that
+	// point, and another host process can grab it before Docker restores
+	// the forward on the next compose up/restart.
+	//
+	// This is safe to interpret as "something else must be squatting on
+	// it" specifically on Windows/WSL2, where a live forward normally lets
+	// a plain net.Listen from the host succeed anyway (confirmed by hand).
+	// On native Docker (Linux, and Docker Desktop for Mac's vpnkit, which
+	// doesn't share WSL2's failure mode), Compose's own publish mechanism
+	// routinely DOES hold the actual OS-level port itself for a running
+	// container — every ordinary redeploy of our own, healthy nginx would
+	// then fail this raw bind and get misreported as a conflict, which is
+	// worse than the rare WSL2 case this exists to catch.
+	if used && owner == ownContainer && runtime.GOOS != "windows" {
+		return Result{Name: name, OK: true}
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		if used {
+			return Result{
+				Name:   name,
+				OK:     false,
+				Detail: fmt.Sprintf("already in use — Docker still reports %q as the owner, but something else is holding the port at the OS level (possibly stale after a Docker Desktop/WSL2 restart)", ownContainer),
+			}
+		}
+		return Result{Name: name, OK: false, Detail: "already in use"}
+	}
+	_ = ln.Close()
 
 	return Result{Name: name, OK: true}
 }

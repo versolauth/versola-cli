@@ -16,8 +16,10 @@
 package docker
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // Cmd builds a docker exec.Cmd with stdout already wired to the user's
@@ -37,4 +39,23 @@ func Run(args ...string) error {
 	c := Cmd(args...)
 	c.Stderr = os.Stderr
 	return c.Run()
+}
+
+// IsRunning reports whether a container with this name exists and is
+// currently running. A container that doesn't exist at all is reported as
+// not running rather than as an error — every other place in this CLI
+// that checks for something possibly not being there yet (state.Load,
+// state.ComposeFile) treats "doesn't exist" as a plain negative, not a
+// failure, and callers of this function want the same thing: "is it
+// already up, or do I need to start it" doesn't care which kind of "no"
+// it gets.
+func IsRunning(name string) (bool, error) {
+	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", name).Output()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return false, nil
+		}
+		return false, fmt.Errorf("couldn't check whether %s is running: %w", name, err)
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
 }

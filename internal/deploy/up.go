@@ -84,7 +84,15 @@ func Up(opts UpOptions) error {
 	}
 
 	fmt.Println("Starting auth, edge, and the gateway...")
-	if err := docker.Run("compose", "-f", composePath, "up", "-d"); err != nil {
+	// Named explicitly, not a bare "up -d" ("start everything not already
+	// running under this project") -- openbao is deliberately left out of
+	// that: Configure starts it (or leaves an already-running one alone —
+	// see the comment there) under whatever compose project happened to
+	// start it, which may not be this bundle's. A bare "up -d" here would
+	// see openbao defined in this project's compose file but not part of
+	// this project, and try to create a second container under its fixed
+	// container_name, which Docker refuses.
+	if err := docker.Run("compose", "-f", composePath, "up", "-d", "auth", "edge", "nginx"); err != nil {
 		return fmt.Errorf("couldn't start the rest of the stack: %w", err)
 	}
 

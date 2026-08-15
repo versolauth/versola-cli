@@ -241,8 +241,25 @@ func (s *State) Save() error {
 	}
 	b = append(b, '\n')
 	path := filepath.Join(dir, stateFileName)
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return fmt.Errorf("couldn't write %s: %w", path, err)
+
+	// Written to a temp file and renamed into place rather than a direct
+	// os.WriteFile -- WriteFile truncates the destination before writing
+	// a single byte of the new content, so a failure partway through (a
+	// full disk, most plausibly) would leave state.json empty or
+	// half-written instead of unchanged. That defeats the exact thing
+	// Finalize calls this for: Configure's earlier steps having failed
+	// must never cost this machine its record of whatever deployment was
+	// still running before this call started. Rename is atomic on both
+	// POSIX and Windows (as long as the temp file is on the same volume,
+	// which it is here -- same directory), so this can only ever leave
+	// the OLD state.json in place or the fully-written NEW one, never
+	// something in between.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return fmt.Errorf("couldn't write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("couldn't finalize %s: %w", path, err)
 	}
 	return nil
 }

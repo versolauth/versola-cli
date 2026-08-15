@@ -98,7 +98,28 @@ func resolveServiceSecrets(ctx context.Context, client *openbao.Client, dir, tar
 		}
 	}
 
-	return writeDotenv(filepath.Join(dir, service+".secrets.env"), final)
+	if err := writeDotenv(filepath.Join(dir, service+".secrets.env"), final); err != nil {
+		return err
+	}
+
+	// The generated-secrets.env candidates versola-tools wrote are secret
+	// material too -- a candidate becomes the real, live value the first
+	// time this ever runs against an empty OpenBao path (see the loop
+	// above) -- but unlike *.secrets.env (written 0600 by writeDotenv)
+	// they land in this bundle directory at whatever ordinary permissions
+	// the tools container's own write left them at, readable by any other
+	// local user on a shared machine (most relevant on vps, not a single-
+	// user Windows dev box). Nothing reads this file again after this
+	// point -- only *.secrets.env is referenced by
+	// compose.fragment.yml.template's env_file: entries -- so removing it
+	// outright closes that gap more simply than chmod'ing it consistently
+	// across the platforms this runs on (Windows for docker-local, Linux
+	// for vps).
+	candidatesPath := filepath.Join(dir, service+".generated-secrets.env")
+	if err := os.Remove(candidatesPath); err != nil {
+		return fmt.Errorf("couldn't remove %s: %w", candidatesPath, err)
+	}
+	return nil
 }
 
 func readDotenv(path string) (map[string]string, error) {

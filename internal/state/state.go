@@ -95,6 +95,18 @@ type State struct {
 	// that has never been mounted before doesn't have this problem, so
 	// Prepare below gives every deployment its own directory name instead
 	// of ever reusing one.
+	//
+	// A new directory each run does NOT mean a new Compose *project* each
+	// run, despite Compose's own default of deriving the project name from
+	// the compose file's parent directory -- the generated compose file
+	// sets `name:` explicitly (see compose.fragment.yml.template) for
+	// exactly this reason: every service in it has a fixed container_name,
+	// and Docker refuses to create one under a name that already exists
+	// under a *different* project. Without a fixed name, a second
+	// `configure`/`up` while the previous run's containers were still up
+	// would fail on container-name conflicts instead of updating them in
+	// place, and once BundleDir moves on, nothing would even know the old
+	// containers exist anymore to stop them.
 	BundleDir string `json:"bundleDir,omitempty"`
 }
 

@@ -54,8 +54,13 @@ func Configure(target, version string) (string, error) {
 	// file at all (see compose.fragment.vps.yml.template's comment) — the
 	// VPS's real, native nginx already has that port, and that's expected,
 	// not something to fail a prerequisite check over.
+	//
+	// "versola-nginx" is this deployment's own gateway from a previous
+	// run, if there was one — see PortFree's own comment for why that's
+	// fine, not a real conflict (the compose file's fixed `name:` means Up
+	// updates/restarts it in place rather than clashing with it).
 	if target == "local" {
-		checksToRun = append(checksToRun, checks.PortFree(2821))
+		checksToRun = append(checksToRun, checks.PortFree(2821, "versola-nginx"))
 	}
 	for _, r := range checksToRun {
 		fmt.Println(r.String())

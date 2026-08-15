@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,12 +20,17 @@ var uninstallCmd = &cobra.Command{
 	Short: "Stop the stack and remove its data, images, and local state",
 	Long: `uninstall stops the locally deployed Versola stack (including its
 Postgres data volume), removes the Docker images versola pulled, and
-clears ~/.versola.
+clears ~/.versola/active.
+
+~/.versola/openbao is left untouched -- it holds AppRole credentials for
+every target this machine has logged into (see "versola secrets login"),
+and uninstalling one target's stack shouldn't discard another target's
+access.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's
-actually stopped, ~/.versola is deliberately left in place instead of
-cleared -- deleting it there would destroy the only way to properly stop
-that deployment later, if it turns out to still be running somewhere
+actually stopped, ~/.versola/active is deliberately left in place instead
+of cleared -- deleting it there would destroy the only way to properly
+stop that deployment later, if it turns out to still be running somewhere
 uninstall couldn't reach.
 
 It does NOT remove the versola binary itself or its PATH entry — safely
@@ -79,21 +83,26 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// state.Dir() returns .../.versola/active -- that's what gets removed
+	// below, NOT its parent .../.versola. .../.versola/openbao also lives
+	// under there, holding AppRole credentials for every target this
+	// machine has ever logged into (see openbao.Credentials' own comment:
+	// configuring local after vps, or back again, must not discard either
+	// target's access) -- deleting the whole parent would wipe every
+	// target's credentials just because the active one is being torn
+	// down, defeating that entirely. Removing only "active" leaves
+	// credentials exactly where "versola secrets login" put them.
 	stateDir, err := state.Dir()
 	if err != nil {
 		return err
 	}
-	// state.Dir() returns .../.versola/active; uninstall clears the whole
-	// .versola directory, not just the active deployment, since nothing
-	// else is meant to live there.
-	versolaDir := filepath.Dir(stateDir)
-	_, statErr := os.Stat(versolaDir)
+	_, statErr := os.Stat(stateDir)
 	if statErr != nil && !os.IsNotExist(statErr) {
 		// Something other than "doesn't exist" -- e.g. a permissions
 		// error -- shouldn't be silently treated as "nothing here to
 		// remove"; that could leave real state behind while uninstall
 		// reports success.
-		return fmt.Errorf("couldn't check %s: %w", versolaDir, statErr)
+		return fmt.Errorf("couldn't check %s: %w", stateDir, statErr)
 	}
 	dirExists := statErr == nil
 
@@ -139,9 +148,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	}
 	if dirExists {
 		if keepDirForLaterCleanup {
-			fmt.Printf("  - (keeping %s — Docker isn't reachable, so there's no way to confirm the stack is actually stopped)\n", versolaDir)
+			fmt.Printf("  - (keeping %s — Docker isn't reachable, so there's no way to confirm the stack is actually stopped)\n", stateDir)
 		} else {
-			fmt.Printf("  - %s\n", versolaDir)
+			fmt.Printf("  - %s\n", stateDir)
 		}
 	}
 
@@ -196,9 +205,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if dirExists && !keepDirForLaterCleanup {
-		fmt.Printf("Removing %s...\n", versolaDir)
-		if err := os.RemoveAll(versolaDir); err != nil {
-			return fmt.Errorf("couldn't remove %s: %w", versolaDir, err)
+		fmt.Printf("Removing %s...\n", stateDir)
+		if err := os.RemoveAll(stateDir); err != nil {
+			return fmt.Errorf("couldn't remove %s: %w", stateDir, err)
 		}
 	}
 

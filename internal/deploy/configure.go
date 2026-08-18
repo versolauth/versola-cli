@@ -132,17 +132,21 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 
 	// A previous configure's compose project can still have openbao
-	// running under container_name "versola-openbao" — every service in
-	// compose.fragment.yml.template has a fixed container_name, and Docker
-	// refuses to create a second container under a name that's already
-	// taken, even from an unrelated compose project (a fresh bundle
-	// directory, per state.Prepare, is a fresh project as far as Compose
-	// is concerned). openbao is the one service here it's actually correct
-	// to leave alone if that's the situation: unlike postgres/auth/
-	// central/edge, it doesn't get reconfigured by this run — the whole
-	// point of resolving secrets against it is that it already has the
-	// values from before.
-	running, err := docker.IsRunning("versola-openbao")
+	// running under its container_name (see OpenbaoContainerName) — every
+	// service in compose.fragment.yml.template has a fixed container_name,
+	// and Docker refuses to create a second container under a name that's
+	// already taken, even from an unrelated compose project (a fresh
+	// bundle directory, per state.Prepare, is a fresh project as far as
+	// Compose is concerned). openbao is the one service here it's
+	// actually correct to leave alone if that's the situation: unlike
+	// postgres/auth/central/edge, it doesn't get reconfigured by this run
+	// — the whole point of resolving secrets against it is that it
+	// already has the values from before. That's only true because the
+	// container name is target-specific now, too -- otherwise this could
+	// find the OTHER target's leftover container still running and
+	// "leave it alone" straight into resolving secrets against the wrong
+	// target entirely.
+	running, err := docker.IsRunning(OpenbaoContainerName(target))
 	if err != nil {
 		return "", err
 	}

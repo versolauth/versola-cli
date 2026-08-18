@@ -61,6 +61,26 @@ func OpenbaoVolumeName(target string) string {
 	return "versola-openbao-file-local"
 }
 
+// OpenbaoContainerName returns the target-specific container_name of
+// versola-tools' openbao service (see compose.fragment.yml.template's
+// own comment on why -- same "shared name across targets" risk
+// OpenbaoVolumeName closes for the volume, but for the container this
+// mattered even more directly: Configure treats an already-running
+// versola-openbao as "leave it alone, it already has this target's
+// data" (see its own comment), which is only true if that container
+// could only ever be running for the current target in the first place.
+// Before this existed, switching targets on one machine could find the
+// OTHER target's leftover container still running, leave it alone, and
+// silently resolve secrets against the wrong target's OpenBao entirely
+// -- the freshly created, correctly-named volume from OpenbaoVolumeName
+// never even got mounted (flagged in review on versolauth/versola-cli#7).
+func OpenbaoContainerName(target string) string {
+	if target == "vps" {
+		return "versola-openbao-vps"
+	}
+	return "versola-openbao-local"
+}
+
 // pullAndRunTools runs the versola-tools image the same way docker.Run
 // does (stdout/stderr still streamed live to the user), but also tees
 // stderr into a buffer so it can be inspected afterward -- specifically

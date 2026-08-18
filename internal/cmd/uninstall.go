@@ -199,23 +199,33 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")
 	}
 
-	// Independent of everything above: Configure starts versola-openbao
-	// under its fixed container_name *before* anything gets recorded to
-	// state.json (deliberately -- see state.Finalize's comment, and the
-	// develop.md step that expects the very first `configure vps` to fail
-	// once OpenBao is up but before credentials exist). If that run never
-	// reaches a successful Configure, this container ends up running with
-	// no compose.yml or state.json anywhere pointing at it -- deployed
-	// stays false, stopStack above never runs, and this uninstall would
-	// otherwise silently leave it running forever. Only the container is
-	// touched here, never its volume: an orphan like this could belong to
-	// either target, and guessing which one owns the volume is exactly
-	// the kind of decision uninstall shouldn't make on someone's behalf.
+	// Independent of everything above: Configure starts openbao under its
+	// (target-specific, see deploy.OpenbaoContainerName) container_name
+	// *before* anything gets recorded to state.json (deliberately -- see
+	// state.Finalize's comment, and the develop.md step that expects the
+	// very first `configure vps` to fail once OpenBao is up but before
+	// credentials exist). If that run never reaches a successful
+	// Configure, this container ends up running with no compose.yml or
+	// state.json anywhere pointing at it -- deployed stays false,
+	// stopStack above never runs, and this uninstall would otherwise
+	// silently leave it running forever. Only the container is touched
+	// here, never its volume: an orphan like this could belong to either
+	// target, and guessing which one owns the volume is exactly the kind
+	// of decision uninstall shouldn't make on someone's behalf.
+	//
+	// Checked for both targets' container names, not just one -- there's
+	// no tracked state to say which target this orphan belongs to (that's
+	// the whole reason it's an orphan), and the container name is
+	// target-specific now, so a single fixed name can't catch both cases
+	// the way it used to.
 	if dockerUp {
-		if running, err := docker.IsRunning("versola-openbao"); err == nil && running {
-			fmt.Println("Found an OpenBao container not tied to any tracked deployment (likely left over from an incomplete configure) — stopping it...")
-			if err := docker.Run("rm", "-f", "versola-openbao"); err != nil {
-				fmt.Printf("  (couldn't remove versola-openbao: %v)\n", err)
+		for _, t := range []string{"local", "vps"} {
+			name := deploy.OpenbaoContainerName(t)
+			if running, err := docker.IsRunning(name); err == nil && running {
+				fmt.Printf("Found an OpenBao container not tied to any tracked deployment (%s, likely left over from an incomplete configure) — stopping it...\n", name)
+				if err := docker.Run("rm", "-f", name); err != nil {
+					fmt.Printf("  (couldn't remove %s: %v)\n", name, err)
+				}
 			}
 		}
 	}

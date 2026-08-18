@@ -45,6 +45,22 @@ func toolsTarget(target string) string {
 	return "docker-local"
 }
 
+// OpenbaoVolumeName returns the target-specific name of OpenBao's
+// persistent data volume. Separate per target, not one shared name --
+// `external: true` volumes (see compose.fragment.yml.template's own
+// comment) are identified by name only, host-wide, so a shared name
+// would let a docker-local test run and a real vps deployment collide
+// on the same OpenBao storage if they ever ran under the same Docker
+// daemon (flagged in review on versolauth/versola#176). Exported: both
+// this package (Configure, Up) and cmd/uninstall.go need to agree on
+// exactly the same name.
+func OpenbaoVolumeName(target string) string {
+	if target == "vps" {
+		return "versola-openbao-file-vps"
+	}
+	return "versola-openbao-file-local"
+}
+
 // pullAndRunTools runs the versola-tools image the same way docker.Run
 // does (stdout/stderr still streamed live to the user), but also tees
 // stderr into a buffer so it can be inspected afterward -- specifically

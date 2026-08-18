@@ -54,18 +54,20 @@ func Up(opts UpOptions) error {
 	dir := filepath.Dir(composePath)
 	isVps := st.Target == "vps"
 
-	// vps is the one target where this touches a real, shared database —
-	// central runs migrations against it as a side effect of starting up
-	// (see the comment on state.State.MigratedAt: there's no separate
-	// migrate step yet to stop and review first). Everything before this
-	// point (Configure, OpenBao, secret resolution) is safe to redo; this
-	// is the last point it's still safe to back out of before that
-	// changes.
-	if isVps {
-		if err := confirmVpsDeploy(st.Version); err != nil {
-			return err
-		}
-	}
+	// The vps confirmation used to live here, but Configure's own
+	// Finalize (which overwrites state.json to point at the new
+	// deployment and deletes the previous bundle -- see its comment) runs
+	// to completion before Up is ever called, so by this point that's
+	// already irreversible. Declining here, or Up failing partway,
+	// couldn't actually get anyone back to the old deployment record even
+	// though the old containers might still be the ones really serving
+	// traffic (flagged in review on versolauth/versola-cli#7). Moved to
+	// cmd/bootstrap.go, before Configure runs at all -- see
+	// ConfirmVpsDeploy's own comment. If `configure`/`up` ever become
+	// separate CLI commands (the reason Configure/Up are already split
+	// as functions), this standalone Up will need its own confirmation
+	// again, since nothing then guarantees the same process just showed
+	// one moments ago.
 
 	// The compose file declares this volume `external: true` (see the
 	// comment on it in compose.fragment.yml.template) so OpenBao's storage
@@ -191,13 +193,16 @@ func Up(opts UpOptions) error {
 	return nil
 }
 
-// confirmVpsDeploy asks for an explicit go-ahead before Up touches the
-// real VPS deployment — see the comment on its call site. There's no
-// separate migrate step yet to review before this (see
+// ConfirmVpsDeploy asks for an explicit go-ahead before anything
+// touches a real VPS deployment. Exported and called from
+// cmd/bootstrap.go, before Configure runs at all -- not from here
+// anymore (see the comment on Up's own call site for why: Configure's
+// Finalize is already irreversible by the time Up would otherwise ask).
+// There's no separate migrate step yet to review before this (see
 // state.State.MigratedAt's comment), so this is the only checkpoint
 // before central runs migrations against the live database as a side
 // effect of starting.
-func confirmVpsDeploy(version string) error {
+func ConfirmVpsDeploy(version string) error {
 	fmt.Printf("\nThis will deploy Versola %s to the VPS, including running database migrations against the live database.\n", version)
 	fmt.Print("Continue? [y/N]: ")
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')

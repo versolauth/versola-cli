@@ -75,6 +75,20 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 
+	// Before Configure, not between it and Up -- Configure's own Finalize
+	// commits to this being "the" deployment (overwrites state.json,
+	// deletes the previous bundle) before Up would otherwise ask this,
+	// which made declining, or Up failing partway, unable to actually get
+	// anyone back to the old deployment record even though its containers
+	// might still be what's really serving traffic (flagged in review on
+	// versolauth/versola-cli#7). Asking first means nothing happens at
+	// all if the answer is no.
+	if target == "vps" {
+		if err := deploy.ConfirmVpsDeploy(version); err != nil {
+			return err
+		}
+	}
+
 	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
 		return err
 	}

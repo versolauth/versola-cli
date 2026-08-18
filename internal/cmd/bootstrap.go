@@ -10,6 +10,7 @@ import (
 
 var noBrowser bool
 var authURL string
+var postgresHost string
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -19,17 +20,19 @@ var bootstrapCmd = &cobra.Command{
 Currently supported:
 
   versola bootstrap local 0.1.1
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
 
 vps deploys to a real server — it requires OpenBao credentials to
 already be stored for it first (see "versola secrets login vps"), and
 asks for confirmation before it touches the live database.
 
---auth-url is required for vps: it's the public domain this deployment
-will actually be reachable at (JWT issuer, browser redirects), which is
-specific to whoever's deploying — there's no sensible shared default
-across different servers/clients. local doesn't need it (docker-local's
-own default is fine for a throwaway dev stack).
+--auth-url and --postgres-host are both required for vps: the public
+domain this deployment will actually be reachable at, and the host:port
+its Postgres is reachable on. Both are specific to whoever's deploying
+(a different server, possibly a different Postgres setup entirely) —
+there's no sensible shared default across different servers/clients.
+local doesn't need either (docker-local's own defaults are fine for a
+throwaway dev stack).
 
 This CLI doesn't know Versola's own topology (ports, service names,
 config schema) — that lives entirely in the versioned "versola-tools"
@@ -46,6 +49,7 @@ separately, with a database migration between them. See internal/deploy.`,
 func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
+	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 }
 
 // runBootstrap deploys in one go, which is all this command has ever
@@ -67,8 +71,11 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if target == "vps" && authURL == "" {
 		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
 	}
+	if target == "vps" && postgresHost == "" {
+		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
+	}
 
-	if _, err := deploy.Configure(target, version, authURL); err != nil {
+	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
 		return err
 	}
 	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser})

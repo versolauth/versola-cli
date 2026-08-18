@@ -52,7 +52,7 @@ func toolsTarget(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL string) error {
+func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -101,6 +101,12 @@ func pullAndRunTools(dir, image, target, authURL string) error {
 	// this function is ever called.
 	if target == "vps" {
 		args = append(args, "-e", "AUTH_URL="+authURL)
+	}
+	// -e POSTGRES_HOST=...: same reasoning as AUTH_URL above -- whether
+	// Postgres runs on this box or somewhere else is specific to whoever's
+	// deploying, comes from --postgres-host via Configure.
+	if target == "vps" {
+		args = append(args, "-e", "POSTGRES_HOST="+postgresHost)
 	}
 	args = append(args, "-v", dir+":/out", image)
 	c := docker.Cmd(args...)

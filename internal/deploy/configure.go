@@ -35,12 +35,12 @@ import (
 //
 // Nothing is running when this returns, on purpose. Configure describes a
 // deployment; the steps after it act on that description.
-// authURL is only meaningful (and required, see cmd/bootstrap.go's own
-// check) for target == "vps" -- it's the public domain that deployment
-// will actually be reachable at, which is specific to whoever's
-// deploying, not something this package can default sensibly. Ignored
-// for "local".
-func Configure(target, version, authURL string) (string, error) {
+// authURL and postgresHost are only meaningful (and required, see
+// cmd/bootstrap.go's own check) for target == "vps" -- both describe
+// facts about whichever real server this is deploying to that this
+// package can't default sensibly (a different domain, possibly a
+// different Postgres setup entirely). Ignored for "local".
+func Configure(target, version, authURL, postgresHost string) (string, error) {
 	if target != "local" && target != "vps" {
 		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -50,6 +50,9 @@ func Configure(target, version, authURL string) (string, error) {
 		// public entry point and shouldn't rely on every future caller
 		// remembering to check first.
 		return "", fmt.Errorf("authURL is required for vps deployments")
+	}
+	if target == "vps" && postgresHost == "" {
+		return "", fmt.Errorf("postgresHost is required for vps deployments")
 	}
 
 	fmt.Println("Checking prerequisites...")
@@ -88,7 +91,7 @@ func Configure(target, version, authURL string) (string, error) {
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost); err != nil {
 		if isManifestUnknown(err) {
 			return "", fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 

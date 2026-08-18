@@ -153,6 +153,28 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if running {
 		fmt.Println("OpenBao is already running.")
 	} else {
+		// Both targets' compose fragments bind OpenBao to the same host
+		// port (8200) -- separate container names and volumes (see
+		// OpenbaoContainerName/OpenbaoVolumeName) don't change that, since
+		// that's a fact about the host's own network, not about Compose
+		// projects. If the OTHER target's OpenBao is still running from an
+		// earlier configure, starting this one would fail on Docker's own
+		// "port is already allocated" -- checked here instead, so the
+		// error says what to actually do about it rather than requiring
+		// that to be reverse-engineered from a raw Docker failure
+		// (flagged in review on versolauth/versola-cli#7, alongside the
+		// container-name mixup this same check also guards against).
+		other := "vps"
+		if target == "vps" {
+			other = "local"
+		}
+		otherRunning, err := docker.IsRunning(OpenbaoContainerName(other))
+		if err != nil {
+			return "", err
+		}
+		if otherRunning {
+			return "", fmt.Errorf("%s's OpenBao (%s) is still running and already holds port 8200 on this machine -- stop it first: docker rm -f %s", other, OpenbaoContainerName(other), OpenbaoContainerName(other))
+		}
 		fmt.Println("Starting OpenBao...")
 		if err := docker.Run("compose", "-f", fragmentPath, "up", "-d", "openbao"); err != nil {
 			return "", fmt.Errorf("couldn't start OpenBao: %w", err)

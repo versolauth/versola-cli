@@ -37,6 +37,7 @@ func init() {
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)
 	rootCmd.AddCommand(upgradeCmd)
+	rootCmd.AddCommand(secretsCmd)
 	rootCmd.AddCommand(versionCmd)
 
 	// Make "versola --version" print exactly what "versola version"

@@ -35,7 +35,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	results := []checks.Result{
 		dockerDaemon,
 		checks.ComposePlugin(),
-		checks.PortFree(2821),
+		checks.PortFree(2821, "versola-nginx"),
 		checks.DockerMemory(),
 		checks.DiskSpace(),
 	}

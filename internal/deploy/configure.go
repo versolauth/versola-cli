@@ -35,9 +35,21 @@ import (
 //
 // Nothing is running when this returns, on purpose. Configure describes a
 // deployment; the steps after it act on that description.
-func Configure(target, version string) (string, error) {
+// authURL is only meaningful (and required, see cmd/bootstrap.go's own
+// check) for target == "vps" -- it's the public domain that deployment
+// will actually be reachable at, which is specific to whoever's
+// deploying, not something this package can default sensibly. Ignored
+// for "local".
+func Configure(target, version, authURL string) (string, error) {
 	if target != "local" && target != "vps" {
 		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
+	}
+	if target == "vps" && authURL == "" {
+		// Belt and suspenders -- cmd/bootstrap.go already checks this
+		// before calling Configure, but Configure is this package's own
+		// public entry point and shouldn't rely on every future caller
+		// remembering to check first.
+		return "", fmt.Errorf("authURL is required for vps deployments")
 	}
 
 	fmt.Println("Checking prerequisites...")
@@ -76,7 +88,7 @@ func Configure(target, version string) (string, error) {
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL); err != nil {
 		if isManifestUnknown(err) {
 			return "", fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 

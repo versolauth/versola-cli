@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
 )
 
 var noBrowser bool
+var authURL string
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -16,12 +19,17 @@ var bootstrapCmd = &cobra.Command{
 Currently supported:
 
   versola bootstrap local 0.1.1
-  versola bootstrap vps 0.1.1
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com
 
-vps deploys to the one real VPS this is configured for (see deploy.md) —
-it requires OpenBao credentials to already be stored for it first (see
-"versola secrets login vps"), and asks for confirmation before it touches
-the live database.
+vps deploys to a real server — it requires OpenBao credentials to
+already be stored for it first (see "versola secrets login vps"), and
+asks for confirmation before it touches the live database.
+
+--auth-url is required for vps: it's the public domain this deployment
+will actually be reachable at (JWT issuer, browser redirects), which is
+specific to whoever's deploying — there's no sensible shared default
+across different servers/clients. local doesn't need it (docker-local's
+own default is fine for a throwaway dev stack).
 
 This CLI doesn't know Versola's own topology (ports, service names,
 config schema) — that lives entirely in the versioned "versola-tools"
@@ -37,6 +45,7 @@ separately, with a database migration between them. See internal/deploy.`,
 
 func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
+	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 }
 
 // runBootstrap deploys in one go, which is all this command has ever
@@ -51,7 +60,15 @@ func init() {
 func runBootstrap(cmd *cobra.Command, args []string) error {
 	target, version := args[0], args[1]
 
-	if _, err := deploy.Configure(target, version); err != nil {
+	// Checked here, not left to versola-tools' own entrypoint.sh check --
+	// failing before Configure even starts pulling/running the tools
+	// image gives a faster, clearer error than letting it fail deep
+	// inside a container run.
+	if target == "vps" && authURL == "" {
+		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
+	}
+
+	if _, err := deploy.Configure(target, version, authURL); err != nil {
 		return err
 	}
 	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser})

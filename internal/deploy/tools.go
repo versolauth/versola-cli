@@ -52,7 +52,7 @@ func toolsTarget(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target string) error {
+func pullAndRunTools(dir, image, target, authURL string) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -76,7 +76,34 @@ func pullAndRunTools(dir, image, target string) error {
 	// emit (see its own comment on TARGET) -- without this it always
 	// defaults to docker-local, which was fine back when "local" was the
 	// only target this CLI supported at all.
-	c := docker.Cmd("run", "--rm", "--platform", "linux/amd64", "-e", "TARGET="+toolsTarget(target), "-v", dir+":/out", image)
+	args := []string{"run", "--rm", "--platform", "linux/amd64", "-e", "TARGET=" + toolsTarget(target)}
+	// -e ENV_NAME=...: the literal environment name gen-env.scala writes
+	// into the generated configs -- deliberately not derived from target
+	// (vps isn't itself an environment: the same VPS could run "prod"
+	// today and "qa" tomorrow -- see gen-env.scala's own comment on `env`,
+	// and goshacodes' review on versolauth/versola#176). Only vps needs
+	// this: docker-local's env is always fixed to "docker-local"
+	// regardless. Hardcoded to "prod" here for now, matching the one real
+	// VPS this deploys to today -- this is the one place a future
+	// `--env` flag on `configure vps` would plug in, once there's a
+	// second real target that isn't prod.
+	if target == "vps" {
+		args = append(args, "-e", "ENV_NAME=prod")
+	}
+	// -e AUTH_URL=...: the public domain this deployment is reachable at.
+	// Unlike ENV_NAME above, this has no sensible hardcoded default here
+	// -- it's specific to whoever's deploying (see goshacodes' review on
+	// versolauth/versola#176: "this is our domain, users of cli will have
+	// other domains"), so it comes from the caller (Configure, which got
+	// it from --auth-url) rather than being invented in this package.
+	// versola-tools' own entrypoint.sh fails loudly if this is missing
+	// for vps -- not re-validated here, Configure already does before
+	// this function is ever called.
+	if target == "vps" {
+		args = append(args, "-e", "AUTH_URL="+authURL)
+	}
+	args = append(args, "-v", dir+":/out", image)
+	c := docker.Cmd(args...)
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := c.Run(); err != nil {

@@ -74,7 +74,7 @@ func Up(opts UpOptions) error {
 	// that mounts it until it already exists. `docker volume create` is a
 	// no-op if it's already there, so this is safe to run on every `up`,
 	// not just the first one.
-	if err := docker.Run("volume", "create", "versola-openbao-file"); err != nil {
+	if err := docker.Run("volume", "create", OpenbaoVolumeName(st.Target)); err != nil {
 		return fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
 
@@ -143,11 +143,19 @@ func Up(opts UpOptions) error {
 	}
 
 	if isVps {
-		// id.versola.kz, like the rest of vps's addressing (see
-		// gen-env.scala's vps branch), is a fact about the one real VPS
-		// this deploys to, not a general "vps" concept — hardcoded here
-		// for the same reason it's hardcoded there.
-		fmt.Printf("\nVersola %s is running at https://id.versola.kz\n", st.Version)
+		// st.AuthURL is whatever --auth-url Configure was given (see
+		// state.Finalize) -- not hardcoded here anymore, since that broke
+		// for any deployment other than the one original VPS this used to
+		// assume (flagged in review on versolauth/versola-cli#7). Older
+		// deployments recorded before AuthURL existed will have it empty;
+		// falling back to the compose-generated auth.conf's own issuer
+		// would need reading and parsing that file just for a print
+		// statement, so this just says so plainly instead.
+		authURL := st.AuthURL
+		if authURL == "" {
+			authURL = "(unknown -- reconfigure to record it)"
+		}
+		fmt.Printf("\nVersola %s is running at %s\n", st.Version, authURL)
 		// vps doesn't use a fixed literal password the way local's
 		// "Admin1234!" is — it's a real, standing admin credential Configure
 		// resolved against OpenBao (see gen-env.scala's

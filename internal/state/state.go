@@ -108,6 +108,16 @@ type State struct {
 	// place, and once BundleDir moves on, nothing would even know the old
 	// containers exist anymore to stop them.
 	BundleDir string `json:"bundleDir,omitempty"`
+
+	// AuthURL is the public URL this deployment's auth service is
+	// reachable at -- empty for "local" (docker-local's own URL is fixed,
+	// not user-supplied, see up.go). For "vps" it's whatever --auth-url
+	// was passed to `bootstrap`/`configure`, recorded here so Up can
+	// print the right domain in its completion message instead of a
+	// hardcoded one that's wrong for any deployment other than the
+	// original single VPS this was written for (flagged in review on
+	// versolauth/versola-cli#7).
+	AuthURL string `json:"authUrl,omitempty"`
 }
 
 // bundlePath resolves where this state's compose file and configs
@@ -197,7 +207,7 @@ func Prepare() (string, error) {
 //
 // bundleDir is the full path Prepare returned; only its base name ends up
 // stored (see State.BundleDir's own comment on why).
-func Finalize(target, version, bundleDir string) error {
+func Finalize(target, version, bundleDir, authURL string) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -216,6 +226,7 @@ func Finalize(target, version, bundleDir string) error {
 		Version:       version,
 		ConfiguredAt:  time.Now().UTC(),
 		BundleDir:     filepath.Base(bundleDir),
+		AuthURL:       authURL,
 	}
 	if err := s.Save(); err != nil {
 		return err

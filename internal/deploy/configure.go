@@ -127,7 +127,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// of it, and up.go's own docker volume create call is idempotent, so
 	// doing it again there once Up runs doesn't conflict with this one.
 	fragmentPath := filepath.Join(dir, "compose.fragment.yml")
-	if err := docker.Run("volume", "create", "versola-openbao-file"); err != nil {
+	if err := docker.Run("volume", "create", OpenbaoVolumeName(target)); err != nil {
 		return "", fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
 
@@ -193,7 +193,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// state.Finalize's own comment for why that ordering matters: it's
 	// what keeps a failed redeploy from costing this machine its record
 	// of whatever deployment was still running before this call started.
-	if err := state.Finalize(target, version, dir); err != nil {
+	if err := state.Finalize(target, version, dir, authURL); err != nil {
 		return "", fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

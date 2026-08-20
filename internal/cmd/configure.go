@@ -15,9 +15,10 @@ var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
 	Short: "Prepare a deployment without starting it",
 	Long: `configure checks the machine, generates this release's configs, and
-resolves its secrets against OpenBao. It doesn't start anything and
-doesn't touch the database — see "versola migrate" and "versola up" for
-the steps after this one.
+resolves its secrets against OpenBao (starting OpenBao itself first if
+it isn't already running). It doesn't start any of Versola's own
+services and doesn't touch the database — see "versola migrate" and
+"versola up" for the steps after this one.
 
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
@@ -27,9 +28,9 @@ vps requires OpenBao credentials to already be stored for it (see
 required for vps — see "versola bootstrap --help" for why.
 
 Against a vps deployment this asks for confirmation first: it doesn't
-start or stop anything, but it does replace this machine's record of
-which deployment is the current one, which is what "versola status",
-"down" and "uninstall" all act on.
+start or stop any of Versola's own services, but it does replace this
+machine's record of which deployment is the current one, which is what
+"versola status", "down" and "uninstall" all act on.
 
 This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a

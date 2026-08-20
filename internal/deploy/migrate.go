@@ -85,13 +85,23 @@ func Migrate() error {
 		// migrate interrupted partway (Ctrl+C, a dropped SSH session, the
 		// Docker daemon restarting) leaves it behind, and the next migrate
 		// would then fail on a name conflict that says nothing about what
-		// actually happened or how to clear it. Removing it up front is
-		// safe: this name belongs to nothing but this one-shot step, and
-		// there is never a second migrate running concurrently against the
-		// same deployment. Errors are ignored on purpose -- the overwhelmingly
-		// common case is "no such container", which is not a problem, and a
-		// removal that genuinely fails will resurface as a much clearer error
-		// from the run below.
+		// actually happened or how to clear it.
+		//
+		// Only cleaned up if it's NOT currently running, not unconditionally:
+		// this name is fixed, not scoped to this process, so an unconditional
+		// `docker rm -f` here would just as happily kill a migration another
+		// `versola migrate` (a second terminal, a second SSH session) has in
+		// flight right now, corrupting that migration rather than this one's
+		// leftover. A container that's still running is exactly the case
+		// this must NOT touch -- it's either a real concurrent run or, at
+		// worst, one that's about to fail on the name conflict below with a
+		// clear error, either of which beats silently killing someone else's
+		// migration mid-flight.
+		if running, err := docker.IsRunning(name); err != nil {
+			return fmt.Errorf("couldn't check whether %s is already running: %w", name, err)
+		} else if running {
+			return fmt.Errorf("%s is already running -- another `versola migrate` may be in progress for this deployment; wait for it to finish", name)
+		}
 		_ = docker.RunQuiet("rm", "-f", name)
 
 		if err := docker.Run("compose", "-f", composePath, "run", "--rm", "--no-deps", "-T", "--name", name, "-e", "MIGRATE_ONLY=true", service); err != nil {

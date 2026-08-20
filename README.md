@@ -175,8 +175,9 @@ versola up
 
 - **`configure <target> <version>`** — checks the machine, generates this
   release's config via `versola-tools`, and resolves its secrets against
-  OpenBao. Starts nothing, touches no database. For `vps` it also needs
-  `--auth-url` and `--postgres-host` (see `bootstrap --help`).
+  OpenBao (starting OpenBao itself first if it isn't already running).
+  Starts none of Versola's own services, touches no database. For `vps`
+  it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`).
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container per service that exits when

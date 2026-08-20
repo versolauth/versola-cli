@@ -39,9 +39,11 @@ config schema) — that lives entirely in the versioned "versola-tools"
 image, which this command pulls and runs to generate everything the
 compose stack needs. See the project design doc, section 3.5.
 
-Internally this is two steps — prepare the deployment, then start it —
-which is what a deployment onto a server will need to be able to run
-separately, with a database migration between them. See internal/deploy.`,
+Internally this runs "configure", "migrate", and "up" in order, asking
+for confirmation only once up front on vps rather than once per step.
+Run those separately instead of bootstrap when a deployment (e.g. onto
+a server) needs to stop between them — to review the plan before it
+touches a live database, or to run migrate on its own schedule.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runBootstrap,
 }
@@ -56,11 +58,12 @@ func init() {
 // done and all it should keep doing: it's what the README, the install
 // scripts and everyone's muscle memory point at.
 //
-// The steps it calls are separate functions rather than one, because the
-// server deployment this is being prepared for has to be able to stop
-// between them. Nothing about that is visible here yet — deliberately, so
-// that this rearrangement can be verified by a local deployment behaving
-// exactly as it did before.
+// It calls deploy.Configure/Migrate/Up directly rather than going through
+// the "versola configure"/"versola migrate"/"versola up" commands
+// themselves — those each confirm on their own before touching a vps
+// deployment (see cmd/migrate.go, cmd/up.go), which would mean asking
+// three times here for what's really one decision. This asks once, up
+// front, before Configure runs at all.
 func runBootstrap(cmd *cobra.Command, args []string) error {
 	target, version := args[0], args[1]
 
@@ -84,12 +87,16 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// versolauth/versola-cli#7). Asking first means nothing happens at
 	// all if the answer is no.
 	if target == "vps" {
-		if err := deploy.ConfirmVpsDeploy(version); err != nil {
+		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
+		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
 	}
 
 	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
+		return err
+	}
+	if err := deploy.Migrate(); err != nil {
 		return err
 	}
 	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser})

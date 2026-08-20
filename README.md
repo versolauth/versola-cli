@@ -8,11 +8,12 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
-`doctor`, `bootstrap`, `status`, `down`, `uninstall`, and `version` are all
-implemented and have been tested end-to-end against a real local
-deployment (Postgres + auth + central + edge + the gateway, real browser
-login through to the admin console). Releases are automated (see
-Releasing below) and installed via the one-line scripts below.
+`doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
+`secrets`, `uninstall`, and `version` are all implemented and have been
+tested end-to-end against a real local deployment (Postgres + auth +
+central + edge + the gateway, real browser login through to the admin
+console). Releases are automated (see Releasing below) and installed via
+the one-line scripts below.
 
 `upgrade` is newly added and not yet tested against a real published
 release — try it after the next release goes out, and expect rough edges
@@ -156,6 +157,41 @@ Once auth and edge are ready, this opens the admin console in your
 default browser automatically. Pass `--no-browser` to skip that (e.g.
 running headless over SSH).
 
+Internally this runs `configure`, `migrate`, and `up` back to back —
+see below for when to run those separately instead.
+
+### `configure <target> <version>` / `migrate` / `up`
+
+The same three steps `bootstrap` runs together, available individually
+for when a deployment needs to stop between them — which on a server it
+does, because "change the database schema" should be a decision someone
+makes on purpose rather than a side effect of starting a service.
+
+```
+versola configure local 0.3.0
+versola migrate
+versola up
+```
+
+- **`configure <target> <version>`** — checks the machine, generates this
+  release's config via `versola-tools`, and resolves its secrets against
+  OpenBao. Starts nothing, touches no database. For `vps` it also needs
+  `--auth-url` and `--postgres-host` (see `bootstrap --help`).
+- **`migrate`** — applies each service's own migrations (central, auth
+  and edge each own their schema) against whatever `configure` last
+  prepared, using one throwaway container per service that exits when
+  it's done. No server starts. Records the time in `~/.versola`, which
+  `status` then shows.
+- **`up`** — starts the stack and waits until it's actually serving,
+  not merely started. Assumes `migrate` already ran: services validate
+  their schema at startup and refuse to start against an out-of-date
+  one rather than quietly migrating it themselves.
+
+Run against a `vps` deployment, each of the three asks for confirmation
+first, describing what that particular step is about to do. Migrations
+cannot be rolled back — back the database up before running `migrate`
+against a live one.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
@@ -236,9 +272,10 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, status, down, uninstall, upgrade, version)
-internal/checks/        the actual check logic doctor (and bootstrap) run
-internal/state/         locates ~/.versola/active, the on-disk state bootstrap writes
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, uninstall, upgrade, version)
+internal/checks/        the actual check logic doctor (and configure) run
+internal/deploy/        the deployment steps themselves — configure, migrate, up — which bootstrap chains together
+internal/state/         locates ~/.versola/active, the on-disk state configure writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 install.sh              one-line installer for macOS/Linux

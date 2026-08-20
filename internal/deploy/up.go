@@ -54,20 +54,28 @@ func Up(opts UpOptions) error {
 	dir := filepath.Dir(composePath)
 	isVps := st.Target == "vps"
 
-	// The vps confirmation used to live here, but Configure's own
-	// Finalize (which overwrites state.json to point at the new
-	// deployment and deletes the previous bundle -- see its comment) runs
-	// to completion before Up is ever called, so by this point that's
-	// already irreversible. Declining here, or Up failing partway,
-	// couldn't actually get anyone back to the old deployment record even
-	// though the old containers might still be the ones really serving
-	// traffic (flagged in review on versolauth/versola-cli#7). Moved to
-	// cmd/bootstrap.go, before Configure runs at all -- see
-	// ConfirmVpsDeploy's own comment. If `configure`/`up` ever become
-	// separate CLI commands (the reason Configure/Up are already split
-	// as functions), this standalone Up will need its own confirmation
-	// again, since nothing then guarantees the same process just showed
-	// one moments ago.
+	// A warning, not a hard failure: the services themselves are the real
+	// check (they validate their schema at startup now rather than silently
+	// running against whatever's there -- see RUN_MIGRATIONS in
+	// compose.fragment.yml.template), and this record can legitimately be
+	// absent for a deployment made before it existed. But when it IS absent,
+	// saying so here turns "central won't start and I don't know why" into
+	// one line read before the failure rather than after it.
+	if st.MigratedAt == nil {
+		fmt.Println("\nNote: no migration has been recorded for this deployment — if `versola migrate` hasn't run, the services will refuse to start against an out-of-date schema.")
+	}
+
+	// The vps confirmation doesn't live here: Configure's own Finalize
+	// (which overwrites state.json to point at the new deployment and
+	// deletes the previous bundle -- see its comment) runs to completion
+	// before Up is ever called, so by this point that's already
+	// irreversible -- declining here, or Up failing partway, couldn't
+	// actually get anyone back to the old deployment record even though
+	// the old containers might still be the ones really serving traffic
+	// (flagged in review on versolauth/versola-cli#7). cmd/bootstrap.go
+	// asks once, before Configure runs at all; cmd/up.go asks again on its
+	// own when Up is run standalone (see ConfirmVpsDeploy's own comment on
+	// why one fixed prompt can't cover both callers).
 
 	// The compose file declares this volume `external: true` (see the
 	// comment on it in compose.fragment.yml.template) so OpenBao's storage
@@ -193,17 +201,19 @@ func Up(opts UpOptions) error {
 	return nil
 }
 
-// ConfirmVpsDeploy asks for an explicit go-ahead before anything
-// touches a real VPS deployment. Exported and called from
-// cmd/bootstrap.go, before Configure runs at all -- not from here
-// anymore (see the comment on Up's own call site for why: Configure's
-// Finalize is already irreversible by the time Up would otherwise ask).
-// There's no separate migrate step yet to review before this (see
-// state.State.MigratedAt's comment), so this is the only checkpoint
-// before central runs migrations against the live database as a side
-// effect of starting.
-func ConfirmVpsDeploy(version string) error {
-	fmt.Printf("\nThis will deploy Versola %s to the VPS, including running database migrations against the live database.\n", version)
+// ConfirmVpsDeploy asks for an explicit go-ahead before anything touches
+// a real VPS deployment. action is the already-formatted sentence
+// describing what this particular call is actually about to do --
+// configure/migrate/up are separate commands now (see cmd/configure.go,
+// cmd/migrate.go, cmd/up.go), each with a different real effect on a
+// live deployment, so one fixed message here would be wrong for at least
+// two of the three callers. bootstrap.go calls this once, before
+// Configure runs at all (see its own comment on why not later), covering
+// the whole chain in one prompt; cmd/migrate.go and cmd/up.go each call
+// it again themselves when run standalone, since nothing then guarantees
+// the same process just showed one moments ago.
+func ConfirmVpsDeploy(action string) error {
+	fmt.Printf("\nThis will %s.\n", action)
 	fmt.Print("Continue? [y/N]: ")
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))

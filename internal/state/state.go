@@ -65,17 +65,15 @@ type State struct {
 
 	ConfiguredAt time.Time `json:"configuredAt"`
 
-	// MigratedAt records when the database migrations for this
-	// deployment were last applied, or nil if they haven't been. A
-	// pointer rather than a zero time.Time so "not migrated" is
-	// unambiguous in the JSON (the field is simply absent) instead of
-	// being represented by year 1.
-	//
-	// Nothing sets this yet: migrations currently run inside central's
-	// own startup, so there's no separate step to record. It's here now
-	// because `versola migrate` is what this whole split is for, and
-	// having the field from the start means the first deployment made by
-	// a CLI that does record it isn't a special case.
+	// MigratedAt records when `versola migrate` last ran successfully
+	// against this deployment, or nil if it hasn't yet (e.g. configure
+	// just ran and migrate hasn't, or this state predates the field --
+	// see loadLegacy). A pointer rather than a zero time.Time so "not
+	// migrated" is unambiguous in the JSON (the field is simply absent)
+	// instead of being represented by year 1. Set by deploy.Migrate,
+	// after every service's own migration has actually finished -- not
+	// before, for the same reason Finalize below only commits once its
+	// own work has fully succeeded.
 	MigratedAt *time.Time `json:"migratedAt,omitempty"`
 
 	// BundleDir is the name (not a full path — join it onto Dir()) of the

@@ -41,16 +41,6 @@ func Run(args ...string) error {
 	return c.Run()
 }
 
-// RunQuiet runs docker with both output streams discarded, for the calls
-// whose failure is expected and handled by the caller rather than being
-// something the user needs to see. Removing a container that isn't there is
-// the motivating case (see deploy.Migrate): Docker writes "No such
-// container" to stderr, which looks like something went wrong when it's the
-// normal path.
-func RunQuiet(args ...string) error {
-	return exec.Command("docker", args...).Run()
-}
-
 // IsRunning reports whether a container with this name exists and is
 // currently running. A container that doesn't exist at all is reported as
 // not running rather than as an error — every other place in this CLI

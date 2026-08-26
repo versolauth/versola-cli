@@ -180,9 +180,9 @@ versola up
   it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`).
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
-  prepared, using one throwaway container per service that exits when
-  it's done. No server starts. Records the time in `~/.versola`, which
-  `status` then shows.
+  prepared, using one throwaway container that ships all three services'
+  migrations and exits when done. No server starts. Records the time in
+  `~/.versola`, which `status` then shows.
 - **`up`** — starts the stack and waits until it's actually serving,
   not merely started. Assumes `migrate` already ran: services validate
   their schema at startup and refuse to start against an out-of-date

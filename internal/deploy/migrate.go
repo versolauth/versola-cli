@@ -9,23 +9,28 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// Migrate runs each service's own database migrations against whatever
+// Migrate runs central/auth/edge's own database migrations against whatever
 // Configure most recently prepared, and only that — it doesn't start any
-// server. It reads which deployment to migrate from state, the same way
-// Up does, rather than taking a target argument: there's only ever one
-// active deployment (see state's own package comment), and re-stating
-// its target here would make it possible to ask for one and migrate
-// another.
+// server. It reads which deployment to migrate from state, the same way Up
+// does, rather than taking a target argument: there's only ever one active
+// deployment (see state's own package comment), and re-stating its target
+// here would make it possible to ask for one and migrate another.
 //
-// central, auth, and edge each migrate their own schema independently
-// (their own Postgres connection, their own Flyway history), and each is
-// run with MIGRATE_ONLY=true (see VersolaApp.migrationLayer in the
-// versola repo) rather than by starting the service normally with
-// RUN_MIGRATIONS=true — auth's ordinary startup pulls in
-// OAuthConfigurationService, which makes a blocking call to central at
-// layer-construction time, so a standalone migrate step must not go
-// through that path or it inherits the exact "hangs/OOMs waiting on a
-// service that isn't up yet" failure this split exists to avoid.
+// This runs a single one-off container from the `migrate` service compose
+// itself generated (see compose.fragment.yml.template /
+// compose.fragment.vps.yml.template), which ships all three services'
+// Flyway migrations together (see versola/migrate-tool's MigrateTool) and
+// applies each against its own schema independently — its own Postgres
+// connection, its own Flyway history, in sequence within one process. This
+// used to loop over three separate MIGRATE_ONLY=true invocations of
+// central/auth/edge's own images (one per service), each needing its own
+// container-name collision guard, since a fixed `container_name` on those
+// services would otherwise collide with an already-running instance. The
+// `migrate` service deliberately has no `container_name` at all (see its
+// own comment in the compose templates), so `docker compose run` — which
+// always creates a fresh one-off container regardless — has nothing to
+// collide with in the first place; there's no leftover-container cleanup
+// or concurrent-run guard to reimplement here.
 func Migrate() error {
 	st, err := state.Load()
 	if err != nil {
@@ -43,70 +48,25 @@ func Migrate() error {
 		return fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file) — configure it again")
 	}
 
-	if st.Target == "local" {
-		// docker-local's Postgres is this compose project's own container
-		// (vps's is native — see compose.fragment.vps.yml.template's
-		// comment); central, auth, AND edge connect to it directly for
-		// their own schema, not just central, so it has to be up before any
-		// of them can migrate. It has no published port (see the comment on
-		// its own compose service), so this can't be waited for from the
-		// host the way central/auth/edge's own readiness is — "--wait"
-		// instead asks Compose itself to block on the healthcheck already
-		// defined for it.
-		fmt.Println("Starting Postgres...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "--wait", "postgres"); err != nil {
-			return fmt.Errorf("postgres never became healthy: %w", err)
-		}
-	}
-
-	for _, service := range []string{"central", "auth", "edge"} {
-		fmt.Printf("Migrating %s...\n", service)
-		// --no-deps: without it, compose would start central as a full
-		// server as a side effect of migrating auth/edge (both declare
-		// `depends_on: central` in the compose templates) — exactly the
-		// coupling this whole standalone step exists to avoid (see the
-		// comment above).
-		//
-		// --name, not the service's own fixed container_name that `run`
-		// would otherwise try to reuse: during a redeploy, the PREVIOUS
-		// version's container is still up under that exact name at the
-		// point migrate runs (Up hasn't touched it yet — configure/migrate/
-		// up run in that order), and Docker refuses to create a second
-		// container under a name already in use. A dedicated name for this
-		// one-off container sidesteps that entirely.
-		//
-		// -T: no pseudo-TTY — this never needs interactive input, and
-		// whether stdin is a real terminal isn't always detected the same
-		// way across Docker Desktop and an SSH session (see develop.md's
-		// own -it -> -i fix for the same class of issue).
-		name := fmt.Sprintf("versola-%s-migrate", service)
-
-		// --rm only removes the container when the run finishes normally. A
-		// migrate interrupted partway (Ctrl+C, a dropped SSH session, the
-		// Docker daemon restarting) leaves it behind, and the next migrate
-		// would then fail on a name conflict that says nothing about what
-		// actually happened or how to clear it.
-		//
-		// Only cleaned up if it's NOT currently running, not unconditionally:
-		// this name is fixed, not scoped to this process, so an unconditional
-		// `docker rm -f` here would just as happily kill a migration another
-		// `versola migrate` (a second terminal, a second SSH session) has in
-		// flight right now, corrupting that migration rather than this one's
-		// leftover. A container that's still running is exactly the case
-		// this must NOT touch -- it's either a real concurrent run or, at
-		// worst, one that's about to fail on the name conflict below with a
-		// clear error, either of which beats silently killing someone else's
-		// migration mid-flight.
-		if running, err := docker.IsRunning(name); err != nil {
-			return fmt.Errorf("couldn't check whether %s is already running: %w", name, err)
-		} else if running {
-			return fmt.Errorf("%s is already running -- another `versola migrate` may be in progress for this deployment; wait for it to finish", name)
-		}
-		_ = docker.RunQuiet("rm", "-f", name)
-
-		if err := docker.Run("compose", "-f", composePath, "run", "--rm", "--no-deps", "-T", "--name", name, "-e", "MIGRATE_ONLY=true", service); err != nil {
-			return fmt.Errorf("%s migration failed: %w", service, err)
-		}
+	fmt.Println("Migrating central, auth, and edge...")
+	// -T: no pseudo-TTY — this never needs interactive input, and whether
+	// stdin is a real terminal isn't always detected the same way across
+	// Docker Desktop and an SSH session (see develop.md's own -it -> -i fix
+	// for the same class of issue).
+	//
+	// No --no-deps here, unlike the old per-service loop: docker-local's
+	// `migrate` service declares `depends_on: postgres: condition:
+	// service_healthy` (see compose.fragment.yml.template), and letting
+	// Compose start and wait on that dependency itself is the whole reason
+	// that's declared there instead of this CLI polling for it by hand, the
+	// way the old implementation had to (`docker compose up -d --wait
+	// postgres` before the loop). vps's `migrate` service has no
+	// dependencies to start in the first place (see
+	// compose.fragment.vps.yml.template's own comment — vps's Postgres is a
+	// native install this CLI doesn't manage), so this is a no-op wait
+	// there.
+	if err := docker.Run("compose", "-f", composePath, "run", "--rm", "-T", "migrate"); err != nil {
+		return fmt.Errorf("migrations failed: %w", err)
 	}
 
 	now := time.Now().UTC()

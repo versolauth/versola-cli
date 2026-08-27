@@ -86,11 +86,24 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// might still be what's really serving traffic (flagged in review on
 	// versolauth/versola-cli#7). Asking first means nothing happens at
 	// all if the answer is no.
+	//
+	// Same two-case split as cmd/configure.go's own check (see the long
+	// comment there) -- target == "vps" alone only covers deploying TO a
+	// vps; it doesn't cover "bootstrap local ..." run while the machine's
+	// stored state already tracks a live vps deployment, which Configure's
+	// Finalize would silently orphan (flagged in review). confirmIfVpsState
+	// covers that second case by reading stored state instead of this run's
+	// target; only one of the two branches ever fires, same reasoning as
+	// configure.go.
 	if target == "vps" {
 		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
 		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
+	} else if err := confirmIfVpsState(func(prevVersion string) string {
+		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
+	}); err != nil {
+		return err
 	}
 
 	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {

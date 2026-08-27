@@ -61,20 +61,56 @@ func Migrate() error {
 		}
 	}
 
+	if err := recordMigrated(st.BundleDir); err != nil {
+		return err
+	}
+
+	fmt.Println("Migrations complete.")
+	return nil
+}
+
+// recordMigrated stamps MigratedAt on the active state -- but only if it's
+// still the same deployment (same BundleDir) this run actually migrated.
+//
+// Migrate reads state once, at the top, before the long-running Docker
+// migration itself (anywhere from seconds to however long central/auth/
+// edge's own migrations take). A `configure` for a DIFFERENT deployment can
+// finish and call Finalize in that window (see state.Finalize), which
+// overwrites state.json and deletes this run's own bundle directory out
+// from under it. Saving the stale in-memory `st` this function would
+// otherwise be handed reverts state.json back to the old, now-deleted
+// bundle and version -- clobbering the *other*, now-active deployment's
+// record with this one's stale data, not just losing this run's MigratedAt
+// stamp (flagged in review).
+//
+// Reloading immediately before the write and comparing BundleDir closes
+// that gap: if it still matches, nothing has changed underneath this run
+// and it's safe to stamp. If it doesn't, some other configure has already
+// taken over -- this run's own migration still succeeded against the
+// database it targeted, but there's no longer a state record for it to
+// attach to, so skip the save rather than clobber the new one.
+func recordMigrated(expectedBundleDir string) error {
+	fresh, err := state.Load()
+	if err != nil {
+		return fmt.Errorf("migrations succeeded but couldn't record it: %w", err)
+	}
+	if fresh.BundleDir != expectedBundleDir {
+		fmt.Println("Note: a different deployment was configured while this migration was running -- not recording it against that one.")
+		return nil
+	}
+
 	now := time.Now().UTC()
-	st.MigratedAt = &now
+	fresh.MigratedAt = &now
 	// Stamped explicitly rather than left as whatever Load returned: a
 	// pre-state.json deployment (see state.loadLegacy) comes back with
 	// SchemaVersion 0, and saving that unchanged would write a state.json --
 	// a format that by definition didn't exist then -- still claiming to be
 	// version 0. It's this build writing the file, so it's this build's
 	// layout.
-	st.SchemaVersion = state.SchemaVersion
-	if err := st.Save(); err != nil {
+	fresh.SchemaVersion = state.SchemaVersion
+	if err := fresh.Save(); err != nil {
 		return fmt.Errorf("migrations succeeded but couldn't record it: %w", err)
 	}
-
-	fmt.Println("Migrations complete.")
 	return nil
 }
 

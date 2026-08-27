@@ -70,15 +70,39 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// Configure (flagged in review on versolauth/versola-cli#7) -- running
 	// configure standalone must not be the way around it.
 	//
-	// Keyed off the target argument, not stored state (unlike migrate/up --
-	// see confirmIfVpsState): the deployment being replaced might not be a
-	// vps one, and it's this run's target that decides whether a real server
-	// is involved.
+	// Two separate reasons to confirm here, and either can hold without the
+	// other:
+	//
+	//  1. target == "vps": this run would make a *new* vps deployment the
+	//     one this machine tracks -- the case this used to be the only
+	//     check for.
+	//
+	//  2. the record this run is about to *replace* already targets vps
+	//     (checked via confirmIfVpsState, the same helper migrate/up use,
+	//     which reads stored state rather than this run's target). Finalize
+	//     (see state.Finalize) overwrites state.json and deletes the
+	//     previous bundle unconditionally, regardless of this run's own
+	//     target -- so "configure local ..." against a machine currently
+	//     tracking a live vps deployment silently orphans it: the vps
+	//     containers stay up, but status/down/uninstall can no longer find
+	//     them, with no prompt to stop and reconsider (flagged in review).
+	//     Case 1 alone doesn't cover this: it only fires when the *new*
+	//     target is vps, not when the *replaced* one is.
+	//
+	// Only one of the two ever fires: confirmIfVpsState itself is a no-op
+	// unless stored state targets vps, and target == "vps" here means the
+	// replaced state, if any, is asked about via case 1's own message
+	// instead -- so this is deliberately if/else-if, not two independent
+	// ifs, to avoid a double prompt when both technically apply.
 	if target == "vps" {
 		action := fmt.Sprintf("make Versola %s the deployment this machine tracks for the VPS, replacing its current record (nothing is started or stopped yet)", version)
 		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
+	} else if err := confirmIfVpsState(func(prevVersion string) string {
+		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
+	}); err != nil {
+		return err
 	}
 
 	_, err := deploy.Configure(target, version, configureAuthURL, configurePostgresHost)

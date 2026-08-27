@@ -41,6 +41,25 @@ func Run(args ...string) error {
 	return c.Run()
 }
 
+// Output runs docker and returns its captured stdout, for callers that need
+// to inspect the result programmatically rather than show it to the user
+// (e.g. `compose config --services`). Unlike Run/Cmd above, output is not
+// streamed -- this is for short, structured commands, not anything that
+// takes long enough for a frozen-looking terminal to matter.
+func Output(args ...string) ([]byte, error) {
+	return exec.Command("docker", args...).Output()
+}
+
+// RunQuiet runs docker with both output streams discarded, for the calls
+// whose failure is expected and handled by the caller rather than being
+// something the user needs to see. Removing a container that isn't there is
+// the motivating case (see deploy.Migrate's legacy per-service fallback):
+// Docker writes "No such container" to stderr, which looks like something
+// went wrong when it's the normal path.
+func RunQuiet(args ...string) error {
+	return exec.Command("docker", args...).Run()
+}
+
 // IsRunning reports whether a container with this name exists and is
 // currently running. A container that doesn't exist at all is reported as
 // not running rather than as an error — every other place in this CLI

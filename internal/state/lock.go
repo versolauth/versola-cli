@@ -5,18 +5,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// lockFileName is the advisory lock every state-mutating command (configure,
-// migrate, up, bootstrap) holds for its ENTIRE run -- see Lock's own comment
-// for why "read state, decide, act" needs one at all.
+// lockFileName is the advisory lock every command that reads then acts on
+// ~/.versola/active holds for its ENTIRE run -- see Lock's own comment for
+// why "read state, decide, act" needs one at all.
 const lockFileName = "active.lock"
 
-// lockStaleAfter is how old an unattended lock file has to be before Lock
-// treats it as abandoned rather than genuinely held -- see lockIsStale's own
-// comment on why age, not the recorded PID, is what decides that.
-const lockStaleAfter = 10 * time.Minute
+// lockStaleAfter is how long a lock can go untouched before Lock treats it
+// as abandoned rather than genuinely held. The holder refreshes it every
+// lockHeartbeat for as long as it's alive (see Lock's own comment), so
+// this only ever has to outlast a couple of missed heartbeats -- not the
+// longest real operation this CLI might run, the mistake an earlier
+// version of this made (flagged in review: a flat 10-minute age check
+// treated a confirmation prompt left open, or a slow migration against a
+// large database, the same as an abandoned lock).
+const lockStaleAfter = 30 * time.Second
+
+// lockHeartbeat is how often a held lock's mtime is refreshed.
+const lockHeartbeat = 10 * time.Second
 
 // lockWait is how long Lock retries before giving up and reporting the
 // lock as busy, rather than blocking forever. Long enough that a `versola
@@ -31,20 +40,24 @@ const lockWait = 30 * time.Second
 // immediately.
 //
 // Every command that reads state to decide something and then later acts on
-// what it read needs this, and re-reading state right before acting (see
-// cmd/confirm.go's own comment, deploy.Migrate's recordMigrated) only ever
-// narrows that window, it doesn't close it: there's always one more
-// read-then-write pair further down the same sequence, and the last one is
-// exactly as racy as the first, just harder to actually hit (flagged in
-// review three times over, at three different points in the same
-// configure/migrate/up sequence). Holding one lock for the WHOLE sequence
-// -- from before the first read of state to after the last write to it --
-// is the only way to actually close it: no other `versola` command can
-// observe or change state.json while this one is deciding based on it.
+// what it read needs this: configure (locally overwrites vs. asks for a vps
+// confirmation depending on what's THERE right now), migrate/up (asks once,
+// then acts on the same record), bootstrap (all of the above, back to
+// back), and down/uninstall (read ~/.versola/active, then stop containers
+// or delete it wholesale). Re-reading state right before acting only ever
+// narrows the window between the decision and the act, it never closes it
+// -- there's always one more read-then-write pair further down the same
+// sequence, and the last one is exactly as racy as the first, just harder
+// to actually hit (flagged in review, repeatedly, at different points in
+// the same sequence, and again for down/uninstall not holding this at
+// all). Holding one lock for the WHOLE sequence -- from before the first
+// read of state to after the last write to or removal of it -- is the only
+// way to actually close it: no other `versola` command can observe or
+// change ~/.versola/active while this one is deciding based on it.
 //
 // A plain exclusive-create lock file, not flock/LockFileEx: this only ever
 // needs to keep separate `versola` PROCESSES on the same machine from
-// interleaving against the SAME ~/.versola/active (this CLI never runs two
+// interleaving against the same ~/.versola/active (this CLI never runs two
 // configure calls concurrently against the same deployment BY DESIGN -- see
 // state.Prepare's own comment -- the problem here is a caller that does
 // that anyway, not a supported use case this needs to make fast or
@@ -52,37 +65,40 @@ const lockWait = 30 * time.Second
 // flock would, without a platform-specific implementation or a new
 // dependency.
 func Lock() (unlock func(), err error) {
-	dir, err := Dir()
+	path, err := lockPath()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("couldn't create %s: %w", dir, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("couldn't create %s: %w", filepath.Dir(path), err)
 	}
-	path := filepath.Join(dir, lockFileName)
+
+	// Unique to this specific acquisition (PID alone isn't: a PID can be
+	// reused, and more to the point here, this same process could steal a
+	// stale lock and re-acquire within its own lifetime) -- written into
+	// the file and checked again on release, so this only ever removes the
+	// lock IT created, never a different one that's since taken its place
+	// (see unlock below).
+	token := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	deadline := time.Now().Add(lockWait)
 	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			// Best-effort diagnostic for a human reading the lock file by
-			// hand ("who's PID 12345, is it still running?") -- not read
-			// back by lockIsStale (see its own comment on why age, not
-			// this, is what actually decides staleness), so a failure to
-			// write it isn't worth failing the lock acquisition over.
-			fmt.Fprintf(f, "%d\n", os.Getpid())
+		f, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if createErr == nil {
+			fmt.Fprintln(f, token)
 			_ = f.Close()
-			return func() { _ = os.Remove(path) }, nil
+			break
 		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("couldn't create lock file %s: %w", path, err)
+		if !errors.Is(createErr, os.ErrExist) {
+			return nil, fmt.Errorf("couldn't create lock file %s: %w", path, createErr)
 		}
 
 		if stale, staleErr := lockIsStale(path); staleErr == nil && stale {
-			// The command that held this lock is gone (crashed, killed,
-			// a lost SSH session mid-run) without ever reaching its own
-			// deferred cleanup -- safe to steal: nothing is actually
-			// racing against state.json right now. Removing and
+			// The command that held this lock is gone (crashed, killed, a
+			// lost SSH session mid-run) without ever reaching its own
+			// deferred cleanup, and hasn't refreshed it in over
+			// lockStaleAfter -- safe to steal: nothing is actually racing
+			// against ~/.versola/active right now. Removing and
 			// immediately retrying the O_EXCL create (rather than just
 			// falling through and assuming this iteration now owns it) is
 			// what still keeps this exclusive if two commands both hit a
@@ -97,20 +113,68 @@ func Lock() (unlock func(), err error) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+
+	// Refreshes the lock's mtime for as long as this process holds it, so
+	// lockIsStale tracks "is the holder still alive", not "has it been
+	// running a while" -- a confirmation prompt left open at a y/N, or a
+	// migration against a large production database, can both legitimately
+	// run past any fixed timeout short enough to also reclaim a genuinely
+	// crashed holder promptly (flagged in review).
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(lockHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				_ = os.Chtimes(path, now, now)
+			}
+		}
+	}()
+
+	unlock = func() {
+		close(done)
+		// Only removed if it's still the exact lock this call created --
+		// an earlier version removed unconditionally by path, which meant
+		// a lock this process's own heartbeat failed to keep alive for
+		// some reason (system sleep, a long GC pause, a clock jump) could
+		// already have been stolen by a different `versola` invocation by
+		// the time this runs, and this would then delete THAT invocation's
+		// own live lock out from under it -- two commands interleaving
+		// against the same state with neither aware of the other (flagged
+		// in review).
+		b, readErr := os.ReadFile(path)
+		if readErr == nil && strings.TrimSpace(string(b)) == token {
+			_ = os.Remove(path)
+		}
+	}
+	return unlock, nil
 }
 
-// lockIsStale reports whether the lock file is old enough that whatever
-// held it is presumed gone.
-//
-// Age, not the PID recorded inside it, is what decides this: there's no
-// portable, dependency-free way from here to ask "is PID N still running
-// AND still the same process that wrote this lock" that behaves the same
-// on Windows and Linux/macOS (PID reuse aside, Go's own os.Process.Signal
-// only supports os.Kill on Windows, not the harmless liveness probe POSIX
-// allows via signal 0). A real configure/migrate/up finishes in well under
-// lockStaleAfter even against a slow VPS -- something genuinely wedged for
-// that long (a hung Docker daemon, most plausibly) is itself worth
-// noticing on its own terms, not silently unblocked here.
+// lockPath is ~/.versola/active.lock -- a SIBLING of Dir() (~/.versola/
+// active), not a file inside it. Deliberately: `versola uninstall` removes
+// Dir() wholesale (os.RemoveAll -- see cmd/uninstall.go) as part of what
+// this lock has to protect against running concurrently with anything
+// else, and uninstall itself needs to hold this lock while it does that.
+// A lock file living inside the very directory being deleted would either
+// have to be special-cased out of that removal, or be removed as a side
+// effect of it while still logically "held" until this function's own
+// unlock runs -- keeping it outside Dir() entirely avoids both.
+func lockPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(dir), lockFileName), nil
+}
+
+// lockIsStale reports whether the lock file has gone unrefreshed for
+// longer than lockStaleAfter -- see the comment on that constant, and on
+// Lock's own heartbeat, for why age since the last refresh (not age since
+// creation, and not the PID recorded inside it) is what decides this.
 func lockIsStale(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {

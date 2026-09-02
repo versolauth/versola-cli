@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var upNoBrowser bool
@@ -36,6 +37,18 @@ func init() {
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
+	// Held for the same reason as cmd/configure.go and cmd/migrate.go (see
+	// state.Lock's own comment) -- not because Up itself writes state, but
+	// because a concurrent `configure` finalizing mid-run would delete the
+	// very bundle directory (compose file, configs) this Up is actively
+	// reading from and running `docker compose` against (see
+	// state.Finalize's own comment on removing the previous bundle).
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	st, err := confirmIfVpsState(func(version string) string {
 		return fmt.Sprintf("start Versola %s on the VPS, replacing whatever's currently serving traffic there", version)
 	})

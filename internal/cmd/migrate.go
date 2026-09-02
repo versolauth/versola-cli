@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var migrateCmd = &cobra.Command{
@@ -27,6 +28,17 @@ answering yes.`,
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
+	// Held from before the confirmation read through deploy.Migrate's own
+	// recordMigrated -- see state.Lock's own comment. Without it, a
+	// concurrent `configure` could finalize a different deployment between
+	// this confirmation and deploy.Migrate acting on it (flagged in
+	// review), or between recordMigrated's own read-compare-write.
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	st, err := confirmIfVpsState(func(version string) string {
 		return fmt.Sprintf("apply Versola %s's database migrations to the live VPS database -- they cannot be rolled back, so back it up first", version)
 	})

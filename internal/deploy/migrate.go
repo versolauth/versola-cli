@@ -74,23 +74,31 @@ func Migrate(st *state.State) error {
 // recordMigrated stamps MigratedAt on the active state -- but only if it's
 // still the same deployment (same BundleDir) this run actually migrated.
 //
-// Migrate reads state once, at the top, before the long-running Docker
+// Migrate is handed state once, at the top, before the long-running Docker
 // migration itself (anywhere from seconds to however long central/auth/
-// edge's own migrations take). A `configure` for a DIFFERENT deployment can
-// finish and call Finalize in that window (see state.Finalize), which
-// overwrites state.json and deletes this run's own bundle directory out
-// from under it. Saving the stale in-memory `st` this function would
-// otherwise be handed reverts state.json back to the old, now-deleted
-// bundle and version -- clobbering the *other*, now-active deployment's
-// record with this one's stale data, not just losing this run's MigratedAt
-// stamp (flagged in review).
+// edge's own migrations take). A `configure` for a DIFFERENT deployment
+// finishing and calling Finalize in that window (see state.Finalize) would
+// overwrite state.json and delete this run's own bundle directory out from
+// under it. Saving the stale in-memory `st` this function would otherwise
+// be handed reverts state.json back to the old, now-deleted bundle and
+// version -- clobbering the *other*, now-active deployment's record with
+// this one's stale data, not just losing this run's MigratedAt stamp
+// (flagged in review).
 //
-// Reloading immediately before the write and comparing BundleDir closes
-// that gap: if it still matches, nothing has changed underneath this run
-// and it's safe to stamp. If it doesn't, some other configure has already
-// taken over -- this run's own migration still succeeded against the
-// database it targeted, but there's no longer a state record for it to
-// attach to, so skip the save rather than clobber the new one.
+// Every caller that reaches this today (cmd/migrate.go, cmd/bootstrap.go)
+// holds state.Lock() for its whole run, which already rules out a
+// concurrent `configure` finalizing anything while this function runs --
+// see state.Lock's own comment. This check stays anyway, reloading
+// immediately before the write and comparing BundleDir, as a second,
+// independent guard rather than a reason to trust the lock alone: a lock
+// that's ever bypassed (a stale one removed by hand while the real holder
+// is still running, say) shouldn't also mean a silent state.json
+// corruption is the failure mode. If the comparison still matches, nothing
+// has changed underneath this run and it's safe to stamp. If it doesn't,
+// something else has taken over regardless -- this run's own migration
+// still succeeded against the database it targeted, but there's no longer
+// a state record for it to attach to, so skip the save rather than clobber
+// the new one.
 func recordMigrated(expectedBundleDir string) error {
 	fresh, err := state.Load()
 	if err != nil {

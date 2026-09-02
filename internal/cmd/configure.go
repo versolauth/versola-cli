@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var configureAuthURL string
@@ -59,6 +60,18 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 
+	// Held from here through deploy.Configure's own Finalize -- see
+	// state.Lock's own comment. Without it, the confirmation decision just
+	// below is checking state that a concurrent `configure` could still
+	// change before deploy.Configure gets around to acting on it (flagged
+	// in review): this run might confirm "nothing to replace" and then
+	// silently overwrite a vps deployment that Finalized in the gap.
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Configure looks like the harmless step of the three -- it starts
 	// nothing and touches no database -- but its own Finalize is
 	// irreversible: it overwrites state.json to point at this run's bundle
@@ -109,6 +122,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err := deploy.Configure(target, version, configureAuthURL, configurePostgresHost)
+	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost)
 	return err
 }

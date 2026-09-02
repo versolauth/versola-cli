@@ -79,6 +79,20 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 
+	// Held for the whole configure/migrate/up sequence below -- see
+	// state.Lock's own comment, and cmd/configure.go's/cmd/migrate.go's
+	// identical use of it. Without it, a concurrent `versola configure`
+	// (a second terminal, a second SSH session) could finalize a different
+	// deployment at any point in this sequence -- before the confirmation
+	// decision just below is even acted on, or between Migrate and Up --
+	// and this run would carry on against state.json out from under
+	// itself.
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Before Configure, not between it and Up -- Configure's own Finalize
 	// commits to this being "the" deployment (overwrites state.json,
 	// deletes the previous bundle) before Up would otherwise ask this,
@@ -116,15 +130,13 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 
 	// Loaded once here and passed to both Migrate and Up, rather than
-	// letting each read its own -- same reasoning as cmd/migrate.go's own
-	// comment on confirmIfVpsState: Configure above just Finalized this
+	// letting each read its own -- Configure above just Finalized this
 	// exact deployment, so this is that same record, not a re-derived
-	// guess. Passing it through (instead of each step re-reading
-	// state.json independently) also means Migrate and Up stay pinned to
-	// the one deployment this run confirmed and configured, even if some
-	// other `configure` finalizes a different one while this run's own
-	// migrations are still in progress -- see deploy.Migrate's own comment
-	// on why that's the correct behavior, not a bug to route around.
+	// guess. The lock held for this whole function already rules out
+	// another `configure` finalizing something else mid-sequence (see
+	// above); this just avoids two redundant reads of what's already
+	// known, the same reasoning as cmd/migrate.go's own comment on
+	// confirmIfVpsState.
 	st, err := state.Load()
 	if err != nil {
 		return fmt.Errorf("configure succeeded but couldn't reload its own state: %w", err)

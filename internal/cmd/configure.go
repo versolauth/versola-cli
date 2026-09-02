@@ -99,9 +99,13 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
-	} else if err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil {
+		// The state confirmIfVpsState loaded (if any) describes the record
+		// this run is about to REPLACE, not the deployment Configure below
+		// is about to build -- there is nothing to hand forward here the
+		// way cmd/migrate.go and cmd/up.go do with their own state.
 		return err
 	}
 

@@ -36,10 +36,11 @@ func init() {
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
-	if err := confirmIfVpsState(func(version string) string {
+	st, err := confirmIfVpsState(func(version string) string {
 		return fmt.Sprintf("start Versola %s on the VPS, replacing whatever's currently serving traffic there", version)
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	return deploy.Up(deploy.UpOptions{NoBrowser: upNoBrowser})
+	return deploy.Up(deploy.UpOptions{NoBrowser: upNoBrowser}, st)
 }

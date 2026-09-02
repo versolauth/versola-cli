@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var noBrowser bool
@@ -100,17 +101,37 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
-	} else if err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil {
+		// The state loaded here (if any) describes the record this run is
+		// about to REPLACE, not the deployment Configure below is about to
+		// build -- nothing to hand forward to Migrate/Up the way the state
+		// loaded just below is.
 		return err
 	}
 
 	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
 		return err
 	}
-	if err := deploy.Migrate(); err != nil {
+
+	// Loaded once here and passed to both Migrate and Up, rather than
+	// letting each read its own -- same reasoning as cmd/migrate.go's own
+	// comment on confirmIfVpsState: Configure above just Finalized this
+	// exact deployment, so this is that same record, not a re-derived
+	// guess. Passing it through (instead of each step re-reading
+	// state.json independently) also means Migrate and Up stay pinned to
+	// the one deployment this run confirmed and configured, even if some
+	// other `configure` finalizes a different one while this run's own
+	// migrations are still in progress -- see deploy.Migrate's own comment
+	// on why that's the correct behavior, not a bug to route around.
+	st, err := state.Load()
+	if err != nil {
+		return fmt.Errorf("configure succeeded but couldn't reload its own state: %w", err)
+	}
+
+	if err := deploy.Migrate(st); err != nil {
 		return err
 	}
-	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser})
+	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st)
 }

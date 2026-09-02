@@ -27,10 +27,11 @@ answering yes.`,
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
-	if err := confirmIfVpsState(func(version string) string {
+	st, err := confirmIfVpsState(func(version string) string {
 		return fmt.Sprintf("apply Versola %s's database migrations to the live VPS database -- they cannot be rolled back, so back it up first", version)
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	return deploy.Migrate()
+	return deploy.Migrate(st)
 }

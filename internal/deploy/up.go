@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,23 +24,22 @@ type UpOptions struct {
 	NoBrowser bool
 }
 
-// Up starts the stack that Configure prepared and waits until it's
-// actually serving traffic, not merely started.
+// Up starts the stack described by `st` and waits until it's actually
+// serving traffic, not merely started.
 //
-// It reads what to start from the deployment directory rather than taking
-// a version argument: by this point the version is a property of what's
-// on disk, and re-stating it here would make it possible to ask for one
-// version and get another.
-func Up(opts UpOptions) error {
-	st, err := state.Load()
-	if err != nil {
-		if errors.Is(err, state.ErrNotConfigured) {
-			return fmt.Errorf("nothing has been configured yet — run `versola bootstrap local <version>` first")
-		}
-		return err
+// Takes an already-loaded state rather than reading its own -- same
+// reasoning as deploy.Migrate's own comment: this is normally the
+// deployment a caller (cmd/up.go) just confirmed with the operator, or the
+// one bootstrap.go's own Configure/Migrate just acted on, and re-reading
+// state here instead would leave a window for a concurrent `configure` to
+// finalize a different deployment into the gap (flagged in review). `st ==
+// nil` means the caller found nothing configured (see confirmIfVpsState).
+func Up(opts UpOptions, st *state.State) error {
+	if st == nil {
+		return fmt.Errorf("nothing has been configured yet — run `versola bootstrap local <version>` first")
 	}
 
-	composePath, exists, err := state.ComposeFile()
+	composePath, exists, err := st.ComposeFilePath()
 	if err != nil {
 		return err
 	}

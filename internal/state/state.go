@@ -341,9 +341,11 @@ func loadLegacy(dir string) (*State, error) {
 // and whether it currently exists. It existing is how status/down/
 // uninstall tell whether anything has been deployed yet.
 //
-// The path is resolved through the current state record (see
-// State.BundleDir) rather than assumed to sit directly in Dir(), since a
-// deployment's configs no longer necessarily live at a fixed location.
+// Loads state itself -- fine for callers (status/down/uninstall) that don't
+// otherwise need the state record. A caller that already has one loaded
+// (e.g. to also read st.Target/st.Version, or specifically to avoid a second
+// Load racing against a concurrent Finalize -- see cmd/confirm.go's own
+// comment) should call st.ComposeFilePath() directly instead.
 func ComposeFile() (path string, exists bool, err error) {
 	s, err := Load()
 	if err != nil {
@@ -354,7 +356,17 @@ func ComposeFile() (path string, exists bool, err error) {
 		}
 		return "", false, err
 	}
+	return s.ComposeFilePath()
+}
 
+// ComposeFilePath is ComposeFile's own logic, applied to an already-loaded
+// state record rather than loading its own -- see ComposeFile's comment on
+// when to prefer this.
+//
+// The path is resolved through the state record (see State.BundleDir)
+// rather than assumed to sit directly in Dir(), since a deployment's
+// configs no longer necessarily live at a fixed location.
+func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 	bundleDir, err := s.bundlePath()
 	if err != nil {
 		return "", false, err

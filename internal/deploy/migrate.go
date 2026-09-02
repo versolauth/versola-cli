@@ -1,7 +1,6 @@
 package deploy
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,12 +9,19 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// Migrate runs central/auth/edge's own database migrations against whatever
-// Configure most recently prepared, and only that — it doesn't start any
-// server. It reads which deployment to migrate from state, the same way Up
-// does, rather than taking a target argument: there's only ever one active
-// deployment (see state's own package comment), and re-stating its target
-// here would make it possible to ask for one and migrate another.
+// Migrate runs central/auth/edge's own database migrations against
+// whatever `st` describes, and only that — it doesn't start any server.
+//
+// Takes an already-loaded state rather than reading its own: this is
+// normally the deployment a caller (cmd/migrate.go) just confirmed with the
+// operator, or in bootstrap.go's case, the one Configure just prepared a
+// moment ago -- re-reading state here instead of trusting what the caller
+// already has in hand would leave a window, between that decision and this
+// call, for a concurrent `configure` to finalize a DIFFERENT deployment in
+// and have migrations silently apply to it instead (flagged in review; see
+// cmd/confirm.go's own comment on the same hazard). `st == nil` means the
+// caller found nothing configured (see confirmIfVpsState) -- reported here,
+// not by making every caller check it themselves.
 //
 // Dispatches on whether the generated compose file has a `migrate` service
 // (see hasMigrateService) rather than assuming it does: `bootstrap`/
@@ -28,16 +34,12 @@ import (
 // migrate" failure. migrateViaLegacyContainers below is the exact mechanism
 // this CLI used before the `migrate` service existed, kept alive
 // specifically so those older versions keep working.
-func Migrate() error {
-	st, err := state.Load()
-	if err != nil {
-		if errors.Is(err, state.ErrNotConfigured) {
-			return fmt.Errorf("nothing has been configured yet — run `versola configure <target> <version>` first")
-		}
-		return err
+func Migrate(st *state.State) error {
+	if st == nil {
+		return fmt.Errorf("nothing has been configured yet — run `versola configure <target> <version>` first")
 	}
 
-	composePath, exists, err := state.ComposeFile()
+	composePath, exists, err := st.ComposeFilePath()
 	if err != nil {
 		return err
 	}

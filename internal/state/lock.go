@@ -98,13 +98,35 @@ func Lock() (unlock func(), err error) {
 			// lost SSH session mid-run) without ever reaching its own
 			// deferred cleanup, and hasn't refreshed it in over
 			// lockStaleAfter -- safe to steal: nothing is actually racing
-			// against ~/.versola/active right now. Removing and
-			// immediately retrying the O_EXCL create (rather than just
-			// falling through and assuming this iteration now owns it) is
-			// what still keeps this exclusive if two commands both hit a
-			// stale lock at the same moment -- only one of their retries
-			// wins the create that follows.
-			_ = os.Remove(path)
+			// against ~/.versola/active right now.
+			//
+			// os.Rename to claim it, not os.Remove: if two waiters both
+			// observe the same stale lock at the same moment, a rename of
+			// that exact path only ever succeeds for one of them -- the
+			// loser's Rename fails outright because the source is already
+			// gone. Two unconditional os.Remove calls don't have that
+			// property (both just report success): the loser could remove
+			// the file again after the winner's very next loop iteration
+			// has already recreated it, deleting a brand-new, legitimately
+			// held lock instead of the stale one it thought it was cleaning
+			// up (flagged in review -- exactly this interleaving is what
+			// let two commands both believe they held the lock at once).
+			// The claimed file itself is discarded immediately after --
+			// nothing in it is needed once ownership of the removal is
+			// settled, only the exclusivity of the rename mattered.
+			claimed := path + ".stale-" + token
+			if err := os.Rename(path, claimed); err != nil {
+				// Someone else claimed it first, or the original holder's
+				// own unlock ran and removed it first -- either way, not
+				// this iteration's turn; fall through to the normal
+				// wait-and-retry below instead of assuming ownership.
+				if time.Now().After(deadline) {
+					return nil, fmt.Errorf("another versola command is still running against this deployment (lock file: %s) -- wait for it to finish, or remove the lock file by hand if you're sure nothing is actually running", path)
+				}
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			_ = os.Remove(claimed)
 			continue
 		}
 

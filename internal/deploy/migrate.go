@@ -63,7 +63,7 @@ func Migrate(st *state.State) error {
 		}
 	}
 
-	if err := recordMigrated(st.BundleDir); err != nil {
+	if err := recordMigrated(st); err != nil {
 		return err
 	}
 
@@ -99,12 +99,22 @@ func Migrate(st *state.State) error {
 // still succeeded against the database it targeted, but there's no longer
 // a state record for it to attach to, so skip the save rather than clobber
 // the new one.
-func recordMigrated(expectedBundleDir string) error {
+//
+// Takes the caller's own `st` (not just its BundleDir) so it can stamp
+// MigratedAt onto that same in-memory struct once the save succeeds, not
+// only onto the freshly reloaded copy this function saves to disk.
+// bootstrap.go passes the very same `st` on to Up right after Migrate
+// returns (see its own comment on why it reloads once and reuses it) --
+// without this, Up would still see the pre-migration MigratedAt == nil it
+// read before Migrate ran, and print its "no migration has been recorded"
+// warning after a bootstrap run whose migration had just succeeded
+// (flagged in review).
+func recordMigrated(st *state.State) error {
 	fresh, err := state.Load()
 	if err != nil {
 		return fmt.Errorf("migrations succeeded but couldn't record it: %w", err)
 	}
-	if fresh.BundleDir != expectedBundleDir {
+	if fresh.BundleDir != st.BundleDir {
 		fmt.Println("Note: a different deployment was configured while this migration was running -- not recording it against that one.")
 		return nil
 	}
@@ -121,6 +131,13 @@ func recordMigrated(expectedBundleDir string) error {
 	if err := fresh.Save(); err != nil {
 		return fmt.Errorf("migrations succeeded but couldn't record it: %w", err)
 	}
+	// Propagated onto the caller's own struct only after the save above
+	// succeeds, and only in the branch that matched BundleDir -- st and
+	// fresh are confirmed to describe the same deployment at that point,
+	// so copying just this one field back is safe without also copying
+	// fresh's SchemaVersion or anything else onto a struct the caller may
+	// still use for other fields (AuthURL, Target, ...).
+	st.MigratedAt = fresh.MigratedAt
 	return nil
 }
 

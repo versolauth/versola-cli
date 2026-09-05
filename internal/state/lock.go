@@ -151,6 +151,25 @@ func Lock() (unlock func(), err error) {
 			case <-done:
 				return
 			case <-ticker.C:
+				// Checked before touching mtime, not assumed: if this
+				// process stalled (system sleep, a long GC pause) for
+				// longer than lockStaleAfter between ticks, a different
+				// `versola` command could already have claimed this path
+				// as stale (see the Rename-based claim above) and created
+				// its own lock there under a different token. Refreshing
+				// whoever's file is at `path` now, without checking, would
+				// keep THAT lock alive under THIS process's heartbeat --
+				// exactly the "operates concurrently while the old
+				// heartbeat refreshes the new holder's lock" failure
+				// flagged in review, defeating staleness detection
+				// entirely. Once the token no longer matches, this
+				// process's own lock is already gone; there's nothing left
+				// for it to heartbeat, so it stops rather than keep
+				// polling a file that isn't its own.
+				b, err := os.ReadFile(path)
+				if err != nil || strings.TrimSpace(string(b)) != token {
+					return
+				}
 				now := time.Now()
 				_ = os.Chtimes(path, now, now)
 			}

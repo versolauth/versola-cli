@@ -26,6 +26,17 @@ func init() {
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
+	// Held for this whole run -- see state.Lock's own comment, specifically
+	// its note on down/uninstall: without it, a concurrent `configure`
+	// could finalize a different bundle directory while this is reading
+	// composePath below, or while `docker compose down` is still running
+	// against it (flagged in review).
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	composePath, exists, err := state.ComposeFile()
 	if err != nil {
 		return err

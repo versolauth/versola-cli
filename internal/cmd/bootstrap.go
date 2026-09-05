@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var noBrowser bool
@@ -39,9 +40,11 @@ config schema) — that lives entirely in the versioned "versola-tools"
 image, which this command pulls and runs to generate everything the
 compose stack needs. See the project design doc, section 3.5.
 
-Internally this is two steps — prepare the deployment, then start it —
-which is what a deployment onto a server will need to be able to run
-separately, with a database migration between them. See internal/deploy.`,
+Internally this runs "configure", "migrate", and "up" in order, asking
+for confirmation only once up front on vps rather than once per step.
+Run those separately instead of bootstrap when a deployment (e.g. onto
+a server) needs to stop between them — to review the plan before it
+touches a live database, or to run migrate on its own schedule.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runBootstrap,
 }
@@ -56,11 +59,12 @@ func init() {
 // done and all it should keep doing: it's what the README, the install
 // scripts and everyone's muscle memory point at.
 //
-// The steps it calls are separate functions rather than one, because the
-// server deployment this is being prepared for has to be able to stop
-// between them. Nothing about that is visible here yet — deliberately, so
-// that this rearrangement can be verified by a local deployment behaving
-// exactly as it did before.
+// It calls deploy.Configure/Migrate/Up directly rather than going through
+// the "versola configure"/"versola migrate"/"versola up" commands
+// themselves — those each confirm on their own before touching a vps
+// deployment (see cmd/migrate.go, cmd/up.go), which would mean asking
+// three times here for what's really one decision. This asks once, up
+// front, before Configure runs at all.
 func runBootstrap(cmd *cobra.Command, args []string) error {
 	target, version := args[0], args[1]
 
@@ -75,6 +79,20 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 
+	// Held for the whole configure/migrate/up sequence below -- see
+	// state.Lock's own comment, and cmd/configure.go's/cmd/migrate.go's
+	// identical use of it. Without it, a concurrent `versola configure`
+	// (a second terminal, a second SSH session) could finalize a different
+	// deployment at any point in this sequence -- before the confirmation
+	// decision just below is even acted on, or between Migrate and Up --
+	// and this run would carry on against state.json out from under
+	// itself.
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Before Configure, not between it and Up -- Configure's own Finalize
 	// commits to this being "the" deployment (overwrites state.json,
 	// deletes the previous bundle) before Up would otherwise ask this,
@@ -83,14 +101,49 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// might still be what's really serving traffic (flagged in review on
 	// versolauth/versola-cli#7). Asking first means nothing happens at
 	// all if the answer is no.
+	//
+	// Same two-case split as cmd/configure.go's own check (see the long
+	// comment there) -- target == "vps" alone only covers deploying TO a
+	// vps; it doesn't cover "bootstrap local ..." run while the machine's
+	// stored state already tracks a live vps deployment, which Configure's
+	// Finalize would silently orphan (flagged in review). confirmIfVpsState
+	// covers that second case by reading stored state instead of this run's
+	// target; only one of the two branches ever fires, same reasoning as
+	// configure.go.
 	if target == "vps" {
-		if err := deploy.ConfirmVpsDeploy(version); err != nil {
+		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
+		if err := deploy.ConfirmVpsDeploy(action); err != nil {
 			return err
 		}
+	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
+		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
+	}); err != nil {
+		// The state loaded here (if any) describes the record this run is
+		// about to REPLACE, not the deployment Configure below is about to
+		// build -- nothing to hand forward to Migrate/Up the way the state
+		// loaded just below is.
+		return err
 	}
 
 	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
 		return err
 	}
-	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser})
+
+	// Loaded once here and passed to both Migrate and Up, rather than
+	// letting each read its own -- Configure above just Finalized this
+	// exact deployment, so this is that same record, not a re-derived
+	// guess. The lock held for this whole function already rules out
+	// another `configure` finalizing something else mid-sequence (see
+	// above); this just avoids two redundant reads of what's already
+	// known, the same reasoning as cmd/migrate.go's own comment on
+	// confirmIfVpsState.
+	st, err := state.Load()
+	if err != nil {
+		return fmt.Errorf("configure succeeded but couldn't reload its own state: %w", err)
+	}
+
+	if err := deploy.Migrate(st); err != nil {
+		return err
+	}
+	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st)
 }

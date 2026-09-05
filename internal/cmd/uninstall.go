@@ -46,6 +46,17 @@ func init() {
 }
 
 func runUninstall(cmd *cobra.Command, args []string) error {
+	// Held for this whole run -- see state.Lock's own comment. Without it,
+	// a concurrent `configure`/`up` could be actively reading from or
+	// writing into stateDir while the os.RemoveAll below runs, or could
+	// finalize a fresh deployment into it right after this reads
+	// composePath/target but before it acts on them (flagged in review).
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	composePath, deployed, err := state.ComposeFile()
 	if err != nil {
 		return err

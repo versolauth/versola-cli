@@ -33,6 +33,9 @@ released version of the Versola stack using Docker.`,
 func init() {
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.AddCommand(configureCmd)
+	rootCmd.AddCommand(migrateCmd)
+	rootCmd.AddCommand(upCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)

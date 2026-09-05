@@ -39,7 +39,17 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// and refusing to print any status at all over that would be worse
 	// than printing it without a header.
 	if st, err := state.Load(); err == nil {
-		fmt.Printf("Deployed version: %s (target: %s)\n\n", st.Version, st.Target)
+		fmt.Printf("Deployed version: %s (target: %s)\n", st.Version, st.Target)
+		// Printed rather than kept purely internal: with configure/migrate/up
+		// available separately, "did the migrate step actually run for what's
+		// deployed here" is a real question someone asks when something looks
+		// wrong -- and the only place that answers it.
+		if st.MigratedAt != nil {
+			fmt.Printf("Migrations applied: %s\n", st.MigratedAt.Local().Format("2006-01-02 15:04:05"))
+		} else {
+			fmt.Println("Migrations applied: never (run `versola migrate`)")
+		}
+		fmt.Println()
 	}
 
 	c := exec.Command("docker", "compose", "-f", composePath, "ps")

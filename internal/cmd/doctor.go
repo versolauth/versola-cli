@@ -40,6 +40,17 @@ func init() {
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
+	// Same two values deploy.Configure itself accepts (see its own check) --
+	// validated here too, not left to fall through: DockerMemory/PortFree's
+	// own target branches only ever recognize "vps" explicitly and treat
+	// anything else as "local" by default, so an unrecognized value (a
+	// typo, "staging") would silently run local's checks and print
+	// local's success message while claiming to have checked something
+	// else entirely (flagged in review).
+	if doctorTarget != "local" && doctorTarget != "vps" {
+		return fmt.Errorf(`--target must be "local" or "vps", got %q`, doctorTarget)
+	}
+
 	dockerDaemon := checks.DockerDaemon()
 	results := []checks.Result{
 		dockerDaemon,
@@ -70,7 +81,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	if failed == 0 {
-		fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+		// Target-specific, not hardcoded to local's own command -- a
+		// successful `doctor --target vps` used to print this same local
+		// suggestion regardless, telling someone who just checked a server
+		// to go run a local deployment instead (flagged in review).
+		if doctorTarget == "vps" {
+			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ... --postgres-host ...`.")
+		} else {
+			fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+		}
 		return nil
 	}
 

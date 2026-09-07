@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -195,42 +196,51 @@ func dockerPortInUse(port int) (owner string, used bool) {
 	return "", false
 }
 
-// DockerMemory checks how much memory the Docker daemon reports having.
-// On macOS and Windows (Docker Desktop) this is the memory given to
-// Docker's own VM, not the host's total RAM — which is the number that
-// actually matters there. On native Linux (no Docker Desktop VM in the
-// way — the case for every real "vps" target) it's the host's own
-// physical RAM instead, full stop; there's no separate "Docker memory
-// limit" to raise on failure the way there is on macOS/Windows, only more
-// RAM on the machine itself.
+// DockerMemory checks whether this machine has enough memory for
+// Versola's containers. "local" and "vps" need genuinely different
+// measurements, not just a different minimum against the same number --
+// an earlier version of this tried exactly that (one flat total-RAM
+// minimum, lowered for vps to account for one fewer container) and got it
+// wrong (flagged in review): total physical RAM on a real VPS also has to
+// cover vps's native, non-Docker Postgres (see
+// compose.fragment.vps.yml.template's own comment) and the rest of the
+// host OS, none of which show up as a container to subtract -- a lower
+// TOTAL minimum can pass a box where those already eat most of what
+// "total" reports, which is exactly the failure mode this check exists to
+// catch.
 //
-// The minimum differs by target, via minBytesFor: "local" runs Postgres
-// as a container too (see compose.fragment.yml.template's own postgres
-// service), "vps" doesn't -- its Postgres is a native systemd install
-// this CLI never starts or manages (see compose.fragment.vps.yml.template's
-// top-of-file comment) -- so vps's actual Docker-managed footprint is
-// three JVMs and OpenBao, one fewer real consumer than local's estimate
-// has to leave room for. This isn't just reasoned about in the abstract:
-// a real production VPS with 3.9 GiB total RAM -- running this exact
-// three-JVM stack, PLUS an entirely separate observability stack (five
-// more containers: grafana, alloy, and three victoriametrics services)
-// alongside it -- had run stable for over a week on that budget before
-// this check's old flat 4 GiB floor (unconditionally applied regardless
-// of target) was even noticed as wrong for vps specifically.
+//   - local: `docker info`'s MemTotal is Docker Desktop's own VM
+//     allocation on macOS/Windows -- a budget set aside specifically for
+//     Docker, with nothing else competing for it at that layer. Total is
+//     an accurate proxy for "room these containers will have" there, and
+//     the ~4 GiB minimum (three JVMs + local's own containerized Postgres,
+//     see compose.fragment.yml.template) is unchanged.
+//   - vps: reads /proc/meminfo's MemAvailable instead -- the kernel's own
+//     "how much could a new process actually get right now" estimate,
+//     already netting out whatever native Postgres, the OS, and anything
+//     else already running on the box (this check's own history includes
+//     a real production VPS running a whole separate observability stack
+//     alongside Versola) currently hold. This only works run directly on
+//     the VPS itself, which is also the only place `configure vps` is
+//     ever meant to run (see develop.md) -- skipped, not failed, on any
+//     other OS.
 //
-// Neither compose template sets a per-service `mem_limit` today, so this
-// remains a rough proxy, not a guarantee -- see the discussion that led
-// here for the follow-up that actually belongs (mem_limit per service in
-// compose.fragment.vps.yml.template, in the versola repo, so an
+// Neither compose template sets a per-service `mem_limit` today, so even
+// this remains a proxy, not a guarantee -- the real fix (mem_limit on
+// central/auth/edge in compose.fragment.vps.yml.template, so an
 // unconstrained JVM's -XX:MaxRAMPercentage=75.0 has a real ceiling to
-// work against instead of whatever the whole host happens to report).
-//
-// If the daemon isn't reachable, or its report can't be parsed, this
-// check reports OK rather than failing — DockerDaemon() already reports
-// an unreachable daemon on its own, and this check has nothing reliable
-// to say in that case.
+// work against instead of whatever's currently free) belongs in the
+// versola repo, follow-up.
 func DockerMemory(target string) Result {
+	if target == "vps" {
+		return dockerMemoryAvailableVps()
+	}
+	return dockerMemoryTotalLocal()
+}
+
+func dockerMemoryTotalLocal() Result {
 	const name = "Docker memory"
+	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB: three JVMs + a containerized Postgres, per the project design doc's estimate.
 
 	out, err := run(5*time.Second, "docker", "info", "--format", "{{.MemTotal}}")
 	if err != nil {
@@ -241,28 +251,76 @@ func DockerMemory(target string) Result {
 		return Result{Name: name, OK: true, Detail: "skipped (couldn't read `docker info`)"}
 	}
 
-	minBytes, want := minBytesFor(target)
 	gib := float64(total) / (1024 * 1024 * 1024)
-	minGib := float64(minBytes) / (1024 * 1024 * 1024)
 	if total < minBytes {
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~%.1f GiB for %s (%s); on native Linux this is the machine's own RAM, not a Docker VM limit to raise", gib, minGib, target, want),
+			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); raise Docker Desktop's memory limit", gib),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
 }
 
-// minBytesFor returns DockerMemory's minimum for a given target, and a
-// short human-readable reason -- see DockerMemory's own comment for why
-// this differs between "local" and "vps" (a containerized Postgres or
-// not) instead of being one flat number.
-func minBytesFor(target string) (minBytes int64, reason string) {
-	if target == "vps" {
-		return 3 * 1024 * 1024 * 1024, "three JVMs, no containerized Postgres"
+func dockerMemoryAvailableVps() Result {
+	const name = "Docker memory"
+	// ~1 GiB free right now -- deliberately well under the ~1.8 GiB
+	// MemAvailable this check's own history measured on a real, already
+	// stable production VPS (3.9 GiB total, native Postgres + a separate
+	// observability stack + this exact three-JVM deployment all already
+	// running), leaving margin for smaller boxes without chasing an exact
+	// number nothing here can actually derive precisely (see this
+	// function's own doc comment on why "total" isn't it either).
+	const minAvailableBytes = 1 * 1024 * 1024 * 1024
+
+	if runtime.GOOS != "linux" {
+		return Result{Name: name, OK: true, Detail: "skipped (not running on Linux -- configure vps runs directly on the VPS)"}
 	}
-	return 4 * 1024 * 1024 * 1024, "three JVMs + a containerized Postgres"
+
+	available, err := linuxMemAvailable()
+	if err != nil {
+		return Result{Name: name, OK: true, Detail: "skipped (couldn't read /proc/meminfo)"}
+	}
+
+	gib := float64(available) / (1024 * 1024 * 1024)
+	if available < minAvailableBytes {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~1 GiB free right now (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib),
+		}
+	}
+	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
+}
+
+// linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --
+// the kernel's own estimate of memory available for a new process without
+// swapping, already accounting for reclaimable caches the way a naive
+// "free" total wouldn't. See dockerMemoryAvailableVps's caller for why
+// this, not docker info's MemTotal, is what vps's check needs.
+func linuxMemAvailable() (int64, error) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemAvailable:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("unexpected /proc/meminfo line: %q", line)
+		}
+		// /proc/meminfo reports kiB regardless of the "kB" suffix's own
+		// wording -- this is the kernel's long-standing (mislabeled but
+		// stable) convention, not an actual decimal-kilobyte value.
+		kib, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("couldn't parse MemAvailable: %w", err)
+		}
+		return kib * 1024, nil
+	}
+	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
 }
 
 // DiskSpace checks free disk space at the CLI's current working

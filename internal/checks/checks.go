@@ -308,9 +308,37 @@ func dockerMemoryAvailableVps() Result {
 	// the right measurement this time (available, not total).
 	const minAvailableReplaceBytes = 1 * 1024 * 1024 * 1024
 	const minAvailableFreshBytes = 3 * 1024 * 1024 * 1024
+	// Configure starts versola-openbao-<target> itself whenever it isn't
+	// already running (see deploy.Configure's own "Starting OpenBao..."
+	// step) -- independently of whether central/auth/edge are being
+	// replaced or started fresh. Our own real first-ever `configure vps`
+	// against this exact repo's target VPS is exactly that combination:
+	// all three JVMs already up (the cheap "replace" floor), OpenBao not
+	// running yet at all (flagged in review: the replace floor as written
+	// didn't budget for it). OpenBao is a small Go binary, not a JVM, so
+	// this is a flat, deliberately generous-for-its-size add-on rather
+	// than a third tier of floors -- added whenever it isn't already up,
+	// on top of whichever of the two floors above otherwise applies.
+	const openbaoOverheadBytes = 256 * 1024 * 1024
 
+	// configure vps is only ever meant to run directly on the VPS itself
+	// (see develop.md's "the machine that will run `versola configure
+	// vps`... the VPS itself") -- Configure() itself doesn't enforce that,
+	// though, and Docker's own remote-context support (DOCKER_HOST
+	// pointed at the VPS from a macOS/Windows laptop) would let someone
+	// actually reach that far while this check has no local /proc/meminfo
+	// to read at all. Failing loudly here, not skipping as OK, is
+	// deliberate: unlike a genuinely inconclusive read (daemon
+	// unreachable, docker info unparseable -- both skip as OK below),
+	// this is the single highest-stakes case this check exists for (a
+	// real remote production deploy) getting silently zero protection
+	// otherwise (flagged in review).
 	if runtime.GOOS != "linux" {
-		return Result{Name: name, OK: true, Detail: "skipped (not running on Linux -- configure vps runs directly on the VPS)"}
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: "can't verify free memory from " + runtime.GOOS + " against a remote vps Docker daemon -- run `versola configure vps` directly on the VPS itself (over SSH), or check `free -m` there by hand first",
+		}
 	}
 
 	available, err := linuxMemAvailable()
@@ -324,6 +352,10 @@ func dockerMemoryAvailableVps() Result {
 		minBytes = minAvailableReplaceBytes
 		situation = "replacing the already-running central/auth/edge"
 	}
+	if !isRunningVps("versola-openbao-vps") {
+		minBytes += openbaoOverheadBytes
+		situation += ", plus starting OpenBao"
+	}
 
 	gib := float64(available) / (1024 * 1024 * 1024)
 	minGib := float64(minBytes) / (1024 * 1024 * 1024)
@@ -331,7 +363,7 @@ func dockerMemoryAvailableVps() Result {
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.0f GiB free right now for %s (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
+			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.1f GiB free right now for %s (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
@@ -359,16 +391,40 @@ func dockerMemoryAvailableVps() Result {
 // would rather over-demand memory on a `docker ps` hiccup than
 // under-demand it right before starting three JVMs.
 func isReplaceVps() bool {
-	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
+	names, err := dockerPsNames()
 	if err != nil {
 		return false
 	}
 	for _, name := range []string{"versola-central", "versola-auth", "versola-edge"} {
-		if !strings.Contains(out, name) {
+		if !strings.Contains(names, name) {
 			return false
 		}
 	}
 	return true
+}
+
+// isRunningVps reports whether a single named container is currently
+// running -- used by dockerMemoryAvailableVps for versola-openbao-vps,
+// same underlying `docker ps` call and same "assume not running" fallback
+// on error as isReplaceVps above (over-demanding memory on a hiccup, not
+// under-demanding it).
+func isRunningVps(name string) bool {
+	names, err := dockerPsNames()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(names, name)
+}
+
+// dockerPsNames returns `docker ps`'s own container-name column, raw --
+// isReplaceVps and isRunningVps both just substring-match into it. Not
+// cached across the two calls this check makes per run: both are cheap,
+// and caching a container list that could change between them (Configure
+// starting OpenBao mid-run isn't a real scenario within one doctor/
+// configure invocation, but there's no benefit to assuming it never could
+// be) buys nothing worth the extra state.
+func dockerPsNames() (string, error) {
+	return run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
 }
 
 // linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --

@@ -337,27 +337,38 @@ func dockerMemoryAvailableVps() Result {
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
 }
 
-// isReplaceVps reports whether any of vps's fixed container names (see
-// compose.fragment.vps.yml.template) are already running -- see
-// dockerMemoryAvailableVps's own comment for why that changes how much
-// free memory is actually needed. Best-effort: if `docker ps` itself
-// fails, this returns false (the fresh-deploy, higher-floor case) rather
-// than silently assuming the lower one, same reasoning as PortFree's own
-// dockerPortInUse falling back to "not found" on error, just the
-// opposite default -- this check would rather over-demand memory on a
-// `docker ps` hiccup than under-demand it right before starting three
-// JVMs.
+// isReplaceVps reports whether ALL THREE of vps's fixed container names
+// (see compose.fragment.vps.yml.template) are already running -- not just
+// any one of them. The lower "replace" memory floor this decides between
+// (see dockerMemoryAvailableVps's own comment) only holds because the
+// upcoming `up` swaps like for like, three JVMs stopping for three JVMs
+// starting, roughly memory-neutral. If only central is up -- a previous
+// `up` that failed partway, or one service stopped/crashed on its own --
+// the next `up` still has to start auth and edge from cold on top of
+// whatever's currently free, exactly the fresh-deploy case with no
+// existing workload to net out against (flagged in review: an earlier
+// version of this treated "any one of the three" as enough to call it a
+// replace, which is true for partial state too, and would then pass this
+// preflight right before starting the two JVMs that weren't already
+// counted in "available").
+//
+// Best-effort: if `docker ps` itself fails, this returns false (the
+// fresh-deploy, higher-floor case) rather than silently assuming the
+// lower one, same reasoning as PortFree's own dockerPortInUse falling
+// back to "not found" on error, just the opposite default -- this check
+// would rather over-demand memory on a `docker ps` hiccup than
+// under-demand it right before starting three JVMs.
 func isReplaceVps() bool {
 	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
 	if err != nil {
 		return false
 	}
 	for _, name := range []string{"versola-central", "versola-auth", "versola-edge"} {
-		if strings.Contains(out, name) {
-			return true
+		if !strings.Contains(out, name) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --

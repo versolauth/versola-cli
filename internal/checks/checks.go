@@ -223,7 +223,11 @@ func dockerPortInUse(port int) (owner string, used bool) {
 //     alongside Versola) currently hold. This only works run directly on
 //     the VPS itself, which is also the only place `configure vps` is
 //     ever meant to run (see develop.md) -- skipped, not failed, on any
-//     other OS.
+//     other OS. The minimum itself further splits on whether central/
+//     auth/edge are already running (see dockerMemoryAvailableVps's own
+//     comment): available-right-now only means something once you know
+//     whether the workload it has to hold is about to grow from zero or
+//     just swap in place.
 //
 // Neither compose template sets a per-service `mem_limit` today, so even
 // this remains a proxy, not a guarantee -- the real fix (mem_limit on
@@ -253,10 +257,22 @@ func dockerMemoryTotalLocal() Result {
 
 	gib := float64(total) / (1024 * 1024 * 1024)
 	if total < minBytes {
+		// Docker Desktop is the common case this hint fits, but not the
+		// only one: `local` runs on native Linux too (bare Docker Engine,
+		// no VM), where MemTotal is the host's own physical RAM the same
+		// way it is for vps below -- there's no "Docker Desktop memory
+		// limit" setting to point someone at there, only more RAM on the
+		// machine itself (flagged in review: this used to say "raise
+		// Docker Desktop's memory limit" unconditionally, including on
+		// Linux, where that control doesn't exist).
+		hint := "raise Docker Desktop's memory limit"
+		if runtime.GOOS == "linux" {
+			hint = "this machine's own RAM, not a Docker VM limit to raise"
+		}
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); raise Docker Desktop's memory limit", gib),
+			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); %s", gib, hint),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
@@ -264,14 +280,34 @@ func dockerMemoryTotalLocal() Result {
 
 func dockerMemoryAvailableVps() Result {
 	const name = "Docker memory"
-	// ~1 GiB free right now -- deliberately well under the ~1.8 GiB
-	// MemAvailable this check's own history measured on a real, already
-	// stable production VPS (3.9 GiB total, native Postgres + a separate
-	// observability stack + this exact three-JVM deployment all already
-	// running), leaving margin for smaller boxes without chasing an exact
-	// number nothing here can actually derive precisely (see this
-	// function's own doc comment on why "total" isn't it either).
-	const minAvailableBytes = 1 * 1024 * 1024 * 1024
+	// Two different floors, not one: MemAvailable right now only tells you
+	// what's free BEFORE `configure`/`up` starts anything. On a machine
+	// already running central/auth/edge (the in-place replace this check's
+	// own history was measured against -- see below), that number already
+	// has the old containers' footprint baked in, and the new ones roughly
+	// swap in for them rather than adding on top. On a genuinely fresh vps
+	// (nothing running yet), the exact same "1 GiB free" would say nothing
+	// about whether three JVMs that don't exist yet will actually fit once
+	// they start -- a fresh 2 GiB box with 1.2 GiB idle would pass this
+	// check and then overcommit the moment `up` actually starts them
+	// (flagged in review). isReplaceVps below tells the two cases apart.
+	//
+	// minAvailableReplaceBytes (~1 GiB) is deliberately well under the
+	// ~1.8 GiB MemAvailable this check's own history measured on a real,
+	// already-stable production VPS (3.9 GiB total, native Postgres + a
+	// separate observability stack + this exact three-JVM deployment all
+	// already running) -- margin for smaller boxes without chasing an
+	// exact number nothing here can derive precisely.
+	//
+	// minAvailableFreshBytes (~3 GiB) has no equivalent real-world
+	// measurement to lean on -- nothing has been observed starting three
+	// unconstrained JVMs from cold on a vps box yet -- so it falls back to
+	// local's own ~4 GiB estimate for "three JVMs" minus a rough GiB for
+	// the one thing vps genuinely doesn't containerize (Postgres), same
+	// reasoning as the very first version of this fix, just applied to
+	// the right measurement this time (available, not total).
+	const minAvailableReplaceBytes = 1 * 1024 * 1024 * 1024
+	const minAvailableFreshBytes = 3 * 1024 * 1024 * 1024
 
 	if runtime.GOOS != "linux" {
 		return Result{Name: name, OK: true, Detail: "skipped (not running on Linux -- configure vps runs directly on the VPS)"}
@@ -282,15 +318,46 @@ func dockerMemoryAvailableVps() Result {
 		return Result{Name: name, OK: true, Detail: "skipped (couldn't read /proc/meminfo)"}
 	}
 
+	minBytes := int64(minAvailableFreshBytes)
+	situation := "a fresh deployment (no central/auth/edge running yet)"
+	if isReplaceVps() {
+		minBytes = minAvailableReplaceBytes
+		situation = "replacing the already-running central/auth/edge"
+	}
+
 	gib := float64(available) / (1024 * 1024 * 1024)
-	if available < minAvailableBytes {
+	minGib := float64(minBytes) / (1024 * 1024 * 1024)
+	if available < minBytes {
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~1 GiB free right now (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib),
+			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.0f GiB free right now for %s (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
+}
+
+// isReplaceVps reports whether any of vps's fixed container names (see
+// compose.fragment.vps.yml.template) are already running -- see
+// dockerMemoryAvailableVps's own comment for why that changes how much
+// free memory is actually needed. Best-effort: if `docker ps` itself
+// fails, this returns false (the fresh-deploy, higher-floor case) rather
+// than silently assuming the lower one, same reasoning as PortFree's own
+// dockerPortInUse falling back to "not found" on error, just the
+// opposite default -- this check would rather over-demand memory on a
+// `docker ps` hiccup than under-demand it right before starting three
+// JVMs.
+func isReplaceVps() bool {
+	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
+	if err != nil {
+		return false
+	}
+	for _, name := range []string{"versola-central", "versola-auth", "versola-edge"} {
+		if strings.Contains(out, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --

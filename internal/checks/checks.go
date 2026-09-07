@@ -198,16 +198,39 @@ func dockerPortInUse(port int) (owner string, used bool) {
 // DockerMemory checks how much memory the Docker daemon reports having.
 // On macOS and Windows (Docker Desktop) this is the memory given to
 // Docker's own VM, not the host's total RAM — which is the number that
-// actually matters: three JVMs plus Postgres need real room, and Docker
-// Desktop's default VM allocation is often well under what's needed.
+// actually matters there. On native Linux (no Docker Desktop VM in the
+// way — the case for every real "vps" target) it's the host's own
+// physical RAM instead, full stop; there's no separate "Docker memory
+// limit" to raise on failure the way there is on macOS/Windows, only more
+// RAM on the machine itself.
+//
+// The minimum differs by target, via minBytesFor: "local" runs Postgres
+// as a container too (see compose.fragment.yml.template's own postgres
+// service), "vps" doesn't -- its Postgres is a native systemd install
+// this CLI never starts or manages (see compose.fragment.vps.yml.template's
+// top-of-file comment) -- so vps's actual Docker-managed footprint is
+// three JVMs and OpenBao, one fewer real consumer than local's estimate
+// has to leave room for. This isn't just reasoned about in the abstract:
+// a real production VPS with 3.9 GiB total RAM -- running this exact
+// three-JVM stack, PLUS an entirely separate observability stack (five
+// more containers: grafana, alloy, and three victoriametrics services)
+// alongside it -- had run stable for over a week on that budget before
+// this check's old flat 4 GiB floor (unconditionally applied regardless
+// of target) was even noticed as wrong for vps specifically.
+//
+// Neither compose template sets a per-service `mem_limit` today, so this
+// remains a rough proxy, not a guarantee -- see the discussion that led
+// here for the follow-up that actually belongs (mem_limit per service in
+// compose.fragment.vps.yml.template, in the versola repo, so an
+// unconstrained JVM's -XX:MaxRAMPercentage=75.0 has a real ceiling to
+// work against instead of whatever the whole host happens to report).
 //
 // If the daemon isn't reachable, or its report can't be parsed, this
 // check reports OK rather than failing — DockerDaemon() already reports
 // an unreachable daemon on its own, and this check has nothing reliable
 // to say in that case.
-func DockerMemory() Result {
+func DockerMemory(target string) Result {
 	const name = "Docker memory"
-	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB, per the project design doc's estimate
 
 	out, err := run(5*time.Second, "docker", "info", "--format", "{{.MemTotal}}")
 	if err != nil {
@@ -218,15 +241,28 @@ func DockerMemory() Result {
 		return Result{Name: name, OK: true, Detail: "skipped (couldn't read `docker info`)"}
 	}
 
+	minBytes, want := minBytesFor(target)
 	gib := float64(total) / (1024 * 1024 * 1024)
+	minGib := float64(minBytes) / (1024 * 1024 * 1024)
 	if total < minBytes {
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); raise Docker's memory limit", gib),
+			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~%.1f GiB for %s (%s); on native Linux this is the machine's own RAM, not a Docker VM limit to raise", gib, minGib, target, want),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
+}
+
+// minBytesFor returns DockerMemory's minimum for a given target, and a
+// short human-readable reason -- see DockerMemory's own comment for why
+// this differs between "local" and "vps" (a containerized Postgres or
+// not) instead of being one flat number.
+func minBytesFor(target string) (minBytes int64, reason string) {
+	if target == "vps" {
+		return 3 * 1024 * 1024 * 1024, "three JVMs, no containerized Postgres"
+	}
+	return 4 * 1024 * 1024 * 1024, "three JVMs + a containerized Postgres"
 }
 
 // DiskSpace checks free disk space at the CLI's current working

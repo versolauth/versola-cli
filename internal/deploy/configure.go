@@ -59,7 +59,7 @@ func Configure(target, version, authURL, postgresHost string) (string, error) {
 	checksToRun := []checks.Result{
 		checks.DockerDaemon(),
 		checks.ComposePlugin(),
-		checks.DockerMemory(),
+		checks.DockerMemory(target),
 		checks.DiskSpace(),
 	}
 	// Port 2821 is nginx's — local-only, checked here for the same reason

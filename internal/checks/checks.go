@@ -223,12 +223,15 @@ func dockerPortInUse(port int) (owner string, used bool) {
 //     a real production VPS running a whole separate observability stack
 //     alongside Versola) currently hold. This only works run directly on
 //     the VPS itself, which is also the only place `configure vps` is
-//     ever meant to run (see develop.md) -- skipped, not failed, on any
-//     other OS. The minimum itself further splits on whether central/
-//     auth/edge are already running (see dockerMemoryAvailableVps's own
-//     comment): available-right-now only means something once you know
-//     whether the workload it has to hold is about to grow from zero or
-//     just swap in place.
+//     ever meant to run (see develop.md) -- FAILS (not a skip) on any
+//     other OS, or when Docker is pointed at a remote daemon even from
+//     Linux (see dockerMemoryAvailableVps's own comment on why silently
+//     skipping the single highest-stakes case this check exists for
+//     would be worse than a false alarm). The minimum itself further
+//     splits on whether central/auth/edge are already running (see
+//     dockerMemoryAvailableVps's own comment): available-right-now only
+//     means something once you know whether the workload it has to hold
+//     is about to grow from zero or just swap in place.
 //
 // Neither compose template sets a per-service `mem_limit` today, so even
 // this remains a proxy, not a guarantee -- the real fix (mem_limit on

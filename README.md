@@ -121,13 +121,34 @@ its own — if Docker isn't found at all, the most it does is offer to open
 an install page in your browser, and only after you confirm:
 - Docker daemon reachable (not just `docker` on PATH)
 - Docker Compose v2 plugin present
-- Port 2821 free on localhost
-- Docker has enough memory allocated (~4 GiB — three JVMs + Postgres)
+- Port 2821 free on localhost (`local` only — vps has no nginx service of
+  its own, see `--target` below)
+- Enough free memory (differs by target, see below)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
-Exits non-zero if any check fails. `bootstrap` runs the same checks itself
-before doing anything, so running `doctor` first is optional but gives you
-the same picture ahead of time.
+Pass `--target local` (the default) or `--target vps` to match what
+`configure <target>` will actually check — the two targets need genuinely
+different memory checks, not just a different number:
+- `local` checks Docker's own total memory (`docker info`) against ~4 GiB
+  — three JVMs plus local's own containerized Postgres. On Docker
+  Desktop (macOS/Windows) this is the VM's allocation, a budget nothing
+  else competes with; on native Linux it's the host's own physical RAM.
+- `vps` checks `/proc/meminfo`'s MemAvailable instead — vps's Postgres is
+  a native, non-Docker install, so total physical RAM isn't the right
+  number there (native Postgres and the rest of the host OS already
+  compete for it). The minimum is ~1 GiB if `versola-central`/`auth`/
+  `edge` are already running (an in-place redeploy roughly nets out) or
+  ~3 GiB if none of them are yet (starting three JVMs from cold, closer
+  to local's own estimate minus the containerized Postgres vps doesn't
+  have), plus a bit more if OpenBao also isn't running yet. This check
+  only works run directly on the VPS itself over SSH — it fails outright
+  (not a silent skip) if the Docker CLI is pointed at a remote host
+  (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
+  rather than quietly checking the wrong machine's memory.
+
+Exits non-zero if any check fails. `bootstrap`/`configure` run the same
+checks themselves before doing anything, so running `doctor` first is
+optional but gives you the same picture ahead of time.
 
 If Docker isn't reachable, `doctor` tells the two possible reasons apart
 and reacts differently: already installed but not running just gets a

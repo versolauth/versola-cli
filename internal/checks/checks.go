@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -324,20 +325,32 @@ func dockerMemoryAvailableVps() Result {
 	// configure vps is only ever meant to run directly on the VPS itself
 	// (see develop.md's "the machine that will run `versola configure
 	// vps`... the VPS itself") -- Configure() itself doesn't enforce that,
-	// though, and Docker's own remote-context support (DOCKER_HOST
-	// pointed at the VPS from a macOS/Windows laptop) would let someone
-	// actually reach that far while this check has no local /proc/meminfo
-	// to read at all. Failing loudly here, not skipping as OK, is
-	// deliberate: unlike a genuinely inconclusive read (daemon
-	// unreachable, docker info unparseable -- both skip as OK below),
-	// this is the single highest-stakes case this check exists for (a
-	// real remote production deploy) getting silently zero protection
-	// otherwise (flagged in review).
+	// though, and Docker's own remote-daemon support (DOCKER_HOST, or a
+	// context whose endpoint isn't a local socket, pointed at the VPS)
+	// would let someone actually reach that far while this check reads
+	// /proc/meminfo on whatever machine the CLI process itself is
+	// running on -- not necessarily the daemon's. A Linux workstation
+	// with ample RAM pointed at a memory-starved remote VPS would pass
+	// runtime.GOOS == "linux" and still be checking the wrong machine's
+	// memory entirely (flagged in review: an earlier version only ever
+	// checked GOOS, which only catches macOS/Windows). Failing loudly on
+	// EITHER signal, not skipping as OK, is deliberate: unlike a
+	// genuinely inconclusive read (daemon unreachable, docker info
+	// unparseable -- both skip as OK below), this is the single
+	// highest-stakes case this check exists for (a real remote production
+	// deploy) getting silently zero protection otherwise.
 	if runtime.GOOS != "linux" {
 		return Result{
 			Name:   name,
 			OK:     false,
 			Detail: "can't verify free memory from " + runtime.GOOS + " against a remote vps Docker daemon -- run `versola configure vps` directly on the VPS itself (over SSH), or check `free -m` there by hand first",
+		}
+	}
+	if remote, endpoint := dockerTargetsRemoteHost(); remote {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("Docker is pointed at %q, not this machine's own daemon -- /proc/meminfo here would check the wrong host's memory. Run `versola configure vps` directly on the VPS itself (over SSH), or check `free -m` there by hand first", endpoint),
 		}
 	}
 
@@ -395,8 +408,8 @@ func isReplaceVps() bool {
 	if err != nil {
 		return false
 	}
-	for _, name := range []string{"versola-central", "versola-auth", "versola-edge"} {
-		if !strings.Contains(names, name) {
+	for _, want := range []string{"versola-central", "versola-auth", "versola-edge"} {
+		if !slices.Contains(names, want) {
 			return false
 		}
 	}
@@ -413,18 +426,70 @@ func isRunningVps(name string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(names, name)
+	return slices.Contains(names, name)
 }
 
-// dockerPsNames returns `docker ps`'s own container-name column, raw --
-// isReplaceVps and isRunningVps both just substring-match into it. Not
-// cached across the two calls this check makes per run: both are cheap,
+// dockerPsNames returns the exact set of currently-running container
+// names, one per line as `docker ps` itself prints them, split into a
+// slice -- isReplaceVps and isRunningVps then check exact membership, not
+// a substring match. A substring match on the raw output would treat
+// "versola-central-old" (a leftover renamed container, or any other name
+// that merely contains the one being looked for) as if "versola-central"
+// itself were running, silently picking the cheaper "replace" floor or
+// skipping the OpenBao add-on for a container that was never actually
+// there (flagged in review).
+//
+// Not cached across the calls this check makes per run: both are cheap,
 // and caching a container list that could change between them (Configure
 // starting OpenBao mid-run isn't a real scenario within one doctor/
 // configure invocation, but there's no benefit to assuming it never could
 // be) buys nothing worth the extra state.
-func dockerPsNames() (string, error) {
-	return run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
+func dockerPsNames() ([]string, error) {
+	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+// dockerTargetsRemoteHost reports whether the Docker CLI is currently
+// pointed at a daemon reached over the network rather than a local
+// socket, and the endpoint string it found if so. Two independent
+// signals, checked in the same order the Docker CLI itself resolves
+// them: $DOCKER_HOST overrides everything if set; otherwise the active
+// context's own endpoint (`docker context inspect` with no name argument
+// inspects whichever context is current) is what every `docker` command
+// actually connects to. A `unix://` (or empty/unset) endpoint is local;
+// `tcp://`, `ssh://`, or anything else is not.
+//
+// Best-effort like this file's other docker-shelling checks: if
+// inspecting the context fails for any reason, this reports "not remote"
+// rather than blocking the vps memory check on a problem unrelated to
+// memory -- DOCKER_HOST is still checked either way, since that needs no
+// subprocess call to read.
+func dockerTargetsRemoteHost() (remote bool, endpoint string) {
+	if h := os.Getenv("DOCKER_HOST"); h != "" {
+		if !strings.HasPrefix(h, "unix://") {
+			return true, h
+		}
+		return false, ""
+	}
+
+	out, err := run(5*time.Second, "docker", "context", "inspect", "--format", `{{(index .Endpoints "docker").Host}}`)
+	if err != nil {
+		return false, ""
+	}
+	host := strings.TrimSpace(out)
+	if host == "" || strings.HasPrefix(host, "unix://") {
+		return false, ""
+	}
+	return true, host
 }
 
 // linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --

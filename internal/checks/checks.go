@@ -9,9 +9,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -195,19 +197,58 @@ func dockerPortInUse(port int) (owner string, used bool) {
 	return "", false
 }
 
-// DockerMemory checks how much memory the Docker daemon reports having.
-// On macOS and Windows (Docker Desktop) this is the memory given to
-// Docker's own VM, not the host's total RAM — which is the number that
-// actually matters: three JVMs plus Postgres need real room, and Docker
-// Desktop's default VM allocation is often well under what's needed.
+// DockerMemory checks whether this machine has enough memory for
+// Versola's containers. "local" and "vps" need genuinely different
+// measurements, not just a different minimum against the same number --
+// an earlier version of this tried exactly that (one flat total-RAM
+// minimum, lowered for vps to account for one fewer container) and got it
+// wrong (flagged in review): total physical RAM on a real VPS also has to
+// cover vps's native, non-Docker Postgres (see
+// compose.fragment.vps.yml.template's own comment) and the rest of the
+// host OS, none of which show up as a container to subtract -- a lower
+// TOTAL minimum can pass a box where those already eat most of what
+// "total" reports, which is exactly the failure mode this check exists to
+// catch.
 //
-// If the daemon isn't reachable, or its report can't be parsed, this
-// check reports OK rather than failing — DockerDaemon() already reports
-// an unreachable daemon on its own, and this check has nothing reliable
-// to say in that case.
-func DockerMemory() Result {
+//   - local: `docker info`'s MemTotal is Docker Desktop's own VM
+//     allocation on macOS/Windows -- a budget set aside specifically for
+//     Docker, with nothing else competing for it at that layer. Total is
+//     an accurate proxy for "room these containers will have" there, and
+//     the ~4 GiB minimum (three JVMs + local's own containerized Postgres,
+//     see compose.fragment.yml.template) is unchanged.
+//   - vps: reads /proc/meminfo's MemAvailable instead -- the kernel's own
+//     "how much could a new process actually get right now" estimate,
+//     already netting out whatever native Postgres, the OS, and anything
+//     else already running on the box (this check's own history includes
+//     a real production VPS running a whole separate observability stack
+//     alongside Versola) currently hold. This only works run directly on
+//     the VPS itself, which is also the only place `configure vps` is
+//     ever meant to run (see develop.md) -- FAILS (not a skip) on any
+//     other OS, or when Docker is pointed at a remote daemon even from
+//     Linux (see dockerMemoryAvailableVps's own comment on why silently
+//     skipping the single highest-stakes case this check exists for
+//     would be worse than a false alarm). The minimum itself further
+//     splits on whether central/auth/edge are already running (see
+//     dockerMemoryAvailableVps's own comment): available-right-now only
+//     means something once you know whether the workload it has to hold
+//     is about to grow from zero or just swap in place.
+//
+// Neither compose template sets a per-service `mem_limit` today, so even
+// this remains a proxy, not a guarantee -- the real fix (mem_limit on
+// central/auth/edge in compose.fragment.vps.yml.template, so an
+// unconstrained JVM's -XX:MaxRAMPercentage=75.0 has a real ceiling to
+// work against instead of whatever's currently free) belongs in the
+// versola repo, follow-up.
+func DockerMemory(target string) Result {
+	if target == "vps" {
+		return dockerMemoryAvailableVps()
+	}
+	return dockerMemoryTotalLocal()
+}
+
+func dockerMemoryTotalLocal() Result {
 	const name = "Docker memory"
-	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB, per the project design doc's estimate
+	const minBytes = 4 * 1024 * 1024 * 1024 // ~4 GiB: three JVMs + a containerized Postgres, per the project design doc's estimate.
 
 	out, err := run(5*time.Second, "docker", "info", "--format", "{{.MemTotal}}")
 	if err != nil {
@@ -220,13 +261,268 @@ func DockerMemory() Result {
 
 	gib := float64(total) / (1024 * 1024 * 1024)
 	if total < minBytes {
+		// Docker Desktop is the common case this hint fits, but not the
+		// only one: `local` runs on native Linux too (bare Docker Engine,
+		// no VM), where MemTotal is the host's own physical RAM the same
+		// way it is for vps below -- there's no "Docker Desktop memory
+		// limit" setting to point someone at there, only more RAM on the
+		// machine itself (flagged in review: this used to say "raise
+		// Docker Desktop's memory limit" unconditionally, including on
+		// Linux, where that control doesn't exist).
+		hint := "raise Docker Desktop's memory limit"
+		if runtime.GOOS == "linux" {
+			hint = "this machine's own RAM, not a Docker VM limit to raise"
+		}
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); raise Docker's memory limit", gib),
+			Detail: fmt.Sprintf("%.1f GiB — Versola needs ~4 GiB (three JVMs + Postgres); %s", gib, hint),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
+}
+
+func dockerMemoryAvailableVps() Result {
+	const name = "Docker memory"
+	// Two different floors, not one: MemAvailable right now only tells you
+	// what's free BEFORE `configure`/`up` starts anything. On a machine
+	// already running central/auth/edge (the in-place replace this check's
+	// own history was measured against -- see below), that number already
+	// has the old containers' footprint baked in, and the new ones roughly
+	// swap in for them rather than adding on top. On a genuinely fresh vps
+	// (nothing running yet), the exact same "1 GiB free" would say nothing
+	// about whether three JVMs that don't exist yet will actually fit once
+	// they start -- a fresh 2 GiB box with 1.2 GiB idle would pass this
+	// check and then overcommit the moment `up` actually starts them
+	// (flagged in review). isReplaceVps below tells the two cases apart.
+	//
+	// minAvailableReplaceBytes (~1 GiB) is deliberately well under the
+	// ~1.8 GiB MemAvailable this check's own history measured on a real,
+	// already-stable production VPS (3.9 GiB total, native Postgres + a
+	// separate observability stack + this exact three-JVM deployment all
+	// already running) -- margin for smaller boxes without chasing an
+	// exact number nothing here can derive precisely.
+	//
+	// minAvailableFreshBytes (~3 GiB) has no equivalent real-world
+	// measurement to lean on -- nothing has been observed starting three
+	// unconstrained JVMs from cold on a vps box yet -- so it falls back to
+	// local's own ~4 GiB estimate for "three JVMs" minus a rough GiB for
+	// the one thing vps genuinely doesn't containerize (Postgres), same
+	// reasoning as the very first version of this fix, just applied to
+	// the right measurement this time (available, not total).
+	const minAvailableReplaceBytes = 1 * 1024 * 1024 * 1024
+	const minAvailableFreshBytes = 3 * 1024 * 1024 * 1024
+	// Configure starts versola-openbao-<target> itself whenever it isn't
+	// already running (see deploy.Configure's own "Starting OpenBao..."
+	// step) -- independently of whether central/auth/edge are being
+	// replaced or started fresh. Our own real first-ever `configure vps`
+	// against this exact repo's target VPS is exactly that combination:
+	// all three JVMs already up (the cheap "replace" floor), OpenBao not
+	// running yet at all (flagged in review: the replace floor as written
+	// didn't budget for it). OpenBao is a small Go binary, not a JVM, so
+	// this is a flat, deliberately generous-for-its-size add-on rather
+	// than a third tier of floors -- added whenever it isn't already up,
+	// on top of whichever of the two floors above otherwise applies.
+	const openbaoOverheadBytes = 256 * 1024 * 1024
+
+	// configure vps is only ever meant to run directly on the VPS itself
+	// (see develop.md's "the machine that will run `versola configure
+	// vps`... the VPS itself") -- Configure() itself doesn't enforce that,
+	// though, and Docker's own remote-daemon support (DOCKER_HOST, or a
+	// context whose endpoint isn't a local socket, pointed at the VPS)
+	// would let someone actually reach that far while this check reads
+	// /proc/meminfo on whatever machine the CLI process itself is
+	// running on -- not necessarily the daemon's. A Linux workstation
+	// with ample RAM pointed at a memory-starved remote VPS would pass
+	// runtime.GOOS == "linux" and still be checking the wrong machine's
+	// memory entirely (flagged in review: an earlier version only ever
+	// checked GOOS, which only catches macOS/Windows). Failing loudly on
+	// EITHER signal, not skipping as OK, is deliberate: unlike a
+	// genuinely inconclusive read (daemon unreachable, docker info
+	// unparseable -- both skip as OK below), this is the single
+	// highest-stakes case this check exists for (a real remote production
+	// deploy) getting silently zero protection otherwise.
+	if runtime.GOOS != "linux" {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: "can't verify free memory from " + runtime.GOOS + " against a remote vps Docker daemon -- run `versola configure vps` directly on the VPS itself (over SSH), or check `free -m` there by hand first",
+		}
+	}
+	if remote, endpoint := dockerTargetsRemoteHost(); remote {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("Docker is pointed at %q, not this machine's own daemon -- /proc/meminfo here would check the wrong host's memory. Run `versola configure vps` directly on the VPS itself (over SSH), or check `free -m` there by hand first", endpoint),
+		}
+	}
+
+	available, err := linuxMemAvailable()
+	if err != nil {
+		return Result{Name: name, OK: true, Detail: "skipped (couldn't read /proc/meminfo)"}
+	}
+
+	minBytes := int64(minAvailableFreshBytes)
+	situation := "a fresh deployment (no central/auth/edge running yet)"
+	if isReplaceVps() {
+		minBytes = minAvailableReplaceBytes
+		situation = "replacing the already-running central/auth/edge"
+	}
+	if !isRunningVps("versola-openbao-vps") {
+		minBytes += openbaoOverheadBytes
+		situation += ", plus starting OpenBao"
+	}
+
+	gib := float64(available) / (1024 * 1024 * 1024)
+	minGib := float64(minBytes) / (1024 * 1024 * 1024)
+	if available < minBytes {
+		return Result{
+			Name:   name,
+			OK:     false,
+			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.1f GiB free right now for %s (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
+		}
+	}
+	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
+}
+
+// isReplaceVps reports whether ALL THREE of vps's fixed container names
+// (see compose.fragment.vps.yml.template) are already running -- not just
+// any one of them. The lower "replace" memory floor this decides between
+// (see dockerMemoryAvailableVps's own comment) only holds because the
+// upcoming `up` swaps like for like, three JVMs stopping for three JVMs
+// starting, roughly memory-neutral. If only central is up -- a previous
+// `up` that failed partway, or one service stopped/crashed on its own --
+// the next `up` still has to start auth and edge from cold on top of
+// whatever's currently free, exactly the fresh-deploy case with no
+// existing workload to net out against (flagged in review: an earlier
+// version of this treated "any one of the three" as enough to call it a
+// replace, which is true for partial state too, and would then pass this
+// preflight right before starting the two JVMs that weren't already
+// counted in "available").
+//
+// Best-effort: if `docker ps` itself fails, this returns false (the
+// fresh-deploy, higher-floor case) rather than silently assuming the
+// lower one, same reasoning as PortFree's own dockerPortInUse falling
+// back to "not found" on error, just the opposite default -- this check
+// would rather over-demand memory on a `docker ps` hiccup than
+// under-demand it right before starting three JVMs.
+func isReplaceVps() bool {
+	names, err := dockerPsNames()
+	if err != nil {
+		return false
+	}
+	for _, want := range []string{"versola-central", "versola-auth", "versola-edge"} {
+		if !slices.Contains(names, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// isRunningVps reports whether a single named container is currently
+// running -- used by dockerMemoryAvailableVps for versola-openbao-vps,
+// same underlying `docker ps` call and same "assume not running" fallback
+// on error as isReplaceVps above (over-demanding memory on a hiccup, not
+// under-demanding it).
+func isRunningVps(name string) bool {
+	names, err := dockerPsNames()
+	if err != nil {
+		return false
+	}
+	return slices.Contains(names, name)
+}
+
+// dockerPsNames returns the exact set of currently-running container
+// names, one per line as `docker ps` itself prints them, split into a
+// slice -- isReplaceVps and isRunningVps then check exact membership, not
+// a substring match. A substring match on the raw output would treat
+// "versola-central-old" (a leftover renamed container, or any other name
+// that merely contains the one being looked for) as if "versola-central"
+// itself were running, silently picking the cheaper "replace" floor or
+// skipping the OpenBao add-on for a container that was never actually
+// there (flagged in review).
+//
+// Not cached across the calls this check makes per run: both are cheap,
+// and caching a container list that could change between them (Configure
+// starting OpenBao mid-run isn't a real scenario within one doctor/
+// configure invocation, but there's no benefit to assuming it never could
+// be) buys nothing worth the extra state.
+func dockerPsNames() ([]string, error) {
+	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names, nil
+}
+
+// dockerTargetsRemoteHost reports whether the Docker CLI is currently
+// pointed at a daemon reached over the network rather than a local
+// socket, and the endpoint string it found if so. Two independent
+// signals, checked in the same order the Docker CLI itself resolves
+// them: $DOCKER_HOST overrides everything if set; otherwise the active
+// context's own endpoint (`docker context inspect` with no name argument
+// inspects whichever context is current) is what every `docker` command
+// actually connects to. A `unix://` (or empty/unset) endpoint is local;
+// `tcp://`, `ssh://`, or anything else is not.
+//
+// Best-effort like this file's other docker-shelling checks: if
+// inspecting the context fails for any reason, this reports "not remote"
+// rather than blocking the vps memory check on a problem unrelated to
+// memory -- DOCKER_HOST is still checked either way, since that needs no
+// subprocess call to read.
+func dockerTargetsRemoteHost() (remote bool, endpoint string) {
+	if h := os.Getenv("DOCKER_HOST"); h != "" {
+		if !strings.HasPrefix(h, "unix://") {
+			return true, h
+		}
+		return false, ""
+	}
+
+	out, err := run(5*time.Second, "docker", "context", "inspect", "--format", `{{(index .Endpoints "docker").Host}}`)
+	if err != nil {
+		return false, ""
+	}
+	host := strings.TrimSpace(out)
+	if host == "" || strings.HasPrefix(host, "unix://") {
+		return false, ""
+	}
+	return true, host
+}
+
+// linuxMemAvailable reads /proc/meminfo's MemAvailable line, in bytes --
+// the kernel's own estimate of memory available for a new process without
+// swapping, already accounting for reclaimable caches the way a naive
+// "free" total wouldn't. See dockerMemoryAvailableVps's caller for why
+// this, not docker info's MemTotal, is what vps's check needs.
+func linuxMemAvailable() (int64, error) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemAvailable:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("unexpected /proc/meminfo line: %q", line)
+		}
+		// /proc/meminfo reports kiB regardless of the "kB" suffix's own
+		// wording -- this is the kernel's long-standing (mislabeled but
+		// stable) convention, not an actual decimal-kilobyte value.
+		kib, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("couldn't parse MemAvailable: %w", err)
+		}
+		return kib * 1024, nil
+	}
+	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
 }
 
 // DiskSpace checks free disk space at the CLI's current working

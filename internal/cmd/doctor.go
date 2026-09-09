@@ -16,6 +16,8 @@ import (
 	"github.com/versolauth/versola-cli/internal/checks"
 )
 
+var doctorTarget string
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check that this machine has everything Versola needs",
@@ -26,19 +28,44 @@ Docker isn't found at all, the most it does is offer to open an install
 page in your browser, and only after you confirm.
 
 Run this before "versola bootstrap local <version>" to see ahead of
-time what's missing.`,
+time what's missing. Pass --target vps when checking a real server --
+some checks differ (see --target's own help): running it with no flag
+against a vps machine can fail a check that "configure vps" itself
+would actually pass, or pass one it would actually fail.`,
 	RunE: runDoctor,
 }
 
+func init() {
+	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own gateway, not part of a vps deployment) is checked`)
+}
+
 func runDoctor(cmd *cobra.Command, args []string) error {
+	// Same two values deploy.Configure itself accepts (see its own check) --
+	// validated here too, not left to fall through: DockerMemory/PortFree's
+	// own target branches only ever recognize "vps" explicitly and treat
+	// anything else as "local" by default, so an unrecognized value (a
+	// typo, "staging") would silently run local's checks and print
+	// local's success message while claiming to have checked something
+	// else entirely (flagged in review).
+	if doctorTarget != "local" && doctorTarget != "vps" {
+		return fmt.Errorf(`--target must be "local" or "vps", got %q`, doctorTarget)
+	}
+
 	dockerDaemon := checks.DockerDaemon()
 	results := []checks.Result{
 		dockerDaemon,
 		checks.ComposePlugin(),
-		checks.PortFree(2821, "versola-nginx"),
-		checks.DockerMemory(),
-		checks.DiskSpace(),
 	}
+	// Mirrors deploy.Configure's own target split (see its comment on the
+	// same check) -- vps has no nginx service in its compose file at all
+	// (see compose.fragment.vps.yml.template's comment), so checking port
+	// 2821 there would either false-fail against nothing, or false-pass
+	// and say nothing useful about what "configure vps" is actually about
+	// to do.
+	if doctorTarget == "local" {
+		results = append(results, checks.PortFree(2821, "versola-nginx"))
+	}
+	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
 
 	failed := 0
 	for _, r := range results {
@@ -54,7 +81,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	if failed == 0 {
-		fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+		// Target-specific, not hardcoded to local's own command -- a
+		// successful `doctor --target vps` used to print this same local
+		// suggestion regardless, telling someone who just checked a server
+		// to go run a local deployment instead (flagged in review).
+		if doctorTarget == "vps" {
+			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ... --postgres-host ...`.")
+		} else {
+			fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+		}
 		return nil
 	}
 

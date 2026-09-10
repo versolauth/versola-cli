@@ -34,7 +34,28 @@ import (
 // migrate" failure. migrateViaLegacyContainers below is the exact mechanism
 // this CLI used before the `migrate` service existed, kept alive
 // specifically so those older versions keep working.
-func Migrate(st *state.State) error {
+
+// MigrateOptions controls how a single Migrate call behaves. The zero
+// value -- DryRun false, Service "" -- means "actually apply every
+// service's own migrations", exactly what Migrate always did before
+// these existed, so bootstrap.go's own call (which has no use for
+// either flag) keeps working unchanged just by passing MigrateOptions{}.
+type MigrateOptions struct {
+	// DryRun reports which migrations would be applied, against a real
+	// Postgres connection, without applying any of them (see
+	// versola.migrate.MigrateTool's own --dry-run handling). Migrate
+	// never calls recordMigrated for a dry run -- nothing was actually
+	// migrated, so nothing should be stamped as having happened.
+	DryRun bool
+
+	// Service restricts migration to one of "auth", "central", "edge".
+	// Empty means all three, the original behavior. Validated by the
+	// caller (cmd/migrate.go's own --service flag) before this ever sees
+	// it -- an invalid value fails before Docker gets involved at all.
+	Service string
+}
+
+func Migrate(st *state.State, opts MigrateOptions) error {
 	if st == nil {
 		return fmt.Errorf("nothing has been configured yet — run `versola configure <target> <version>` first")
 	}
@@ -53,14 +74,28 @@ func Migrate(st *state.State) error {
 	}
 
 	if hasMigrate {
-		if err := migrateViaService(composePath); err != nil {
+		if err := migrateViaService(composePath, opts); err != nil {
 			return err
 		}
 	} else {
+		// Older versola-tools releases' MigrateTool doesn't understand
+		// --dry-run/--service at all (this fallback predates both), and
+		// migrateViaLegacyContainers' own per-service loop has no
+		// equivalent for "just report, don't apply" -- failing loudly
+		// here beats silently ignoring DryRun and migrating for real.
+		if opts.DryRun {
+			return fmt.Errorf("--dry-run needs a versola-tools release with the standalone migrate service -- this deployment predates it")
+		}
 		fmt.Println("This versola-tools release predates the standalone migrate service -- falling back to per-service migration.")
-		if err := migrateViaLegacyContainers(composePath, st.Target); err != nil {
+		if err := migrateViaLegacyContainers(composePath, st.Target, opts.Service); err != nil {
 			return err
 		}
+	}
+
+	if opts.DryRun {
+		// Nothing was actually applied -- see MigrateOptions.DryRun's own
+		// comment on why this skips recordMigrated entirely.
+		return nil
 	}
 
 	if err := recordMigrated(st); err != nil {
@@ -163,8 +198,17 @@ func hasMigrateService(composePath string) (bool, error) {
 // from an image that ships all three services' migrations together (see
 // versola-tools' migrate-tool), applies each against its own schema in
 // sequence.
-func migrateViaService(composePath string) error {
-	fmt.Println("Migrating central, auth, and edge...")
+func migrateViaService(composePath string, opts MigrateOptions) error {
+	scope := "central, auth, and edge"
+	if opts.Service != "" {
+		scope = opts.Service
+	}
+	if opts.DryRun {
+		fmt.Printf("Checking pending migrations for %s...\n", scope)
+	} else {
+		fmt.Printf("Migrating %s...\n", scope)
+	}
+
 	// -T: no pseudo-TTY — this never needs interactive input, and whether
 	// stdin is a real terminal isn't always detected the same way across
 	// Docker Desktop and an SSH session (see develop.md's own -it -> -i fix
@@ -185,7 +229,27 @@ func migrateViaService(composePath string) error {
 	// run` always creates a fresh one-off container, so unlike
 	// migrateViaLegacyContainers below, there's no orphaned-container or
 	// concurrent-run guard to reimplement here.
-	if err := docker.Run("compose", "-f", composePath, "run", "--rm", "-T", "migrate"); err != nil {
+	args := []string{"compose", "-f", composePath, "run", "--rm", "-T", "migrate"}
+	if opts.DryRun || opts.Service != "" {
+		// `docker compose run <service> <command...>` -- once anything
+		// follows the service name, it REPLACES that service's own
+		// `command: ["migrate"]` entirely rather than appending to it (see
+		// the compose templates), so the override has to repeat "migrate"
+		// itself for entrypoint.sh's own dispatch (argv[0] == "migrate")
+		// to still recognize it, not just tack flags onto nothing.
+		args = append(args, "migrate")
+		if opts.DryRun {
+			args = append(args, "--dry-run")
+		}
+		if opts.Service != "" {
+			args = append(args, "--service", opts.Service)
+		}
+	}
+
+	if err := docker.Run(args...); err != nil {
+		if opts.DryRun {
+			return fmt.Errorf("dry run failed: %w", err)
+		}
 		return fmt.Errorf("migrations failed: %w", err)
 	}
 	return nil
@@ -205,7 +269,13 @@ func migrateViaService(composePath string) error {
 // layer-construction time, so a standalone migrate step must not go through
 // that path or it inherits the exact "hangs/OOMs waiting on a service that
 // isn't up yet" failure this split exists to avoid.
-func migrateViaLegacyContainers(composePath, target string) error {
+//
+// onlyService, when non-empty, restricts this to one of "auth",
+// "central", "edge" instead of all three -- the legacy path already
+// migrates one service per container, so unlike migrateViaService this
+// needs no protocol with the far side, just skipping the other two
+// iterations of the loop below.
+func migrateViaLegacyContainers(composePath, target, onlyService string) error {
 	if target == "local" {
 		// docker-local's Postgres is this compose project's own container
 		// (vps's is native — see compose.fragment.vps.yml.template's
@@ -222,7 +292,11 @@ func migrateViaLegacyContainers(composePath, target string) error {
 		}
 	}
 
-	for _, service := range []string{"central", "auth", "edge"} {
+	services := []string{"central", "auth", "edge"}
+	if onlyService != "" {
+		services = []string{onlyService}
+	}
+	for _, service := range services {
 		fmt.Printf("Migrating %s...\n", service)
 		// --no-deps: without it, compose would start central as a full
 		// server as a side effect of migrating auth/edge (both declare

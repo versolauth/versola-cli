@@ -98,6 +98,19 @@ func Migrate(st *state.State, opts MigrateOptions) error {
 		return nil
 	}
 
+	if opts.Service != "" {
+		// Only one of the three services was actually migrated here.
+		// MigratedAt's own contract (see its comment in state.go) is that
+		// it's set "after every service's own migration has actually
+		// finished" -- stamping it for a partial run would suppress Up's
+		// "no migration has been recorded" warning and make `status` claim
+		// the deployment is fully migrated while the other two services'
+		// schemas were never touched, and could still reject it at startup
+		// (flagged in review).
+		fmt.Printf("Migrations complete for %s. Not recording this deployment as migrated -- run `versola migrate` (no --service) once every service has been migrated.\n", opts.Service)
+		return nil
+	}
+
 	if err := recordMigrated(st); err != nil {
 		return err
 	}

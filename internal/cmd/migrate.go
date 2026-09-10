@@ -43,7 +43,7 @@ deployment). --service limits either mode to one of "auth", "central",
 }
 
 func init() {
-	migrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "report which migrations would be applied, without touching the database")
+	migrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "report which migrations would be applied, without applying any of them")
 	migrateCmd.Flags().StringVar(&migrateService, "service", "", `limit to one service ("auth", "central", or "edge") -- default is all three`)
 }
 

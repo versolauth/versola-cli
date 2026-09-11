@@ -142,7 +142,11 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("configure succeeded but couldn't reload its own state: %w", err)
 	}
 
-	if err := deploy.Migrate(st); err != nil {
+	// Zero-value MigrateOptions: not a dry run, every service -- bootstrap
+	// runs configure/migrate/up together precisely to deploy for real, so
+	// it has no use for either flag standalone `versola migrate` exposes
+	// (see cmd/migrate.go).
+	if err := deploy.Migrate(st, deploy.MigrateOptions{}); err != nil {
 		return err
 	}
 	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st)

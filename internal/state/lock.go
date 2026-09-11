@@ -30,6 +30,17 @@ var errLockBusy = errors.New("lock busy")
 // until it's free. The returned func releases it; callers `defer` it
 // immediately.
 //
+// NOT reentrant within a single process: flock/LockFileEx are scoped to
+// the open file description, not the process, so a second call to Lock()
+// from code already holding the first (e.g. a future refactor that has
+// one command's RunE call another's in-process instead of only via a
+// separate CLI invocation) blocks against itself for the full lockWait and
+// then fails with the same "another versola command is still running"
+// message a genuine second process would get -- misleading, since there
+// is no second process. Callers must not nest Lock() calls; hold exactly
+// one per command invocation, for the whole sequence that needs it (see
+// below).
+//
 // Every command that reads state to decide something and then later acts on
 // what it read needs this: configure (locally overwrites vs. asks for a vps
 // confirmation depending on what's THERE right now), migrate/up (asks once,

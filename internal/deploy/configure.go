@@ -184,6 +184,18 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return "", fmt.Errorf("OpenBao never came up: %w", err)
 	}
 
+	// local's OpenBao gets set up automatically from here -- init, unseal,
+	// kv-v2, AppRole, credentials, all of it (see ProvisionLocal's own
+	// comment on why local specifically, not vps too). Runs before
+	// resolveSecrets below, which is what actually needs the credentials
+	// this produces; safe to call on every `configure local`, not just a
+	// machine's first one.
+	if target == "local" {
+		if err := ProvisionLocal("http://localhost:8200"); err != nil {
+			return "", fmt.Errorf("couldn't provision local OpenBao: %w", err)
+		}
+	}
+
 	// versola-tools writes auth.conf/central.conf/edge.conf with each
 	// secret field as a ${?VAR} placeholder rather than a literal value
 	// (see gen-env.scala's secretField) — this resolves each one against
@@ -192,14 +204,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// <service>.secrets.env files the compose file's env_file: entries
 	// expect to already exist by the time Up runs it.
 	//
-	// If OpenBao is sealed (every fresh container start comes up sealed,
-	// even with its data intact on the persistent volume — see
+	// For vps: if OpenBao is sealed (every fresh container start comes up
+	// sealed, even with its data intact on the persistent volume — see
 	// openbao.hcl.template's comment), this fails with whatever error
 	// OpenBao's own API returns, which already says "sealed" plainly.
-	// Unsealing isn't automated: it needs the unseal key generated when
-	// OpenBao was first initialized, which nothing this CLI holds — see
-	// develop.md's OpenBao section for the manual `bao operator unseal`
-	// step.
+	// Unsealing there isn't automated: it needs the unseal key generated
+	// when OpenBao was first initialized, which nothing this CLI holds —
+	// see develop.md's OpenBao section for the manual `bao operator
+	// unseal` step. local's own OpenBao is unsealed automatically just
+	// above (see ProvisionLocal), so this whole paragraph doesn't apply
+	// to it.
 	fmt.Println("Resolving secrets (OpenBao)...")
 	if err := resolveSecrets(dir, target); err != nil {
 		return "", err

@@ -64,12 +64,11 @@ func LoadLocalAdmin() (*LocalAdmin, error) {
 // machine's access to OpenBao" in the same sense Credentials' own comment
 // describes.
 func SaveLocalAdmin(a *LocalAdmin) error {
-	dir, err := credentialsDir()
-	if err != nil {
+	// Same shared ~/.versola/openbao directory as Credentials -- see
+	// ensureCredentialsDir's own comment for why this isn't a plain
+	// MkdirAll.
+	if _, err := ensureCredentialsDir(); err != nil {
 		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("couldn't create %s: %w", dir, err)
 	}
 
 	b, err := json.MarshalIndent(a, "", "  ")

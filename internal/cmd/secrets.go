@@ -12,6 +12,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/versolauth/versola-cli/internal/openbao"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // secretsCmd is a parent for subcommands, not runnable itself — cobra
@@ -48,6 +49,19 @@ later doesn't discard this one's access.`,
 
 func runSecretsLogin(cmd *cobra.Command, args []string) error {
 	target, address, roleID := args[0], args[1], args[2]
+
+	// configure/bootstrap hold this same lock for their whole run and,
+	// for "local", write this exact file themselves (see
+	// deploy.ProvisionLocal -> openbao.SaveCredentials) -- without it, a
+	// `secrets login` run by hand while a `configure local`/`bootstrap
+	// local` is mid-provisioning in another terminal could race a plain
+	// os.WriteFile against that other write and lose one of the two
+	// updates (flagged in independent review).
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	secretID, err := readSecretID()
 	if err != nil {

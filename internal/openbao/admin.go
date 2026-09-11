@@ -261,9 +261,13 @@ func ReadRoleID(ctx context.Context, address, token, name string) (string, error
 
 // GenerateSecretID mints a fresh secret-id for an AppRole role -- `bao
 // write -f auth/approle/role/<name>/secret-id`. Unlike role-id, this
-// generates a NEW value every call: ProvisionLocal only ever calls this
-// once, the first time a target has no stored Credentials yet, precisely
-// to avoid minting a throwaway extra secret-id on every later `configure`.
+// generates a NEW value every call: ProvisionLocal only calls this when a
+// target has no stored Credentials yet, OR when OpenBao was just freshly
+// (re)initialized in this same run (see ProvisionLocal's justInitialized),
+// to avoid minting a throwaway extra secret-id on every ordinary later
+// `configure` against an already-provisioned instance. secret_id_ttl=0
+// (see CreateApproleRole) means old secret-ids from a reprovisioned run
+// are never automatically cleaned up on OpenBao's side.
 func GenerateSecretID(ctx context.Context, address, token, name string) (string, error) {
 	body, status, err := adminRequest(ctx, http.MethodPost, address+"/v1/auth/approle/role/"+name+"/secret-id", token, nil)
 	if err != nil {

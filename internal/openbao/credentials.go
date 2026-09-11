@@ -68,6 +68,37 @@ func credentialsDir() (string, error) {
 // credentials file.
 var validTargets = map[string]bool{"local": true, "vps": true}
 
+// ensureCredentialsDir creates credentialsDir if needed and makes sure it's
+// 0o700, even on a machine that ran an older CLI version which created it
+// at 0o755 -- os.MkdirAll is a documented no-op, including on mode, when
+// the directory already exists, so a plain MkdirAll alone would never
+// tighten an existing installation's permissions, only a fresh one's.
+//
+// The Chmod is best-effort, not fatal: it only ever narrows permissions on
+// a directory whose files are already individually 0o600 (see
+// SaveCredentials/SaveLocalAdmin), so failing to also tighten the
+// directory itself is a defense-in-depth miss, not a loss of the real
+// protection -- and failing loudly here would turn an unusual pre-existing
+// ownership on ~/.versola/openbao (e.g. created by a different user or
+// process) into a hard failure of every `configure`/`secrets login`,
+// which is worse than just not tightening it. Also a near-total no-op on
+// Windows: os.Chmod there only toggles the read-only attribute, not an
+// owner-only ACL -- fine, since 0o600 on the files themselves is this
+// package's real cross-platform protection.
+func ensureCredentialsDir() (string, error) {
+	dir, err := credentialsDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("couldn't create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		fmt.Printf("(couldn't tighten permissions on %s to 0700 -- %v -- continuing anyway, the credential files themselves are still 0600)\n", dir, err)
+	}
+	return dir, nil
+}
+
 func credentialsPath(target string) (string, error) {
 	if !validTargets[target] {
 		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported`, target)
@@ -102,12 +133,8 @@ func LoadCredentials(target string) (*Credentials, error) {
 // SaveCredentials stores AppRole credentials for target, creating
 // ~/.versola/openbao if this is the first target configured.
 func SaveCredentials(target string, c *Credentials) error {
-	dir, err := credentialsDir()
-	if err != nil {
+	if _, err := ensureCredentialsDir(); err != nil {
 		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("couldn't create %s: %w", dir, err)
 	}
 
 	b, err := json.MarshalIndent(c, "", "  ")

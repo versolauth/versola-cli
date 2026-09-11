@@ -63,6 +63,20 @@ func ProvisionLocal(address string) error {
 		return fmt.Errorf("couldn't check OpenBao's health: %w", err)
 	}
 
+	// Tracked separately from `initialized` itself: the check below that
+	// skips re-provisioning when credentials already exist on disk must
+	// NOT apply here. A fresh Init means this is, by definition, a BRAND
+	// NEW OpenBao with none of kv-v2/AppRole/policy/role set up yet --
+	// any local.json already on disk at this point is a leftover from a
+	// PREVIOUS local OpenBao volume (e.g. the throwaway container/volume
+	// was recreated, exactly the case this automation exists for) and is
+	// now stale: its role-id/secret-id refer to an AppRole that doesn't
+	// exist on this new instance. Trusting it would skip provisioning
+	// entirely and leave resolveSecrets to fail on a confusing AppRole
+	// login error instead of this function ever getting a chance to
+	// explain what's actually wrong.
+	justInitialized := !initialized
+
 	if !initialized {
 		fmt.Println("Initializing local OpenBao...")
 		rootToken, unsealKey, err := openbao.Init(ctx, address)
@@ -71,14 +85,18 @@ func ProvisionLocal(address string) error {
 		}
 		admin = &openbao.LocalAdmin{RootToken: rootToken, UnsealKey: unsealKey}
 		if err := openbao.SaveLocalAdmin(admin); err != nil {
-			// Saved nowhere, but the run can still finish this once --
-			// admin is still in hand for the rest of this call. Surfaced
-			// as a loud warning, not a silent one: without this file, the
-			// NEXT `configure local` (after OpenBao's container restarts
-			// and reseals -- see openbao.Unseal's own comment) has no way
-			// to unseal it again and will fail with the same message
-			// ProvisionLocal itself gives below for that case.
-			fmt.Printf("(couldn't save OpenBao admin credentials -- %v -- the next `configure local` after this OpenBao container restarts may need this fixed by hand first)\n", err)
+			// Not just a warning: without this file, the NEXT `configure
+			// local` (after OpenBao's container restarts and reseals --
+			// see openbao.Unseal's own comment) has no way to unseal it
+			// again, and neither value is recoverable from OpenBao itself
+			// afterward -- printed here so a human can save them by hand
+			// (e.g. straight into local-admin.json, same shape this would
+			// have written) rather than losing them the moment this
+			// process exits.
+			fmt.Printf("(couldn't save OpenBao admin credentials -- %v)\n", err)
+			fmt.Println("Save these by hand or this OpenBao is stuck sealed forever once this process exits:")
+			fmt.Printf("  root token: %s\n", rootToken)
+			fmt.Printf("  unseal key: %s\n", unsealKey)
 		}
 		haveAdmin = true
 		sealed = true // a freshly initialized OpenBao always starts sealed
@@ -86,7 +104,7 @@ func ProvisionLocal(address string) error {
 
 	if sealed {
 		if !haveAdmin {
-			return fmt.Errorf(`local OpenBao is initialized and sealed, but this machine has no saved unseal key -- this only happens if it was set up by hand before this automation existed (see develop.md's OpenBao section for the manual "bao operator unseal" step), or ~/.versola/openbao/local-admin.json was deleted. Unseal it by hand once and re-run`)
+			return fmt.Errorf(`local OpenBao is initialized and sealed, but this machine has no saved unseal key -- this happens if it was set up by hand before this automation existed (see develop.md's OpenBao section for the manual "bao operator unseal" step), if ~/.versola/openbao/local-admin.json was deleted, or if saving it failed right after a previous Init (in which case the root token and unseal key were printed to the console at the time -- check scrollback/logs from that run). Unseal it by hand once and re-run`)
 		}
 		fmt.Println("Unsealing local OpenBao...")
 		if err := openbao.Unseal(ctx, address, admin.UnsealKey); err != nil {
@@ -94,13 +112,23 @@ func ProvisionLocal(address string) error {
 		}
 	}
 
-	if haveCreds {
+	if haveCreds && !justInitialized {
 		// Already fully set up by a previous run (or by hand, following
 		// develop.md's old manual steps) -- nothing left to provision, but
 		// still print the same info a fresh provisioning run would, every
 		// time (see the printing block below for why): the point is that
 		// nobody has to go find and cat a JSON file to get these, whether
 		// this is the first `bootstrap local` or the fiftieth.
+		//
+		// The justInitialized exception: existingCreds here can be a
+		// LEFTOVER from a previous local OpenBao volume that just got
+		// destroyed and recreated (Init above only just ran because
+		// Health reported this instance as brand new) -- its role-id/
+		// secret-id refer to an AppRole that doesn't exist on THIS
+		// instance yet. Falling through instead of returning here means
+		// the provisioning block below re-runs for real against the new
+		// instance and overwrites local.json with credentials that
+		// actually work.
 		printLocalOpenBaoInfo(existingCreds)
 		return nil
 	}

@@ -78,3 +78,30 @@ func IsRunning(name string) (bool, error) {
 	}
 	return strings.TrimSpace(string(out)) == "true", nil
 }
+
+// IsRootless reports whether the Docker daemon this CLI is talking to is
+// running rootless (started by an unprivileged user, via rootlesskit's
+// own user/network namespaces) rather than the usual system-wide daemon
+// running as root.
+//
+// This matters to callers like deploy.pullAndRunTools that want a
+// container's root user to land on a specific *host* UID via `docker run
+// -u <uid>:<gid>`: under a normal (rootful) daemon, that flag runs the
+// container process as exactly that host UID, which is what those
+// callers want. Under a rootless daemon, though, the daemon has already
+// remapped container UID 0 to the host user who started it -- a
+// container's default root user already writes bind-mounted files as
+// that same host user, with no `-u` needed at all. Passing a host UID
+// via `-u` in that mode instead asks for a *subordinate* UID out of
+// /etc/subuid, which essentially never owns the bind mount the caller
+// actually cares about, and the write fails outright. Same flag,
+// opposite effect, depending on which kind of daemon answers it --
+// callers need to know which one they're talking to before reaching for
+// `-u` at all.
+func IsRootless() (bool, error) {
+	out, err := exec.Command("docker", "info", "--format", "{{.SecurityOptions}}").Output()
+	if err != nil {
+		return false, fmt.Errorf("couldn't check whether the docker daemon is rootless: %w", err)
+	}
+	return strings.Contains(string(out), "name=rootless"), nil
+}

@@ -82,8 +82,12 @@ func SaveLocalAdmin(a *LocalAdmin) error {
 		return err
 	}
 	// 0o600, same reasoning as Credentials.SecretID's own file: this one
-	// holds a root token, more sensitive still.
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	// holds a root token, more sensitive still. atomicWriteFile, not a
+	// plain os.WriteFile -- see its own comment: a process killed
+	// mid-write here would otherwise risk leaving this file empty,
+	// destroying the previous root token/unseal key without the new one
+	// ever landing either.
+	if err := atomicWriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("couldn't write %s: %w", path, err)
 	}
 	return nil

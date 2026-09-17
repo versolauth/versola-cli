@@ -27,25 +27,41 @@ var secretServices = []string{"auth", "central", "edge"}
 // never happens.
 //
 // Best-effort, not fatal. pullAndRunTools now runs the tools container
-// with -u matching this process's own UID/GID (see its own comment), so
-// on a native Linux host these files are already owned by the CLI by
-// the time this runs, and the chmod below is expected to actually
-// succeed there -- closing the "operation not permitted" gap that used
-// to leave *.generated-secrets.env world-readable (KNOWN-ISSUES.md,
-// confirmed on the real vps 09.09.2026, before that fix). This is still
-// treated as best-effort rather than fatal, though: -u is skipped
-// entirely on Windows (os.Getuid() == -1, see pullAndRunTools), and
+// with -u matching this process's own UID/GID on a normal (rootful)
+// Docker daemon (see its own comment, and docker.IsRootless for why
+// rootless daemons are deliberately left alone), so on a native Linux
+// host these files are usually already owned by the CLI by the time
+// this runs, and the chmod below is expected to actually succeed there
+// -- shrinking the "operation not permitted" gap that used to leave
+// *.generated-secrets.env world-readable indefinitely (KNOWN-ISSUES.md,
+// confirmed on the real vps 09.09.2026, before that fix).
+//
+// "Shrinking", not closing: -u fixes who owns the file, not the
+// container's umask. entrypoint.sh's cp/java calls still create these
+// files at whatever default mode the image's umask gives them (usually
+// 644) before this function ever runs -- so there's still a brief
+// window, between the tools container exiting and this chmod actually
+// running, where the file is world-readable on a genuinely multi-user
+// host. What -u closes is the *indefinite* version of that window (the
+// file no longer stays 644 forever, only for a moment), not the window
+// itself. A fully airtight fix would need versola-tools' own
+// entrypoint.sh to `umask 077` before writing these files -- a
+// cross-repo change, out of scope here, noted as a possible follow-up
+// in KNOWN-ISSUES.md.
+//
+// This is still treated as best-effort rather than fatal: -u is skipped
+// on Windows and on a rootless daemon (see pullAndRunTools), and
 // nothing here guarantees every future environment this runs in maps
-// UIDs the same way a plain native-Linux Docker install does (rootless
-// Docker's own UID remapping, for one). Treating a chmod failure as
-// fatal would abort `configure` before secret resolution even starts,
-// on exactly the kind of unusual setup this can't anticipate -- staying
-// best-effort means an environment where this still doesn't line up
-// degrades back to the old (logged) exposure window instead of losing
-// the ability to deploy at all. Deletion doesn't have this problem --
-// removing a file only needs write access to its directory, not
-// ownership of the file itself -- so resolveServiceSecrets' cleanup on
-// the happy path is unaffected either way.
+// UIDs the same way a plain rootful native-Linux Docker install does.
+// Treating a chmod failure as fatal would abort `configure` before
+// secret resolution even starts, on exactly the kind of unusual setup
+// this can't anticipate -- staying best-effort means an environment
+// where this still doesn't line up degrades back to the old (logged)
+// exposure window instead of losing the ability to deploy at all.
+// Deletion doesn't have this problem -- removing a file only needs
+// write access to its directory, not ownership of the file itself --
+// so resolveServiceSecrets' cleanup on the happy path is unaffected
+// either way.
 func restrictGeneratedSecretsPerms(dir string) {
 	for _, service := range secretServices {
 		path := filepath.Join(dir, service+".generated-secrets.env")

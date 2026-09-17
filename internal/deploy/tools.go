@@ -120,25 +120,56 @@ func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
 	// image runs as by default (root -- no USER directive there, and
 	// entrypoint.sh itself only ever does mkdir/cp/sed into the mounted
 	// /out, nothing that actually needs root). Without this, on a native
-	// Linux host where the CLI itself runs unprivileged (the vps target),
-	// restrictGeneratedSecretsPerms's chmod on *.generated-secrets.env
-	// fails with "operation not permitted" right after this call returns
-	// -- chmod requires owning the file, not just write access to its
-	// directory (which the CLI does have -- see that function's own
-	// comment on why that used to matter). Matching the container's UID
-	// to the CLI's own closes that at the source: these files are already
-	// owned by this process by the time that chmod runs, so it actually
-	// succeeds instead of just warning and leaving them world-readable
-	// (flagged in KNOWN-ISSUES.md, confirmed on the real vps 09.09.2026).
+	// Linux host where the CLI itself runs unprivileged (the vps target)
+	// against a normal (rootful) docker daemon, restrictGeneratedSecretsPerms's
+	// chmod on *.generated-secrets.env fails with "operation not
+	// permitted" right after this call returns -- chmod requires owning
+	// the file, not just write access to its directory (which the CLI
+	// does have -- see that function's own comment on why that used to
+	// matter). Matching the container's UID to the CLI's own shrinks that
+	// gap a lot: these files are owned by this process by the time that
+	// chmod runs, so it actually succeeds there instead of just warning
+	// and leaving them world-readable indefinitely (flagged in
+	// KNOWN-ISSUES.md, confirmed on the real vps 09.09.2026). It doesn't
+	// make that chmod redundant, though -- restrictGeneratedSecretsPerms's
+	// own comment covers the (much smaller) exposure window that's left
+	// even once this succeeds.
 	//
-	// os.Getuid()/os.Getgid() return -1 on Windows, where this doesn't
-	// apply at all -- Docker Desktop's own translation layer already
-	// handles bind-mount ownership there, and docker-local (the only
-	// target ever run on Windows) is a throwaway dev stack, not where
-	// this bug ever showed up. Skipped there rather than passing a
-	// nonsensical "-1:-1" to docker run.
+	// Two cases where adding -u would be wrong, not just unnecessary:
+	//
+	//   - Windows: os.Getuid()/os.Getgid() return -1 there, where this
+	//     doesn't apply at all -- Docker Desktop's own translation layer
+	//     already handles bind-mount ownership, and docker-local (the
+	//     only target ever run on Windows) is a throwaway dev stack, not
+	//     where this bug ever showed up.
+	//
+	//   - Rootless Docker: its daemon already remaps container UID 0 to
+	//     the host user who started it, so the container's default root
+	//     user already writes /out as that same host user with no -u at
+	//     all. Passing this process's host UID via -u there instead asks
+	//     for a *subordinate* UID from /etc/subuid, which doesn't own
+	//     /out either -- the write fails outright, a harder failure than
+	//     the chmod warning this whole change exists to fix (flagged in
+	//     PR review, see docker.IsRootless's own comment for the detailed
+	//     reasoning). Checked explicitly rather than assumed away.
 	if uid := os.Getuid(); uid >= 0 {
-		args = append(args, "-u", fmt.Sprintf("%d:%d", uid, os.Getgid()))
+		rootless, err := docker.IsRootless()
+		switch {
+		case err != nil:
+			// Can't tell which kind of daemon this is. Configure already
+			// confirmed *a* daemon is reachable (checks.DockerDaemon),
+			// so this is an unexpected enough failure that guessing
+			// either way feels worse than just not adding -u: the worst
+			// case then is this host stays on the pre-this-change
+			// behavior (the chmod warning below), not a new, harder
+			// failure a rootless host would hit from a wrong guess.
+		case rootless:
+			// Leave -u off entirely -- see the comment above this
+			// block for why adding it here would actively break
+			// rootless hosts rather than just being a no-op.
+		default:
+			args = append(args, "-u", fmt.Sprintf("%d:%d", uid, os.Getgid()))
+		}
 	}
 	args = append(args, "-e", "TARGET="+toolsTarget(target))
 	// -e ENV_NAME=...: the literal environment name gen-env.scala writes

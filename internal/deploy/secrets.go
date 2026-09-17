@@ -26,15 +26,23 @@ var secretServices = []string{"auth", "central", "edge"}
 // outright; this is what protects the ones still sitting there if that
 // never happens.
 //
-// Best-effort, not fatal: pullAndRunTools runs the tools container
-// without --user, so on a Linux host these files land owned by whatever
-// user the image runs as (root, with no USER directive in
-// Dockerfile.tools) -- not the CLI's own, unprivileged user. chmod on a
-// file this process doesn't own fails with "operation not permitted"
-// regardless of the directory's own permissions, which the CLI does own
-// (state.Prepare created it). Treating that as fatal would abort every
-// `configure vps` before secret resolution even starts on exactly the
-// machine this matters most for. Deletion doesn't have this problem --
+// Best-effort, not fatal. pullAndRunTools now runs the tools container
+// with -u matching this process's own UID/GID (see its own comment), so
+// on a native Linux host these files are already owned by the CLI by
+// the time this runs, and the chmod below is expected to actually
+// succeed there -- closing the "operation not permitted" gap that used
+// to leave *.generated-secrets.env world-readable (KNOWN-ISSUES.md,
+// confirmed on the real vps 09.09.2026, before that fix). This is still
+// treated as best-effort rather than fatal, though: -u is skipped
+// entirely on Windows (os.Getuid() == -1, see pullAndRunTools), and
+// nothing here guarantees every future environment this runs in maps
+// UIDs the same way a plain native-Linux Docker install does (rootless
+// Docker's own UID remapping, for one). Treating a chmod failure as
+// fatal would abort `configure` before secret resolution even starts,
+// on exactly the kind of unusual setup this can't anticipate -- staying
+// best-effort means an environment where this still doesn't line up
+// degrades back to the old (logged) exposure window instead of losing
+// the ability to deploy at all. Deletion doesn't have this problem --
 // removing a file only needs write access to its directory, not
 // ownership of the file itself -- so resolveServiceSecrets' cleanup on
 // the happy path is unaffected either way.

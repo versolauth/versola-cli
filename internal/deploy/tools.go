@@ -3,6 +3,7 @@ package deploy
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -112,7 +113,34 @@ func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
 	// emit (see its own comment on TARGET) -- without this it always
 	// defaults to docker-local, which was fine back when "local" was the
 	// only target this CLI supported at all.
-	args := []string{"run", "--rm", "--platform", "linux/amd64", "-e", "TARGET=" + toolsTarget(target)}
+	args := []string{"run", "--rm", "--platform", "linux/amd64"}
+	// -u <uid>:<gid>: makes the container write auth.conf/central.conf/
+	// edge.conf, *.generated-secrets.env and compose.fragment.yml under
+	// this process's own UID/GID instead of whatever Dockerfile.tools'
+	// image runs as by default (root -- no USER directive there, and
+	// entrypoint.sh itself only ever does mkdir/cp/sed into the mounted
+	// /out, nothing that actually needs root). Without this, on a native
+	// Linux host where the CLI itself runs unprivileged (the vps target),
+	// restrictGeneratedSecretsPerms's chmod on *.generated-secrets.env
+	// fails with "operation not permitted" right after this call returns
+	// -- chmod requires owning the file, not just write access to its
+	// directory (which the CLI does have -- see that function's own
+	// comment on why that used to matter). Matching the container's UID
+	// to the CLI's own closes that at the source: these files are already
+	// owned by this process by the time that chmod runs, so it actually
+	// succeeds instead of just warning and leaving them world-readable
+	// (flagged in KNOWN-ISSUES.md, confirmed on the real vps 09.09.2026).
+	//
+	// os.Getuid()/os.Getgid() return -1 on Windows, where this doesn't
+	// apply at all -- Docker Desktop's own translation layer already
+	// handles bind-mount ownership there, and docker-local (the only
+	// target ever run on Windows) is a throwaway dev stack, not where
+	// this bug ever showed up. Skipped there rather than passing a
+	// nonsensical "-1:-1" to docker run.
+	if uid := os.Getuid(); uid >= 0 {
+		args = append(args, "-u", fmt.Sprintf("%d:%d", uid, os.Getgid()))
+	}
+	args = append(args, "-e", "TARGET="+toolsTarget(target))
 	// -e ENV_NAME=...: the literal environment name gen-env.scala writes
 	// into the generated configs -- deliberately not derived from target
 	// (vps isn't itself an environment: the same VPS could run "prod"

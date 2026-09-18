@@ -29,9 +29,24 @@ import (
 // temp file's directory, matching path's own, guarantees), so every
 // point this can be interrupted still leaves path as either the old
 // content or the fully-written new content -- never something in
-// between. True on Windows too, not just POSIX: Go's os.Rename there
-// uses MoveFileEx with MOVEFILE_REPLACE_EXISTING, which gives the same
-// guarantee.
+// between. That's a firm guarantee on POSIX (rename(2) is a single
+// filesystem operation there), but weaker on Windows: os.Rename there
+// goes through MoveFileEx with MOVEFILE_REPLACE_EXISTING, which -- unlike
+// Windows' own purpose-built ReplaceFile API -- was never specified as a
+// single atomic transaction the way POSIX rename is (see
+// https://groups.google.com/g/golang-nuts/c/JFvnLx246uM; even
+// github.com/natefinch/atomic, the standard fix for exactly this
+// problem, only wraps MoveFileEx on Windows too, not ReplaceFile, so
+// this isn't a gap anything commonly used actually closes today
+// either). In practice this narrows to: a machine dying in the instant
+// MoveFileEx is replacing an existing local-admin.json/credentials
+// file. Accepted here rather than chased with a hand-rolled
+// ReplaceFileW syscall (flagged in PR review, considered, declined):
+// docker-local, the only target Windows ever runs, is a throwaway dev
+// stack (see its own comment further down) -- worst case there is
+// resetting the local OpenBao volume and re-provisioning, not losing
+// something that can't be regenerated. vps, where that would be a real
+// loss, is always Linux, where this guarantee already holds in full.
 func atomicWriteFile(path string, b []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")

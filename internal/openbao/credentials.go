@@ -149,7 +149,12 @@ func SaveCredentials(target string, c *Credentials) error {
 	}
 	// 0o600, not the 0o644 state.go uses for state.json: this file holds
 	// SecretID, which state.json never holds anything equivalent to.
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	// atomicWriteFile, not a plain os.WriteFile -- same reasoning as
+	// SaveLocalAdmin: a process killed mid-write would otherwise risk
+	// leaving this file empty, destroying a SecretID nothing here can
+	// regenerate (whoever administers OpenBao would have to hand out a
+	// new one) without the new value ever landing either.
+	if err := atomicWriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("couldn't write %s: %w", path, err)
 	}
 	return nil

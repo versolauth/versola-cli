@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // atomicWriteFile writes b to path via a temp file in path's own
@@ -57,11 +58,58 @@ func atomicWriteFile(path string, b []byte, perm os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("couldn't write %s: %w", tmpPath, err)
 	}
+	// Flush the temp file's data to disk before it's ever renamed into
+	// place. Close alone only hands the bytes to the OS's page cache --
+	// without this, a host crash or lost VM right after Rename below
+	// returns can still lose the new content the rename just pointed
+	// path at, even though nothing here ever saw an error (flagged in
+	// PR review: the atomicity fix above protects against a partial
+	// write, not against this, a separate durability gap).
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("couldn't flush %s to disk: %w", tmpPath, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("couldn't finish writing %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("couldn't move %s into place at %s: %w", tmpPath, path, err)
 	}
+	// Best-effort: also flush dir's own metadata, so the rename itself
+	// -- not just the data inside the file it now points at -- survives
+	// a crash right after this returns. A rename only becomes durable
+	// once the *directory's* metadata update reaches disk, not merely
+	// once Rename returns; a crash in that narrower gap can, on some
+	// filesystems, leave the directory entry still pointing at the old
+	// (or no) file even though Rename above already succeeded from this
+	// process's own point of view.
+	//
+	// POSIX-only, and not fatal: directory fsync has no well-established
+	// equivalent through Go's os package on Windows (same reasoning as
+	// ensureCredentialsDir's own Chmod-is-best-effort comment), and
+	// docker-local -- the only target Windows ever runs -- is a
+	// throwaway dev stack this narrower gap matters least for; vps, the
+	// target this protects in earnest, is always Linux. Skipped rather
+	// than attempted-and-warned-every-call on a platform where it isn't
+	// meaningful to begin with.
+	if runtime.GOOS != "windows" {
+		if err := syncDir(dir); err != nil {
+			fmt.Printf("  (couldn't flush %s's directory entry to disk: %v)\n", path, err)
+		}
+	}
 	return nil
+}
+
+// syncDir flushes dir's own metadata to disk, so a rename into dir
+// (os.Rename in atomicWriteFile above) is durable across a crash, not
+// just visible to this process from the moment Rename returns. See
+// atomicWriteFile's own comment for why this matters and why it's only
+// attempted, best-effort, on POSIX.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

@@ -20,7 +20,7 @@ var adminHTTP = &http.Client{Timeout: 10 * time.Second}
 // Health reports whether address's OpenBao has been through `sys/init` at
 // all, and if so, whether it's currently sealed (true on every fresh
 // container start, even with data intact on the volume -- seal state
-// itself isn't persisted). Used by ProvisionLocal to decide which of
+// itself isn't persisted). Used by ProvisionOpenBao to decide which of
 // Init/Unseal below it actually needs to run, rather than assuming a
 // fresh container every time.
 func Health(ctx context.Context, address string) (initialized, sealed bool, err error) {
@@ -50,7 +50,7 @@ func Health(ctx context.Context, address string) (initialized, sealed bool, err 
 
 // Init runs OpenBao's one-time initialization with a single key share
 // (-key-shares=1 -key-threshold=1 in develop.md's manual `bao operator
-// init` -- see ProvisionLocal's own comment on why that's the right
+// init` -- see ProvisionOpenBao's own comment on why that's the right
 // choice here too, not just for the manual vps flow it was written for).
 // Returns the root token and the one unseal key -- both are needed again
 // (unseal on every restart, the root token to finish provisioning below),
@@ -157,7 +157,7 @@ func adminRequest(ctx context.Context, method, url, token string, body any) ([]b
 // enable` return for a mount/auth-method that's already there (see
 // develop.md's own manual steps, and this repo's actual vps deploy log,
 // which hit this literally). Treated as success everywhere it's checked
-// below: ProvisionLocal has to be safe to run on every `configure local`,
+// below: ProvisionOpenBao has to be safe to run on every `configure <target>`,
 // not just the first one on a given machine, so "it's already enabled"
 // must not be a failure.
 func alreadyInUse(statusCode int, body []byte) bool {
@@ -237,7 +237,7 @@ func CreateApproleRole(ctx context.Context, address, token, name, policy string)
 }
 
 // ReadRoleID fetches an AppRole role's role-id -- stable across repeated
-// calls (unlike GenerateSecretID below), so ProvisionLocal calling this
+// calls (unlike GenerateSecretID below), so ProvisionOpenBao calling this
 // again on a later `configure local` gets back the same value a previous
 // run already saved.
 func ReadRoleID(ctx context.Context, address, token, name string) (string, error) {
@@ -261,9 +261,9 @@ func ReadRoleID(ctx context.Context, address, token, name string) (string, error
 
 // GenerateSecretID mints a fresh secret-id for an AppRole role -- `bao
 // write -f auth/approle/role/<name>/secret-id`. Unlike role-id, this
-// generates a NEW value every call: ProvisionLocal only calls this when a
+// generates a NEW value every call: ProvisionOpenBao only calls this when a
 // target has no stored Credentials yet, OR when OpenBao was just freshly
-// (re)initialized in this same run (see ProvisionLocal's justInitialized),
+// (re)initialized in this same run (see ProvisionOpenBao's justInitialized),
 // to avoid minting a throwaway extra secret-id on every ordinary later
 // `configure` against an already-provisioned instance. secret_id_ttl=0
 // (see CreateApproleRole) means old secret-ids from a reprovisioned run

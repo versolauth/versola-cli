@@ -12,6 +12,7 @@ import (
 var noBrowser bool
 var authURL string
 var postgresHost string
+var setupOpenBao bool
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -23,9 +24,12 @@ Currently supported:
   versola bootstrap local 0.1.1
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
 
-vps deploys to a real server — it requires OpenBao credentials to
-already be stored for it first (see "versola secrets login vps"), and
-asks for confirmation before it touches the live database.
+vps deploys to a real server. By default this provisions vps's OpenBao
+automatically too (init, unseal, kv-v2, AppRole, policy, role — same as
+local always has) — pass --setup-openbao if you've already set OpenBao
+up yourself and just want to hand this CLI a role-id/secret-id via
+"versola secrets login vps" instead. Either way this asks for
+confirmation before it touches the live database.
 
 --auth-url and --postgres-host are both required for vps: the public
 domain this deployment will actually be reachable at, and the host:port
@@ -53,6 +57,7 @@ func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
 // runBootstrap deploys in one go, which is all this command has ever
@@ -125,7 +130,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if _, err := deploy.Configure(target, version, authURL, postgresHost); err != nil {
+	if _, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao); err != nil {
 		return err
 	}
 

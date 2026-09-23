@@ -52,7 +52,7 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 
 	// configure/bootstrap hold this same lock for their whole run and,
 	// for "local", write this exact file themselves (see
-	// deploy.ProvisionLocal -> openbao.SaveCredentials) -- without it, a
+	// deploy.ProvisionOpenBao -> openbao.SaveCredentials) -- without it, a
 	// `secrets login` run by hand while a `configure local`/`bootstrap
 	// local` is mid-provisioning in another terminal could race a plain
 	// os.WriteFile against that other write and lose one of the two

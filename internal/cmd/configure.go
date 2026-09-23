@@ -11,6 +11,7 @@ import (
 
 var configureAuthURL string
 var configurePostgresHost string
+var configureSetupOpenBao bool
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -24,9 +25,12 @@ services and doesn't touch the database — see "versola migrate" and
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
 
-vps requires OpenBao credentials to already be stored for it (see
-"versola secrets login vps"). --auth-url and --postgres-host are both
-required for vps — see "versola bootstrap --help" for why.
+vps's OpenBao is provisioned automatically by default (init, unseal,
+kv-v2, AppRole, policy, role — same as local always has) — pass
+--setup-openbao if you've already set OpenBao up yourself and just want
+to hand this CLI a role-id/secret-id via "versola secrets login vps"
+instead. --auth-url and --postgres-host are both required for vps — see
+"versola bootstrap --help" for why.
 
 Against a vps deployment this asks for confirmation first: it doesn't
 start or stop any of Versola's own services, but it does replace this
@@ -44,6 +48,7 @@ than something that happens silently — e.g. deploying onto a server.`,
 func init() {
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
@@ -122,6 +127,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost)
+	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, configureSetupOpenBao)
 	return err
 }

@@ -12,7 +12,7 @@ import (
 // open(O_TRUNC)-then-write.
 //
 // That distinction matters for both of this package's credential files
-// (SaveLocalAdmin's root token/unseal key, SaveCredentials' AppRole
+// (SaveAdminCreds's root token/unseal key, SaveCredentials' AppRole
 // SecretID): os.WriteFile truncates the file the moment it opens it, and
 // only writes the new bytes after that -- so a process that's killed
 // partway through (Ctrl+C, an OOM kill, a crash, a lost VM) can leave
@@ -20,7 +20,7 @@ import (
 // credentials were there before without ever finishing the new ones
 // either. None of those interruptions is a write error os.WriteFile's
 // own caller ever sees, so a check-the-returned-error fallback (see
-// SaveLocalAdmin's console fallback, from an earlier review round) can't
+// SaveAdminCreds's console fallback, from an earlier review round) can't
 // catch this case at all -- it only helps when WriteFile itself reports
 // failure.
 //

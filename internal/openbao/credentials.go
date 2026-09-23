@@ -76,7 +76,7 @@ var validTargets = map[string]bool{"local": true, "vps": true}
 //
 // The Chmod is best-effort, not fatal: it only ever narrows permissions on
 // a directory whose files are already individually 0o600 (see
-// SaveCredentials/SaveLocalAdmin), so failing to also tighten the
+// SaveCredentials/SaveAdminCreds), so failing to also tighten the
 // directory itself is a defense-in-depth miss, not a loss of the real
 // protection -- and failing loudly here would turn an unusual pre-existing
 // ownership on ~/.versola/openbao (e.g. created by a different user or
@@ -150,7 +150,7 @@ func SaveCredentials(target string, c *Credentials) error {
 	// 0o600, not the 0o644 state.go uses for state.json: this file holds
 	// SecretID, which state.json never holds anything equivalent to.
 	// atomicWriteFile, not a plain os.WriteFile -- same reasoning as
-	// SaveLocalAdmin: a process killed mid-write would otherwise risk
+	// SaveAdminCreds: a process killed mid-write would otherwise risk
 	// leaving this file empty, destroying a SecretID nothing here can
 	// regenerate (whoever administers OpenBao would have to hand out a
 	// new one) without the new value ever landing either.

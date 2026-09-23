@@ -40,7 +40,19 @@ import (
 // facts about whichever real server this is deploying to that this
 // package can't default sensibly (a different domain, possibly a
 // different Postgres setup entirely). Ignored for "local".
-func Configure(target, version, authURL, postgresHost string) (string, error) {
+//
+// setupOpenBaoByHand is the --setup-openbao escape hatch (see
+// cmd/bootstrap.go, cmd/configure.go): false (the default) means this
+// provisions target's OpenBao automatically, same as it always has for
+// local (see ProvisionOpenBao). true means someone already set OpenBao
+// up themselves and handed this machine a role-id/secret-id via
+// `versola secrets login <target>` -- Configure then never touches
+// OpenBao's admin API at all and just expects those credentials to
+// already be stored. Meaningless for "local", which is always
+// auto-provisioned regardless (its OpenBao is a throwaway container this
+// same CLI owns outright) -- ignored there, the same way authURL/
+// postgresHost are.
+func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool) (string, error) {
 	if target != "local" && target != "vps" {
 		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -184,15 +196,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return "", fmt.Errorf("OpenBao never came up: %w", err)
 	}
 
-	// local's OpenBao gets set up automatically from here -- init, unseal,
-	// kv-v2, AppRole, credentials, all of it (see ProvisionLocal's own
-	// comment on why local specifically, not vps too). Runs before
-	// resolveSecrets below, which is what actually needs the credentials
-	// this produces; safe to call on every `configure local`, not just a
-	// machine's first one.
-	if target == "local" {
-		if err := ProvisionLocal("http://localhost:8200"); err != nil {
-			return "", fmt.Errorf("couldn't provision local OpenBao: %w", err)
+	// target's OpenBao gets set up automatically from here -- init,
+	// unseal, kv-v2, AppRole, credentials, all of it (see
+	// ProvisionOpenBao's own comment, including why vps behaves the same
+	// as local here since 23.09.2026, and for the setupOpenBaoByHand
+	// escape). Runs before resolveSecrets below, which is what actually
+	// needs the credentials this produces; safe to call on every
+	// `configure <target>`, not just a machine's first one.
+	if target == "local" || !setupOpenBaoByHand {
+		if err := ProvisionOpenBao(target, "http://localhost:8200"); err != nil {
+			return "", fmt.Errorf("couldn't provision OpenBao: %w", err)
 		}
 	}
 
@@ -204,16 +217,15 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// <service>.secrets.env files the compose file's env_file: entries
 	// expect to already exist by the time Up runs it.
 	//
-	// For vps: if OpenBao is sealed (every fresh container start comes up
-	// sealed, even with its data intact on the persistent volume — see
-	// openbao.hcl.template's comment), this fails with whatever error
-	// OpenBao's own API returns, which already says "sealed" plainly.
-	// Unsealing there isn't automated: it needs the unseal key generated
-	// when OpenBao was first initialized, which nothing this CLI holds —
-	// see develop.md's OpenBao section for the manual `bao operator
-	// unseal` step. local's own OpenBao is unsealed automatically just
-	// above (see ProvisionLocal), so this whole paragraph doesn't apply
-	// to it.
+	// If OpenBao is sealed at this point, this fails with whatever error
+	// OpenBao's own API returns, which already says "sealed" plainly --
+	// only reachable with setupOpenBaoByHand (--setup-openbao) on vps,
+	// since the block just above already unseals it automatically
+	// otherwise (see ProvisionOpenBao). With --setup-openbao, unsealing
+	// stays a manual step: it needs the unseal key generated when
+	// OpenBao was first initialized, which this CLI was deliberately
+	// never handed in that mode — see develop.md's OpenBao section for
+	// the manual `bao operator unseal` step.
 	fmt.Println("Resolving secrets (OpenBao)...")
 	if err := resolveSecrets(dir, target); err != nil {
 		return "", err

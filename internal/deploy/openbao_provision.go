@@ -124,8 +124,21 @@ func ProvisionOpenBao(target, address string) error {
 			// shared or logged server session -- fail loudly instead
 			// and let the human decide how to recover, rather than
 			// silently leaving a root token sitting in scrollback.
+			//
+			// The error below deliberately does NOT suggest "fix the
+			// write and re-run" (caught in PR review, 24.09.2026) --
+			// Init just above only ever runs once per OpenBao instance;
+			// a second `configure vps` after this doesn't retry Init,
+			// it finds an instance that's already `initialized` (so
+			// `justInitialized` is false next time) and falls straight
+			// into the `sealed`-with-no-saved-key branch further down,
+			// which fails too -- there is no saved unseal key for it to
+			// find, on this run or any later one. Simply re-running
+			// cannot recover this instance; the only way out (short of
+			// having the token/key some other way) is resetting
+			// OpenBao's data volume and starting over from Init.
 			if target == "vps" {
-				return fmt.Errorf("OpenBao was just initialized but couldn't save its admin credentials to ~/.versola/openbao/%s-admin.json: %w -- the root token and unseal key this just generated are now lost to this process (not printed, on purpose, for vps -- see ProvisionOpenBao's own comment). Fix whatever's blocking the write (permissions, disk space) and re-run; if that's not possible, you'll need to reset this OpenBao (a fresh volume) and start over", target, err)
+				return fmt.Errorf("OpenBao was just initialized but couldn't save its admin credentials to ~/.versola/openbao/%s-admin.json: %w -- the root token and unseal key this just generated are now lost to this process and weren't printed either (on purpose, for vps -- see ProvisionOpenBao's own comment). This instance is now permanently initialized and sealed with no way for this CLI to unseal it again -- simply fixing the write problem and re-running will NOT recover it (Init only ever runs once). Unless you have the token/key some other way, you'll need to destroy and recreate this OpenBao's data volume and start over from a clean instance", target, err)
 			}
 			fmt.Printf("(couldn't save OpenBao admin credentials -- %v)\n", err)
 			fmt.Println("Save these by hand or this OpenBao is stuck sealed forever once this process exits:")

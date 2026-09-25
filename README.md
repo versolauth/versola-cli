@@ -121,8 +121,9 @@ its own — if Docker isn't found at all, the most it does is offer to open
 an install page in your browser, and only after you confirm:
 - Docker daemon reachable (not just `docker` on PATH)
 - Docker Compose v2 plugin present
-- Port 2821 free on localhost (`local` only — vps has no nginx service of
-  its own, see `--target` below)
+- Port 2821 free on localhost (`local` only — for `vps`, `configure`
+  itself checks the ports its reverse proxy needs, which depend on
+  `--proxy` and `--auth-url`: see "Deploying to a VPS" below)
 - Enough free memory (differs by target, see below)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
@@ -214,6 +215,69 @@ first, describing what that particular step is about to do. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
+### Deploying to a VPS: the reverse proxy
+
+On `vps`, Versola is exposed through its own reverse proxy: the official
+`nginx` image (not a Versola one), with its whole configuration generated
+by this CLI. `configure vps` writes it into the deployment next to
+versola-tools' files; `up` starts it last, once auth and edge are ready,
+and waits until a request through it actually reaches auth. It also
+serves the admin console at `/central/admin/`.
+
+`--proxy` picks how it's exposed:
+
+- **`nginx`** (default) — the proxy owns the server's ports 80 and 443.
+  With an `https://` `--auth-url` it gets and renews a Let's Encrypt
+  certificate by itself (nginx's own ACME module, no certbot). What the
+  server needs:
+  - the domain's DNS A (and, if you have IPv6, AAAA) record pointing at
+    this server;
+  - ports 80 and 443 free and reachable from the internet — `configure`
+    fails early, naming the port, if something (typically a web server
+    already installed) is using one;
+  - `--auth-url` exactly `https://<domain>`: no port, path or IP address.
+
+  ```
+  versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  ```
+
+  For a test deployment, add `--acme-staging`: the certificate then comes
+  from Let's Encrypt's staging environment — untrusted by browsers, but
+  without production's rate limits (a handful of certificates per domain
+  per week).
+
+- **`external`** — this server already runs its own web server on 80/443
+  (other sites, its own TLS). Versola's proxy then listens only on
+  `127.0.0.1:2821`, plain HTTP, and your web server forwards the domain
+  to it and keeps handling TLS itself. It must pass the Host header and
+  set `X-Forwarded-For` (and `X-Forwarded-Proto`), e.g. for nginx:
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:2821;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+  }
+  ```
+
+  ```
+  versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+  ```
+
+  The forwarding web server has to run on this same host (natively, or
+  in a container with host networking): 127.0.0.1:2821 isn't reachable
+  from anywhere else.
+
+The proxy is part of the same Docker Compose project as the rest of the
+deployment, so `status`, `down` and `uninstall` include it. Its
+certificates live in the `versola-acme-vps` Docker volume, which
+survives `down --volumes` and `uninstall`, so a redeploy doesn't request
+a new certificate.
+
+This needs a Versola release whose versola-tools ships the admin console;
+`configure vps` says so clearly when pointed at an older one.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
@@ -231,6 +295,10 @@ Removes everything versola deployed locally: stops the stack and deletes
 its Postgres volume, removes the `versola-*` images that were pulled, and
 clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
 to skip that.
+
+On a `vps` deployment, OpenBao's data volume and the TLS certificate
+volume (`versola-acme-vps`) are left in place; `uninstall` prints the
+`docker volume rm` commands if you really mean to discard them.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's
 actually stopped, `~/.versola` is deliberately left in place rather than

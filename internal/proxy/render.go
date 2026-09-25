@@ -70,6 +70,7 @@ func (c Config) Files() (map[string][]byte, error) {
 		"Image":         Image,
 		"ContainerName": ContainerName,
 		"ACMEVolume":    ACMEVolume,
+		"ExternalPort":  ExternalPort,
 	}
 
 	files := map[string][]byte{}

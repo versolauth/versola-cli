@@ -97,7 +97,8 @@ func renderCases() []renderCase {
 				// IPv6 must be ignored here: the proxy only listens on loopback.
 				return Config{Mode: ModeExternal, AuthURL: mustURL(t, "https://id.example.com", ModeExternal), IPv6: true}
 			},
-			want:      []string{"listen 127.0.0.1:2821;", "set_real_ip_from 127.0.0.1;", "real_ip_header X-Forwarded-For;"},
+			want: []string{"listen 127.0.0.1:2821;", "set_real_ip_from 127.0.0.1;", "real_ip_header X-Forwarded-For;",
+				"map $http_x_forwarded_proto $versola_forwarded_proto {"},
 			wantNot:   []string{"ssl", "acme", "resolver", "[::]", "listen 80", "listen 443"},
 			noCompose: []string{ACMEVolume},
 		},
@@ -143,6 +144,18 @@ func TestFiles(t *testing.T) {
 			// at http://<host>:2821.
 			if !has(conf, "absolute_redirect off;") {
 				t.Error("versola.conf lacks absolute_redirect off;")
+			}
+			// proxy_params.conf uses these; they must always be defined, in
+			// every mode, or nginx refuses the config.
+			if !has(conf, "map $http_host $versola_host {") || !hasSub(conf, "$versola_forwarded_proto {") {
+				t.Error("versola.conf lacks the $versola_host / $versola_forwarded_proto maps")
+			}
+			if c.name != "external mode" && hasSub(conf, "$http_x_forwarded_proto") {
+				t.Error("a client-sent X-Forwarded-Proto must only be trusted in external mode")
+			}
+			params := directives(files["proxy/proxy_params.conf"])
+			if !has(params, "proxy_set_header Host $versola_host;") || !has(params, "proxy_set_header X-Forwarded-Proto $versola_forwarded_proto;") {
+				t.Error("proxy_params.conf doesn't use $versola_host / $versola_forwarded_proto")
 			}
 			if !has(directives(files["proxy/nginx.conf"]), "load_module modules/ngx_http_acme_module.so;") {
 				t.Error("nginx.conf doesn't load the ACME module")

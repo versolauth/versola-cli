@@ -13,6 +13,33 @@ upstream edge_backend {
     server 127.0.0.1:8095;
     keepalive 32;
 }
+
+# Host passed upstream exactly as the client sent it, port included
+# ($host drops it) -- behind an external proxy on a non-default port the
+# advertised origin carries that port. $host only when the header is
+# missing altogether (HTTP/1.0).
+map $http_host $versola_host {
+    ""      $host;
+    default $http_host;
+}
+{{- if .RealIP }}
+
+# The scheme the client actually used: the external proxy in front
+# terminates TLS and talks plain HTTP to us, so $scheme here is always
+# "http". Its X-Forwarded-Proto is trusted -- only processes on this host
+# can reach 127.0.0.1:{{ .ExternalPort }}.
+map $http_x_forwarded_proto $versola_forwarded_proto {
+    ""      $scheme;
+    default $http_x_forwarded_proto;
+}
+{{- else }}
+
+# This proxy faces the internet directly: its own scheme is the truth, and
+# a client-sent X-Forwarded-Proto is ignored.
+map $scheme $versola_forwarded_proto {
+    default $scheme;
+}
+{{- end }}
 {{- if .TLS }}
 
 # TLS: nginx's ACME module issues and renews the certificate itself.

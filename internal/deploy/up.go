@@ -10,6 +10,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/wait"
 )
@@ -86,6 +87,13 @@ func Up(opts UpOptions, st *state.State) error {
 		return fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
 
+	// From here on containers may be (re)started from this bundle -- keep
+	// it from being deleted by a later configure even if this `up` fails
+	// halfway (see state.MarkStarting).
+	if err := state.MarkStarting(); err != nil {
+		return fmt.Errorf("couldn't record the deployment being started: %w", err)
+	}
+
 	// Postgres and central go up first, on their own — auth/edge's own
 	// startup fails fatally if central isn't reachable yet, and confirmed
 	// by hand that Docker's restart policy does NOT recover from that
@@ -97,12 +105,12 @@ func Up(opts UpOptions, st *state.State) error {
 	// compose file starts.
 	if isVps {
 		fmt.Println("\nStarting central...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "central"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "central")...); err != nil {
 			return fmt.Errorf("couldn't start central: %w", err)
 		}
 	} else {
 		fmt.Println("\nStarting Postgres and central...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "postgres", "central"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "postgres", "central")...); err != nil {
 			return fmt.Errorf("couldn't start postgres/central: %w", err)
 		}
 	}
@@ -127,17 +135,17 @@ func Up(opts UpOptions, st *state.State) error {
 	// start it, which may not be this bundle's. A bare "up -d" here would
 	// see openbao defined in this project's compose file but not part of
 	// this project, and try to create a second container under its fixed
-	// container_name, which Docker refuses. vps has no nginx/gateway
-	// service — its public nginx is native on the VPS, deployed by a
-	// separate pipeline (see compose.fragment.vps.yml.template's comment).
+	// container_name, which Docker refuses. vps's reverse proxy isn't in
+	// versola-tools' compose file at all -- versola-cli generates it
+	// (proxy.yml, see package proxy) and startProxy below starts it last.
 	if isVps {
 		fmt.Println("Starting auth and edge...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "auth", "edge"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge")...); err != nil {
 			return fmt.Errorf("couldn't start auth/edge: %w", err)
 		}
 	} else {
 		fmt.Println("Starting auth, edge, and the gateway...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "auth", "edge", "nginx"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge", "nginx")...); err != nil {
 			return fmt.Errorf("couldn't start the rest of the stack: %w", err)
 		}
 	}
@@ -149,6 +157,21 @@ func Up(opts UpOptions, st *state.State) error {
 	if err := wait.ForReady("http://localhost:8096/readiness", 60*time.Second); err != nil {
 		return fmt.Errorf("edge never became ready: %w", err)
 	}
+
+	// vps: the reverse proxy versola-cli generated at configure time (see
+	// package proxy) -- started last, once what it routes to is ready, so
+	// it never serves traffic to a backend that isn't. Deployments
+	// configured before versola-cli generated it have no ProxyMode and
+	// keep relying on a proxy set up by hand.
+	if isVps && st.ProxyMode != "" {
+		if err := startProxy(composePath, st); err != nil {
+			return err
+		}
+	}
+
+	// Everything is up and serving: the stack now runs from this
+	// deployment's bundle, and the one it ran from before can go.
+	markRunning()
 
 	if isVps {
 		// st.AuthURL is whatever --auth-url Configure was given (see
@@ -164,6 +187,9 @@ func Up(opts UpOptions, st *state.State) error {
 			authURL = "(unknown -- reconfigure to record it)"
 		}
 		fmt.Printf("\nVersola %s is running at %s\n", st.Version, authURL)
+		if st.ProxyMode == proxy.ModeExternal {
+			fmt.Printf("It listens on http://127.0.0.1:%d -- your own web server has to forward %s there, keeping the Host header and setting X-Forwarded-For ($proxy_add_x_forwarded_for in nginx).\n", proxy.ExternalPort, authURL)
+		}
 		// vps doesn't use a fixed literal password the way local's
 		// "Admin1234!" is — it's a real, standing admin credential Configure
 		// resolved against OpenBao (see gen-env.scala's
@@ -219,4 +245,14 @@ func ConfirmVpsDeploy(action string) error {
 		return fmt.Errorf("aborted")
 	}
 	return nil
+}
+
+// markRunning records that the stack now runs from this deployment's
+// bundle, which lets the previous one be removed (see
+// state.MarkRunning). Not fatal: the deployment is up either way, and the
+// worst case is an old bundle directory left on disk.
+func markRunning() {
+	if err := state.MarkRunning(); err != nil {
+		fmt.Printf("(couldn't record which deployment is running: %v)\n", err)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -13,6 +14,8 @@ var noBrowser bool
 var authURL string
 var postgresHost string
 var setupOpenBao bool
+var bootstrapProxy string
+var bootstrapACMEStaging bool
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -23,6 +26,10 @@ Currently supported:
 
   versola bootstrap local 0.1.1
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+
+On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
+certificate -- see "versola configure --help" for --proxy.
 
 vps deploys to a real server. By default this provisions vps's OpenBao
 automatically too (init, unseal, kv-v2, AppRole, policy, role — same as
@@ -57,6 +64,8 @@ func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
@@ -82,6 +91,9 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	if target == "vps" && postgresHost == "" {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
+	}
+	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
+		return err
 	}
 
 	// Held for the whole configure/migrate/up sequence below -- see
@@ -130,7 +142,8 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if _, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao); err != nil {
+	if _, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging}); err != nil {
 		return err
 	}
 

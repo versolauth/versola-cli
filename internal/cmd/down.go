@@ -46,7 +46,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	dockerArgs := []string{"compose", "-f", composePath, "down"}
+	dockerArgs := state.ComposeArgs(composePath, "down")
 	if removeVolumes {
 		dockerArgs = append(dockerArgs, "--volumes")
 	}

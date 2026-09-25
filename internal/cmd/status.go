@@ -52,7 +52,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	c := exec.Command("docker", "compose", "-f", composePath, "ps")
+	c := exec.Command("docker", state.ComposeArgs(composePath, "ps")...)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	if err := c.Run(); err != nil {

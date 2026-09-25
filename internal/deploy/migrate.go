@@ -195,7 +195,7 @@ func recordMigrated(st *state.State) error {
 // stays correct regardless of formatting differences across versola-tools
 // releases.
 func hasMigrateService(composePath string) (bool, error) {
-	out, err := docker.Output("compose", "-f", composePath, "config", "--services")
+	out, err := docker.Output(state.ComposeArgs(composePath, "config", "--services")...)
 	if err != nil {
 		return false, fmt.Errorf("couldn't list compose services: %w", err)
 	}
@@ -242,7 +242,7 @@ func migrateViaService(composePath string, opts MigrateOptions) error {
 	// run` always creates a fresh one-off container, so unlike
 	// migrateViaLegacyContainers below, there's no orphaned-container or
 	// concurrent-run guard to reimplement here.
-	args := []string{"compose", "-f", composePath, "run", "--rm", "-T", "migrate"}
+	args := state.ComposeArgs(composePath, "run", "--rm", "-T", "migrate")
 	if opts.DryRun || opts.Service != "" {
 		// `docker compose run <service> <command...>` -- once anything
 		// follows the service name, it REPLACES that service's own
@@ -300,7 +300,7 @@ func migrateViaLegacyContainers(composePath, target, onlyService string) error {
 		// instead asks Compose itself to block on the healthcheck already
 		// defined for it.
 		fmt.Println("Starting Postgres...")
-		if err := docker.Run("compose", "-f", composePath, "up", "-d", "--wait", "postgres"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "--wait", "postgres")...); err != nil {
 			return fmt.Errorf("postgres never became healthy: %w", err)
 		}
 	}
@@ -354,7 +354,7 @@ func migrateViaLegacyContainers(composePath, target, onlyService string) error {
 		}
 		_ = docker.RunQuiet("rm", "-f", name)
 
-		if err := docker.Run("compose", "-f", composePath, "run", "--rm", "--no-deps", "-T", "--name", name, "-e", "MIGRATE_ONLY=true", service); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "run", "--rm", "--no-deps", "-T", "--name", name, "-e", "MIGRATE_ONLY=true", service)...); err != nil {
 			return fmt.Errorf("%s migration failed: %w", service, err)
 		}
 	}

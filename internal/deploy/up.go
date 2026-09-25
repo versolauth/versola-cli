@@ -87,6 +87,13 @@ func Up(opts UpOptions, st *state.State) error {
 		return fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
 
+	// From here on containers may be (re)started from this bundle -- keep
+	// it from being deleted by a later configure even if this `up` fails
+	// halfway (see state.MarkStarting).
+	if err := state.MarkStarting(); err != nil {
+		return fmt.Errorf("couldn't record the deployment being started: %w", err)
+	}
+
 	// Postgres and central go up first, on their own — auth/edge's own
 	// startup fails fatally if central isn't reachable yet, and confirmed
 	// by hand that Docker's restart policy does NOT recover from that
@@ -162,6 +169,10 @@ func Up(opts UpOptions, st *state.State) error {
 		}
 	}
 
+	// Everything is up and serving: the stack now runs from this
+	// deployment's bundle, and the one it ran from before can go.
+	markRunning()
+
 	if isVps {
 		// st.AuthURL is whatever --auth-url Configure was given (see
 		// state.Finalize) -- not hardcoded here anymore, since that broke
@@ -234,4 +245,14 @@ func ConfirmVpsDeploy(action string) error {
 		return fmt.Errorf("aborted")
 	}
 	return nil
+}
+
+// markRunning records that the stack now runs from this deployment's
+// bundle, which lets the previous one be removed (see
+// state.MarkRunning). Not fatal: the deployment is up either way, and the
+// worst case is an old bundle directory left on disk.
+func markRunning() {
+	if err := state.MarkRunning(); err != nil {
+		fmt.Printf("(couldn't record which deployment is running: %v)\n", err)
+	}
 }

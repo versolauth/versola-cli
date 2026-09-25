@@ -125,6 +125,15 @@ type State struct {
 	// deployments and for vps deployments configured before versola-cli
 	// generated the proxy itself.
 	ProxyMode string `json:"proxyMode,omitempty"`
+
+	// MountedBundleDirs are the bundles containers may currently be
+	// started from, so bind-mount files from: `up` adds the current bundle
+	// before it starts anything (MarkStarting) and, once everything is up,
+	// narrows the list to just that bundle (MarkRunning). Nothing in it is
+	// deleted by a `configure` -- including a bundle a failed `up` only
+	// partly started. Nil in records written before this field existed;
+	// see Finalize for how that's treated.
+	MountedBundleDirs []string `json:"mountedBundleDirs,omitempty"`
 }
 
 // bundlePath resolves where this state's compose file and configs
@@ -236,27 +245,24 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string) error {
 		AuthURL:       authURL,
 		ProxyMode:     proxyMode,
 	}
+	// The bundles containers may still mount carry over: they keep using
+	// them until a successful `up` has replaced them all. A previous record
+	// without MountedBundleDirs (written before that field existed) can't
+	// tell whether its bundle is in use, so it's assumed to be -- keeping
+	// one extra directory is harmless, deleting a mounted one isn't.
+	if prevErr == nil {
+		s.MountedBundleDirs = prev.MountedBundleDirs
+		if prev.MountedBundleDirs == nil && prev.BundleDir != "" {
+			s.MountedBundleDirs = []string{prev.BundleDir}
+		}
+	}
 	if err := s.Save(); err != nil {
 		return err
 	}
 
-	// prev.BundleDir == "" is the legacy, pre-BundleDir layout (see
-	// loadLegacy) where files sit directly in ~/.versola/active itself,
-	// not a subdirectory of it -- bundlePath() would resolve that to dir
-	// itself, and removing dir here would take the brand new bundle this
-	// call just made active down with it. Nothing to clean up from that
-	// layout anyway (just a stray "version" file), so skip it rather than
-	// special-case it.
-	if prevErr == nil && prev.BundleDir != "" && prev.BundleDir != s.BundleDir {
-		oldBundleDir := filepath.Join(dir, prev.BundleDir)
-		if err := os.RemoveAll(oldBundleDir); err != nil {
-			// Not fatal -- state.json above already points at the new,
-			// complete deployment, so a leftover old bundle directory is
-			// wasted disk, not a correctness problem the way losing track
-			// of state.json would have been.
-			fmt.Printf("(couldn't remove the previous deployment's files at %s: %v — safe to delete by hand)\n", oldBundleDir, err)
-		}
-	}
+	// Everything else goes: the previous configure's bundle if it was never
+	// started, and any left behind by a configure that failed halfway.
+	pruneBundles(dir, append([]string{s.BundleDir}, s.MountedBundleDirs...)...)
 	return nil
 }
 
@@ -412,4 +418,77 @@ func ComposeArgs(composePath string, rest ...string) []string {
 		args = append(args, "-f", proxyFile)
 	}
 	return append(args, rest...)
+}
+
+// MarkStarting records, before `up` starts any container, that containers
+// may from now on mount the current bundle -- so a `configure` after an
+// `up` that failed halfway doesn't delete files those containers use.
+//
+// Both MarkStarting and MarkRunning re-read state.json rather than
+// trusting a caller's copy, so only this one field changes (same
+// reasoning as the migrate step's own update).
+func MarkStarting() error {
+	s, err := Load()
+	if err != nil {
+		return err
+	}
+	if s.BundleDir == "" {
+		return nil // legacy layout: files live directly in Dir, nothing to track
+	}
+	for _, d := range s.MountedBundleDirs {
+		if d == s.BundleDir {
+			return nil
+		}
+	}
+	s.MountedBundleDirs = append(s.MountedBundleDirs, s.BundleDir)
+	return s.Save()
+}
+
+// MarkRunning records that everything now runs from the current bundle --
+// called by `up` once the stack is up -- and removes every other bundle,
+// which nothing mounts any more.
+func MarkRunning() error {
+	s, err := Load()
+	if err != nil {
+		return err
+	}
+	if s.BundleDir == "" {
+		return nil
+	}
+	s.MountedBundleDirs = []string{s.BundleDir}
+	if err := s.Save(); err != nil {
+		return err
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	pruneBundles(dir, s.BundleDir)
+	return nil
+}
+
+// pruneBundles removes every bundle-* directory in dir except those named
+// in keep. Only bundle-* directories: in the legacy layout (see
+// loadLegacy) a deployment's files sit directly in dir itself. Failures
+// are reported, not fatal -- a leftover directory is only disk space.
+func pruneBundles(dir string, keep ...string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	kept := map[string]bool{}
+	for _, k := range keep {
+		if k != "" {
+			kept[k] = true
+		}
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "bundle-") || kept[e.Name()] {
+			continue
+		}
+		old := filepath.Join(dir, e.Name())
+		if err := os.RemoveAll(old); err != nil {
+			fmt.Printf("(couldn't remove a previous deployment's files at %s: %v — safe to delete by hand)\n", old, err)
+		}
+	}
 }

@@ -151,3 +151,21 @@ func TestBundleLegacyRecordAndLeftovers(t *testing.T) {
 		t.Errorf("leftover bundle %s from a failed configure wasn't removed", failed)
 	}
 }
+
+// Back-to-back Prepare calls must never hand out the same directory, even
+// when the clock hasn't moved between them (it advances in ~1ms steps on
+// Windows).
+func TestPrepareUnique(t *testing.T) {
+	isolate(t)
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		b, err := Prepare()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[b] {
+			t.Fatalf("Prepare returned %s twice", b)
+		}
+		seen[b] = true
+	}
+}

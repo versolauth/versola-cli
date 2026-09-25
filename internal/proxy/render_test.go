@@ -207,22 +207,21 @@ func TestNginxAcceptsConfig(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "central-ui"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			// Stands in for the ACMEVolume mount, laid out the way
-			// configure prepares it (setUpProxy): the ACME module creates
-			// only the last path element of state_path itself, so the
-			// per-directory subdirs must already be there.
-			acme := filepath.Join(dir, "acme-state")
-			for _, sub := range []string{acmeStateDir(ACMEProduction), acmeStateDir(ACMEStaging)} {
-				if err := os.MkdirAll(filepath.Join(acme, sub), 0o777); err != nil {
-					t.Fatal(err)
-				}
-			}
-			args := []string{"run", "--rm", "--entrypoint", "nginx",
+			// The ACME state dir is a tmpfs inside the container, not a
+			// host dir: the ACME module already writes its account key
+			// there during `nginx -t`, as root, which a host-side test
+			// cleanup (running as the CI user) couldn't delete. Laid out
+			// the way configure prepares the real volume (setUpProxy): the
+			// module only creates the last element of state_path itself,
+			// so the per-directory subdirs must already exist.
+			stateDir := "/var/cache/nginx/acme-letsencrypt"
+			prepare := "mkdir -p " + stateDir + "/" + acmeStateDir(ACMEProduction) + " " + stateDir + "/" + acmeStateDir(ACMEStaging)
+			args := []string{"run", "--rm", "--entrypoint", "sh",
+				"--tmpfs", stateDir,
 				"-v", filepath.Join(dir, "proxy/nginx.conf") + ":/etc/nginx/nginx.conf:ro",
 				"-v", filepath.Join(dir, "proxy/conf.d") + ":/etc/nginx/conf.d:ro",
 				"-v", filepath.Join(dir, "proxy/proxy_params.conf") + ":/etc/nginx/proxy_params.conf:ro",
-				"-v", acme + ":/var/cache/nginx/acme-letsencrypt",
-				Image, "-t"}
+				Image, "-c", prepare + " && exec nginx -t"}
 			out, err := exec.Command("docker", args...).CombinedOutput()
 			if err != nil {
 				t.Fatalf("nginx -t failed: %v\n%s", err, out)

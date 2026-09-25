@@ -202,9 +202,17 @@ func Prepare() (string, error) {
 	// entirely -- exactly what the tools container needs to write here in
 	// the first place) can read anything inside regardless of who ends up
 	// owning any individual file.
-	bundleDir := filepath.Join(dir, fmt.Sprintf("bundle-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(bundleDir, 0o700); err != nil {
-		return "", fmt.Errorf("couldn't create %s: %w", bundleDir, err)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("couldn't create %s: %w", dir, err)
+	}
+	// MkdirTemp, not a name from the clock alone: the clock can return the
+	// same value twice in a row (on Windows it only advances every
+	// millisecond or so), and MkdirAll would then silently reuse an
+	// existing bundle. MkdirTemp appends a random suffix and fails rather
+	// than reuse. The timestamp stays in the name for readability.
+	bundleDir, err := os.MkdirTemp(dir, fmt.Sprintf("bundle-%d-", time.Now().UnixNano()))
+	if err != nil {
+		return "", fmt.Errorf("couldn't create a bundle directory in %s: %w", dir, err)
 	}
 	return bundleDir, nil
 }

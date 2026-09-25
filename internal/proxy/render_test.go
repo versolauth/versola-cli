@@ -207,10 +207,21 @@ func TestNginxAcceptsConfig(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "central-ui"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// Stands in for the ACMEVolume mount, laid out the way
+			// configure prepares it (setUpProxy): the ACME module creates
+			// only the last path element of state_path itself, so the
+			// per-directory subdirs must already be there.
+			acme := filepath.Join(dir, "acme-state")
+			for _, sub := range []string{acmeStateDir(ACMEProduction), acmeStateDir(ACMEStaging)} {
+				if err := os.MkdirAll(filepath.Join(acme, sub), 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
 			args := []string{"run", "--rm", "--entrypoint", "nginx",
 				"-v", filepath.Join(dir, "proxy/nginx.conf") + ":/etc/nginx/nginx.conf:ro",
 				"-v", filepath.Join(dir, "proxy/conf.d") + ":/etc/nginx/conf.d:ro",
 				"-v", filepath.Join(dir, "proxy/proxy_params.conf") + ":/etc/nginx/proxy_params.conf:ro",
+				"-v", acme + ":/var/cache/nginx/acme-letsencrypt",
 				Image, "-t"}
 			out, err := exec.Command("docker", args...).CombinedOutput()
 			if err != nil {

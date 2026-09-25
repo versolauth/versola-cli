@@ -23,6 +23,9 @@ func TestParseAuthURLAccepts(t *testing.T) {
 		{"https://my-host.example.com", ModeNginx, "https://my-host.example.com", "my-host.example.com", "", true},
 		{"http://localhost", ModeNginx, "http://localhost", "localhost", "", false},
 		{"https://intranet", ModeExternal, "https://intranet", "intranet", "", false},
+		{"https://" + strings.Repeat("a", 63) + ".com", ModeNginx, "https://" + strings.Repeat("a", 63) + ".com", strings.Repeat("a", 63) + ".com", "", true},
+		// exactly 253 characters: the longest valid name
+		{"https://" + strings.Repeat("abcdefghi.", 25) + "com", ModeNginx, "https://" + strings.Repeat("abcdefghi.", 25) + "com", strings.Repeat("abcdefghi.", 25) + "com", "", true},
 	}
 	for _, c := range cases {
 		a, err := ParseAuthURL(c.raw, c.mode)
@@ -51,6 +54,8 @@ func TestParseAuthURLRejects(t *testing.T) {
 		{"https://.a.com", "not a valid host"},
 		{"https://-a.com", "not a valid host"},
 		{"https://a-.com", "not a valid host"},
+		{"https://" + strings.Repeat("a", 64) + ".com", "longer than 63"},
+		{"https://" + strings.Repeat("abcdefghi.", 26) + "com", "longer than 253"}, // 263 chars
 		{"id.example.com", "must be http(s)://"},
 		{"https", "must be http(s)://"},
 		{"https://", "must be http(s)://"},

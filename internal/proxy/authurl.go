@@ -59,9 +59,17 @@ func ParseAuthURL(raw, mode string) (AuthURL, error) {
 	if host == "" || strings.Trim(host, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" {
 		return fail("must be http(s)://<host>[:<port>] -- no path, query, fragment or user; the host may only contain letters, digits, '.' and '-'")
 	}
+	// DNS limits (RFC 1035): at most 63 characters per label, 253 for the
+	// whole name -- anything longer can't exist in DNS at all.
+	if len(host) > 253 {
+		return fail("host name longer than 253 characters")
+	}
 	for _, label := range strings.Split(host, ".") {
 		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
 			return fail("not a valid host name (empty label, or a label starting/ending with '-')")
+		}
+		if len(label) > 63 {
+			return fail("not a valid host name (a label longer than 63 characters)")
 		}
 	}
 	if hasPort {

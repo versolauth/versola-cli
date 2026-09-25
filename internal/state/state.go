@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
 // SchemaVersion is the layout version of state.json as written by this
@@ -116,6 +118,13 @@ type State struct {
 	// original single VPS this was written for (flagged in review on
 	// versolauth/versola-cli#7).
 	AuthURL string `json:"authUrl,omitempty"`
+
+	// ProxyMode is the vps reverse proxy's mode (proxy.ModeNginx or
+	// proxy.ModeExternal) this deployment was configured with -- what `up`
+	// waits on and what it tells the operator to do next. Empty for local
+	// deployments and for vps deployments configured before versola-cli
+	// generated the proxy itself.
+	ProxyMode string `json:"proxyMode,omitempty"`
 }
 
 // bundlePath resolves where this state's compose file and configs
@@ -205,7 +214,7 @@ func Prepare() (string, error) {
 //
 // bundleDir is the full path Prepare returned; only its base name ends up
 // stored (see State.BundleDir's own comment on why).
-func Finalize(target, version, bundleDir, authURL string) error {
+func Finalize(target, version, bundleDir, authURL, proxyMode string) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -225,6 +234,7 @@ func Finalize(target, version, bundleDir, authURL string) error {
 		ConfiguredAt:  time.Now().UTC(),
 		BundleDir:     filepath.Base(bundleDir),
 		AuthURL:       authURL,
+		ProxyMode:     proxyMode,
 	}
 	if err := s.Save(); err != nil {
 		return err
@@ -384,4 +394,22 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 		return path, false, fmt.Errorf("couldn't check %s: %w", path, statErr)
 	}
 	return path, true, nil
+}
+
+// ComposeArgs builds the arguments for a `docker compose` call against the
+// deployment whose compose.yml is at composePath: "compose -f
+// compose.yml", plus "-f proxy.yml" when versola-cli generated a reverse
+// proxy next to it (vps), then rest.
+//
+// Every compose call goes through this, so the proxy is always part of
+// the same compose project as auth/edge/central (proxy.yml declares the
+// same project name): `down` stops it too instead of leaving it holding
+// 80/443, `status` lists it, `down --volumes` treats it like the rest.
+func ComposeArgs(composePath string, rest ...string) []string {
+	args := []string{"compose", "-f", composePath}
+	proxyFile := filepath.Join(filepath.Dir(composePath), proxy.ComposeFile)
+	if _, err := os.Stat(proxyFile); err == nil {
+		args = append(args, "-f", proxyFile)
+	}
+	return append(args, rest...)
 }

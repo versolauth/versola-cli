@@ -6,12 +6,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var configureAuthURL string
 var configurePostgresHost string
 var configureSetupOpenBao bool
+var configureProxy string
+var configureACMEStaging bool
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -24,6 +27,14 @@ services and doesn't touch the database — see "versola migrate" and
 
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+
+On vps, Versola is exposed through its own reverse proxy (the official
+nginx image, configured by this CLI): by default it serves ports 80/443
+itself and gets a Let's Encrypt certificate for an https --auth-url
+(the domain's DNS has to point at this server). If this server already
+runs a web server on 80/443, pass --proxy external: Versola's proxy then
+listens on 127.0.0.1:2821 and your web server forwards to it.
 
 vps's OpenBao is provisioned automatically by default (init, unseal,
 kv-v2, AppRole, policy, role — same as local always has) — pass
@@ -48,6 +59,8 @@ than something that happens silently — e.g. deploying onto a server.`,
 func init() {
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
@@ -63,6 +76,9 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 	if target == "vps" && configurePostgresHost == "" {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
+	}
+	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
+		return err
 	}
 
 	// Held from here through deploy.Configure's own Finalize -- see
@@ -127,6 +143,22 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, configureSetupOpenBao)
+	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, configureSetupOpenBao,
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging})
 	return err
+}
+
+// rejectVpsOnlyFlags: --proxy/--acme-staging only mean something for vps
+// (local always runs its own gateway on 2821) -- say so instead of
+// silently ignoring them.
+func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
+	if target == "vps" {
+		return nil
+	}
+	for _, name := range []string{"proxy", "acme-staging"} {
+		if cmd.Flags().Changed(name) {
+			return fmt.Errorf("--%s only applies to vps deployments", name)
+		}
+	}
+	return nil
 }

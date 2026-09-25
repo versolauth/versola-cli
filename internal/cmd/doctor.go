@@ -57,11 +57,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checks.ComposePlugin(),
 	}
 	// Mirrors deploy.Configure's own target split (see its comment on the
-	// same check) -- vps has no nginx service in its compose file at all
-	// (see compose.fragment.vps.yml.template's comment), so checking port
-	// 2821 there would either false-fail against nothing, or false-pass
-	// and say nothing useful about what "configure vps" is actually about
-	// to do.
+	// same check) -- vps's reverse proxy is versola-cli's own and which
+	// ports it needs depends on --proxy and --auth-url, which doctor
+	// doesn't take; "configure vps" checks them itself (checkProxyPorts).
 	if doctorTarget == "local" {
 		results = append(results, checks.PortFree(2821, "versola-nginx"))
 	}

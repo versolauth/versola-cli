@@ -22,6 +22,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/wait"
 )
@@ -52,7 +53,7 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool) (string, error) {
+func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions) (string, error) {
 	if target != "local" && target != "vps" {
 		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -67,6 +68,26 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		return "", fmt.Errorf("postgresHost is required for vps deployments")
 	}
 
+	// vps: the reverse proxy's mode, and --auth-url validated and
+	// normalized against it (see proxy.ParseAuthURL) -- the normalized form
+	// is what versola-tools and the state record get from here on.
+	var auth proxy.AuthURL
+	if target == "vps" {
+		mode, err := proxy.ParseMode(proxyOpts.Mode)
+		if err != nil {
+			return "", err
+		}
+		proxyOpts.Mode = mode
+		auth, err = proxy.ParseAuthURL(authURL, mode)
+		if err != nil {
+			return "", err
+		}
+		if proxyOpts.ACMEStaging && !auth.TLS(mode) {
+			return "", fmt.Errorf("--acme-staging only applies when Versola's proxy gets the certificate itself: --proxy nginx with an https --auth-url")
+		}
+		authURL = auth.URL
+	}
+
 	fmt.Println("Checking prerequisites...")
 	checksToRun := []checks.Result{
 		checks.DockerDaemon(),
@@ -77,10 +98,9 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	// Port 2821 is nginx's — local-only, checked here for the same reason
 	// as the readiness URLs in up.go (a local-deployment fact still
 	// hardcoded in this CLI rather than coming from the bundle
-	// versola-tools generates). vps has no nginx service in its compose
-	// file at all (see compose.fragment.vps.yml.template's comment) — the
-	// VPS's real, native nginx already has that port, and that's expected,
-	// not something to fail a prerequisite check over.
+	// versola-tools generates). vps's reverse proxy is versola-cli's own
+	// (see package proxy) and its ports are checked separately, by
+	// checkProxyPorts below, once --proxy and --auth-url say which ones.
 	//
 	// "versola-nginx" is this deployment's own gateway from a previous
 	// run, if there was one — see PortFree's own comment for why that's
@@ -93,6 +113,11 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		fmt.Println(r.String())
 		if !r.OK {
 			return "", fmt.Errorf("prerequisite check failed — run `versola doctor` for details")
+		}
+	}
+	if target == "vps" {
+		if err := checkProxyPorts(auth, proxyOpts.Mode); err != nil {
+			return "", err
 		}
 	}
 
@@ -127,6 +152,11 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// long as the one-time setup takes, on a shared machine where "just a
 	// Windows dev box" isn't the threat model.
 	restrictGeneratedSecretsPerms(dir)
+	if target == "vps" {
+		if err := requireAdminConsole(dir, version); err != nil {
+			return "", err
+		}
+	}
 
 	// OpenBao has to actually be up before secrets can be resolved against
 	// it — Up (which otherwise starts the whole stack, openbao included)
@@ -245,7 +275,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// state.Finalize's own comment for why that ordering matters: it's
 	// what keeps a failed redeploy from costing this machine its record
 	// of whatever deployment was still running before this call started.
-	if err := state.Finalize(target, version, dir, authURL); err != nil {
+	proxyMode := ""
+	if target == "vps" {
+		fmt.Println("Generating the reverse proxy's config...")
+		if err := setUpProxy(dir, auth, proxyOpts); err != nil {
+			return "", err
+		}
+		proxyMode = proxyOpts.Mode
+	}
+
+	if err := state.Finalize(target, version, dir, authURL, proxyMode); err != nil {
 		return "", fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

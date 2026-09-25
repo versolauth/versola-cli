@@ -11,6 +11,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -173,7 +174,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	if stopStack {
 		fmt.Println("Stopping stack and removing volumes...")
-		if err := docker.Run("compose", "-f", composePath, "down", "--volumes"); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, "down", "--volumes")...); err != nil {
 			return fmt.Errorf("docker compose down failed: %w", err)
 		}
 
@@ -205,6 +206,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		} else if target == "vps" {
 			volumeName := deploy.OpenbaoVolumeName(target)
 			fmt.Printf("Leaving OpenBao's data volume in place (vps target — remove it yourself with `docker volume rm %s` if you really mean to discard it).\n", volumeName)
+			fmt.Printf("Leaving the TLS certificate volume in place too, if there is one (reusing it avoids Let's Encrypt's rate limits on a redeploy — `docker volume rm %s` to discard it).\n", proxy.ACMEVolume)
 		}
 	} else if deployed {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")

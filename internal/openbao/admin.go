@@ -286,3 +286,19 @@ func GenerateSecretID(ctx context.Context, address, token, name string) (string,
 	}
 	return parsed.Data.SecretID, nil
 }
+
+// CheckToken reports whether token is accepted by the (unsealed) OpenBao
+// at address, via auth/token/lookup-self. Used before recreating a
+// running OpenBao, to make sure the saved admin credentials actually
+// belong to this instance -- an unseal key can't be tested while the
+// instance is unsealed, but a root token from the same init can.
+func CheckToken(ctx context.Context, address, token string) error {
+	body, status, err := adminRequest(ctx, http.MethodGet, address+"/v1/auth/token/lookup-self", token, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("OpenBao rejected the token (%d): %s", status, string(body))
+	}
+	return nil
+}

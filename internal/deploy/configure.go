@@ -174,38 +174,44 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 
 	// A previous configure's compose project can still have openbao
-	// running under its container_name (see OpenbaoContainerName) — every
-	// service in compose.fragment.yml.template has a fixed container_name,
-	// and Docker refuses to create a second container under a name that's
-	// already taken, even from an unrelated compose project (a fresh
-	// bundle directory, per state.Prepare, is a fresh project as far as
-	// Compose is concerned). openbao is the one service here it's
-	// actually correct to leave alone if that's the situation: unlike
+	// running under its container_name (see OpenbaoContainerName). Unlike
 	// postgres/auth/central/edge, it doesn't get reconfigured by this run
-	// — the whole point of resolving secrets against it is that it
-	// already has the values from before. That's only true because the
-	// container name is target-specific now, too -- otherwise this could
-	// find the OTHER target's leftover container still running and
-	// "leave it alone" straight into resolving secrets against the wrong
-	// target entirely.
-	running, err := docker.IsRunning(OpenbaoContainerName(target))
+	// -- the whole point of resolving secrets against it is that it
+	// already has the values from before -- so a healthy running one is
+	// left alone. A stopped one, or one whose openbao.hcl was pruned along
+	// with its bundle, is recreated from this bundle instead: see
+	// decideOpenbao for when that's safe. That's only correct because the
+	// container name is target-specific -- otherwise this could find the
+	// OTHER target's container and act on it instead.
+	exists, running, configMissing, err := inspectOpenbao(target)
 	if err != nil {
 		return "", err
 	}
-	if running {
-		fmt.Println("OpenBao is already running.")
-	} else {
+	// Only asked when it matters (see decideOpenbao): it talks to the
+	// running OpenBao to check the saved root token.
+	canUnseal, whyNot := false, ""
+	if exists && running && configMissing {
+		canUnseal, whyNot, err = canUnsealOpenbao(target, "http://localhost:8200", setupOpenBaoByHand)
+		if err != nil {
+			return "", err
+		}
+	}
+	container := OpenbaoContainerName(target)
+	action := decideOpenbao(exists, running, configMissing, canUnseal)
+
+	if action == openbaoStart || action == openbaoRecreate {
 		// Both targets' compose fragments bind OpenBao to the same host
 		// port (8200) -- separate container names and volumes (see
 		// OpenbaoContainerName/OpenbaoVolumeName) don't change that, since
 		// that's a fact about the host's own network, not about Compose
 		// projects. If the OTHER target's OpenBao is still running from an
 		// earlier configure, starting this one would fail on Docker's own
-		// "port is already allocated" -- checked here instead, so the
-		// error says what to actually do about it rather than requiring
-		// that to be reverse-engineered from a raw Docker failure
-		// (flagged in review on versolauth/versola-cli#7, alongside the
-		// container-name mixup this same check also guards against).
+		// "port is already allocated" -- checked here, before anything is
+		// removed, so the error says what to actually do about it rather
+		// than requiring that to be reverse-engineered from a raw Docker
+		// failure (flagged in review on versolauth/versola-cli#7,
+		// alongside the container-name mixup this same check also guards
+		// against).
 		other := "vps"
 		if target == "vps" {
 			other = "local"
@@ -217,6 +223,26 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		if otherRunning {
 			return "", fmt.Errorf("%s's OpenBao (%s) is still running and already holds port 8200 on this machine -- stop it first: docker rm -f %s", other, OpenbaoContainerName(other), OpenbaoContainerName(other))
 		}
+	}
+
+	switch action {
+	case openbaoKeep:
+		fmt.Println("OpenBao is already running.")
+	case openbaoKeepStale:
+		fmt.Println("Warning: OpenBao is running, but its openbao.hcl (from an older, since-removed bundle) is gone, so it won't start again after a restart or reboot.")
+		fmt.Printf("It's left running rather than recreated, because it couldn't be unsealed again: %s.\n", whyNot)
+		fmt.Println("Nothing else is affected (services read their secrets from *.secrets.env) -- fix that and re-run configure.")
+	case openbaoRecreate:
+		if running {
+			fmt.Println("OpenBao is running on a config file that no longer exists -- recreating it from this bundle (its data is kept)...")
+		} else {
+			fmt.Println("OpenBao's container exists but isn't running -- recreating it from this bundle (its data is kept)...")
+		}
+		if err := docker.Run("rm", "-f", container); err != nil {
+			return "", fmt.Errorf("couldn't remove the old OpenBao container: %w", err)
+		}
+	}
+	if action == openbaoStart || action == openbaoRecreate {
 		fmt.Println("Starting OpenBao...")
 		if err := docker.Run("compose", "-f", fragmentPath, "up", "-d", "openbao"); err != nil {
 			return "", fmt.Errorf("couldn't start OpenBao: %w", err)

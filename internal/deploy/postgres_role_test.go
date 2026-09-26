@@ -24,10 +24,6 @@ func TestPickPostgresPassword(t *testing.T) {
 			map[string]map[string]string{"auth": {postgresPasswordKey: "stored"}},
 			map[string]map[string]string{"auth": {postgresPasswordKey: "a"}, "central": {postgresPasswordKey: "c"}},
 			"stored", false},
-		{"stored values disagree: first service's wins",
-			map[string]map[string]string{"auth": {postgresPasswordKey: "one"}, "edge": {postgresPasswordKey: "two"}},
-			map[string]map[string]string{"auth": {postgresPasswordKey: "a"}},
-			"one", false},
 		{"stored only for a later service: still reused",
 			map[string]map[string]string{"edge": {postgresPasswordKey: "stored"}},
 			map[string]map[string]string{"auth": {postgresPasswordKey: "a"}, "edge": {postgresPasswordKey: "e"}},
@@ -93,5 +89,25 @@ func TestPostgresRoleSQL(t *testing.T) {
 	}
 	if alter != `ALTER ROLE "we""ird" WITH PASSWORD 'pa''ss';` {
 		t.Errorf("alter: %s", alter)
+	}
+}
+
+func TestConflictingPostgresPasswords(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing map[string]map[string]string
+		want     []string
+	}{
+		{"nothing stored", map[string]map[string]string{}, nil},
+		{"one stored", map[string]map[string]string{"auth": {postgresPasswordKey: "a"}}, nil},
+		{"all agree", map[string]map[string]string{"auth": {postgresPasswordKey: "a"}, "central": {postgresPasswordKey: "a"}, "edge": {postgresPasswordKey: "a"}}, nil},
+		{"disagree", map[string]map[string]string{"auth": {postgresPasswordKey: "a"}, "central": {postgresPasswordKey: "b"}, "edge": {"OTHER": "x"}}, []string{"auth", "central"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := conflictingPostgresPasswords(c.existing); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
 	}
 }

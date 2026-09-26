@@ -113,6 +113,11 @@ func resolveSecrets(dir, target string) (newPostgresPassword string, err error) 
 		}
 		candidates[service], existing[service] = c, e
 	}
+	if services := conflictingPostgresPasswords(existing); services != nil {
+		return "", fmt.Errorf("OpenBao holds different Postgres passwords for %s, but they all log in as the same Postgres role, so at least one of them can't connect. "+
+			"This CLI can't tell which one the role actually has, so it won't pick one: set the same, correct %s under secret/versola/%s/<service> for each of them, then re-run configure",
+			strings.Join(services, ", "), postgresPasswordKey, target)
+	}
 	pgPassword, pgIsNew := pickPostgresPassword(existing, candidates)
 
 	// newPostgresPassword is returned as soon as the new password is
@@ -139,8 +144,10 @@ func resolveSecrets(dir, target string) (newPostgresPassword string, err error) 
 const postgresPasswordKey = "POSTGRES_PASSWORD"
 
 // pickPostgresPassword settles the Postgres password once for all three
-// services, which share one Postgres role: the first value already stored
-// in OpenBao wins; otherwise auth's (or the first service's) freshly
+// services, which share one Postgres role: a value already stored in
+// OpenBao wins (resolveSecrets has already refused stored values that
+// disagree, see conflictingPostgresPasswords), so a service missing it
+// gets the same one; otherwise auth's (or the first service's) freshly
 // generated candidate is used everywhere, and isNew reports that -- the
 // role on the Postgres server doesn't have it yet, and someone has to set
 // it there (see Configure). Returns "" when no service has the key at all
@@ -157,6 +164,26 @@ func pickPostgresPassword(existing, candidates map[string]map[string]string) (pa
 		}
 	}
 	return "", false
+}
+
+// conflictingPostgresPasswords returns the services that have a Postgres
+// password stored in OpenBao, if those stored values don't all agree; nil
+// when they do (or fewer than two are stored). Overwriting them with one
+// of the values would be a guess -- whichever one the Postgres role
+// really has is the one that works, and that's not knowable from here.
+func conflictingPostgresPasswords(existing map[string]map[string]string) []string {
+	var services []string
+	values := map[string]bool{}
+	for _, service := range secretServices {
+		if v, ok := existing[service][postgresPasswordKey]; ok {
+			services = append(services, service)
+			values[v] = true
+		}
+	}
+	if len(values) > 1 {
+		return services
+	}
+	return nil
 }
 
 // mergeSecrets computes what's stored for one service: whatever OpenBao

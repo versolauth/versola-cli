@@ -53,19 +53,19 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions) (string, error) {
+func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
-		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
+		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
 	if target == "vps" && authURL == "" {
 		// Belt and suspenders -- cmd/bootstrap.go already checks this
 		// before calling Configure, but Configure is this package's own
 		// public entry point and shouldn't rely on every future caller
 		// remembering to check first.
-		return "", fmt.Errorf("authURL is required for vps deployments")
+		return ConfigureResult{}, fmt.Errorf("authURL is required for vps deployments")
 	}
 	if target == "vps" && postgresHost == "" {
-		return "", fmt.Errorf("postgresHost is required for vps deployments")
+		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
 	}
 
 	// vps: the reverse proxy's mode, and --auth-url validated and
@@ -75,15 +75,15 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	if target == "vps" {
 		mode, err := proxy.ParseMode(proxyOpts.Mode)
 		if err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 		proxyOpts.Mode = mode
 		auth, err = proxy.ParseAuthURL(authURL, mode)
 		if err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 		if proxyOpts.ACMEStaging && !auth.TLS(mode) {
-			return "", fmt.Errorf("--acme-staging only applies when Versola's proxy gets the certificate itself: --proxy nginx with an https --auth-url")
+			return ConfigureResult{}, fmt.Errorf("--acme-staging only applies when Versola's proxy gets the certificate itself: --proxy nginx with an https --auth-url")
 		}
 		authURL = auth.URL
 	}
@@ -112,31 +112,31 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	for _, r := range checksToRun {
 		fmt.Println(r.String())
 		if !r.OK {
-			return "", fmt.Errorf("prerequisite check failed — run `versola doctor` for details")
+			return ConfigureResult{}, fmt.Errorf("prerequisite check failed — run `versola doctor` for details")
 		}
 	}
 	if target == "vps" {
 		if err := checkProxyPorts(auth, proxyOpts.Mode); err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 	}
 
 	fmt.Printf("\nPreparing Versola %s...\n", version)
 	dir, err := state.Prepare()
 	if err != nil {
-		return "", err
+		return ConfigureResult{}, err
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
 	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost); err != nil {
 		if isManifestUnknown(err) {
-			return "", fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
+			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
 Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
 "v0.1.2" — that "v" prefix is only used for versola-cli's own releases).
 Check the available versions at https://github.com/orgs/versolauth/packages`, version)
 		}
-		return "", fmt.Errorf("versola-tools failed: %w", err)
+		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)
 	}
 
 	// The candidates versola-tools just wrote (*.generated-secrets.env)
@@ -154,7 +154,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	restrictGeneratedSecretsPerms(dir)
 	if target == "vps" {
 		if err := requireAdminConsole(dir, version); err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 	}
 
@@ -170,7 +170,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// doing it again there once Up runs doesn't conflict with this one.
 	fragmentPath := filepath.Join(dir, "compose.fragment.yml")
 	if err := docker.Run("volume", "create", OpenbaoVolumeName(target)); err != nil {
-		return "", fmt.Errorf("couldn't create the openbao-file volume: %w", err)
+		return ConfigureResult{}, fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
 
 	// A previous configure's compose project can still have openbao
@@ -185,7 +185,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// OTHER target's container and act on it instead.
 	exists, running, configMissing, err := inspectOpenbao(target)
 	if err != nil {
-		return "", err
+		return ConfigureResult{}, err
 	}
 	// Only asked when it matters (see decideOpenbao): it talks to the
 	// running OpenBao to check the saved root token.
@@ -193,7 +193,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if exists && running && configMissing {
 		canUnseal, whyNot, err = canUnsealOpenbao(target, "http://localhost:8200", setupOpenBaoByHand)
 		if err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 	}
 	container := OpenbaoContainerName(target)
@@ -218,10 +218,10 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		}
 		otherRunning, err := docker.IsRunning(OpenbaoContainerName(other))
 		if err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 		if otherRunning {
-			return "", fmt.Errorf("%s's OpenBao (%s) is still running and already holds port 8200 on this machine -- stop it first: docker rm -f %s", other, OpenbaoContainerName(other), OpenbaoContainerName(other))
+			return ConfigureResult{}, fmt.Errorf("%s's OpenBao (%s) is still running and already holds port 8200 on this machine -- stop it first: docker rm -f %s", other, OpenbaoContainerName(other), OpenbaoContainerName(other))
 		}
 	}
 
@@ -239,17 +239,17 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 			fmt.Println("OpenBao's container exists but isn't running -- recreating it from this bundle (its data is kept)...")
 		}
 		if err := docker.Run("rm", "-f", container); err != nil {
-			return "", fmt.Errorf("couldn't remove the old OpenBao container: %w", err)
+			return ConfigureResult{}, fmt.Errorf("couldn't remove the old OpenBao container: %w", err)
 		}
 	}
 	if action == openbaoStart || action == openbaoRecreate {
 		fmt.Println("Starting OpenBao...")
 		if err := docker.Run("compose", "-f", fragmentPath, "up", "-d", "openbao"); err != nil {
-			return "", fmt.Errorf("couldn't start OpenBao: %w", err)
+			return ConfigureResult{}, fmt.Errorf("couldn't start OpenBao: %w", err)
 		}
 	}
 	if err := wait.ForReachable("http://localhost:8200/v1/sys/health", 30*time.Second); err != nil {
-		return "", fmt.Errorf("OpenBao never came up: %w", err)
+		return ConfigureResult{}, fmt.Errorf("OpenBao never came up: %w", err)
 	}
 
 	// target's OpenBao gets set up automatically from here -- init,
@@ -261,7 +261,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// `configure <target>`, not just a machine's first one.
 	if target == "local" || !setupOpenBaoByHand {
 		if err := ProvisionOpenBao(target, "http://localhost:8200"); err != nil {
-			return "", fmt.Errorf("couldn't provision OpenBao: %w", err)
+			return ConfigureResult{}, fmt.Errorf("couldn't provision OpenBao: %w", err)
 		}
 	}
 
@@ -283,8 +283,20 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// never handed in that mode — see develop.md's OpenBao section for
 	// the manual `bao operator unseal` step.
 	fmt.Println("Resolving secrets (OpenBao)...")
-	if err := resolveSecrets(dir, target); err != nil {
-		return "", err
+	newPgPassword, err := resolveSecrets(dir, target)
+	if err != nil {
+		// Stored but configure failed after that: the next configure
+		// sees the password as already stored and won't mention it, so
+		// this is the one chance to show it.
+		if newPgPassword != "" {
+			printPostgresRoleSetup(dir, newPgPassword)
+		}
+		return ConfigureResult{}, err
+	}
+	// Printed right away rather than at the end: any later step failing
+	// would otherwise swallow it for good (see above).
+	if newPgPassword != "" {
+		printPostgresRoleSetup(dir, newPgPassword)
 	}
 
 	// versola-tools writes the compose file under a "fragment" name and
@@ -293,7 +305,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// complete deployment.
 	composePath := filepath.Join(dir, "compose.yml")
 	if err := os.Rename(filepath.Join(dir, "compose.fragment.yml"), composePath); err != nil {
-		return "", fmt.Errorf("couldn't finalize compose file: %w", err)
+		return ConfigureResult{}, fmt.Errorf("couldn't finalize compose file: %w", err)
 	}
 
 	// Only now -- everything above has actually succeeded -- does this
@@ -305,14 +317,14 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if target == "vps" {
 		fmt.Println("Generating the reverse proxy's config...")
 		if err := setUpProxy(dir, auth, proxyOpts); err != nil {
-			return "", err
+			return ConfigureResult{}, err
 		}
 		proxyMode = proxyOpts.Mode
 	}
 
 	if err := state.Finalize(target, version, dir, authURL, proxyMode); err != nil {
-		return "", fmt.Errorf("couldn't record this deployment: %w", err)
+		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 
-	return dir, nil
+	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != ""}, nil
 }

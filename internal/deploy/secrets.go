@@ -82,77 +82,155 @@ func restrictGeneratedSecretsPerms(dir string) {
 // before Up starts anything (compose.fragment.yml.template's env_file:
 // entries expect these files to already exist) -- Configure is where
 // both of those are true.
-func resolveSecrets(dir, target string) error {
+func resolveSecrets(dir, target string) (newPostgresPassword string, err error) {
 	creds, err := openbao.LoadCredentials(target)
 	if err != nil {
 		if errors.Is(err, openbao.ErrNoCredentials) {
-			return fmt.Errorf("no OpenBao credentials stored for %q — run `versola secrets login %s <address> <role-id>` first (it prompts for the secret ID separately)", target, target)
+			return "", fmt.Errorf("no OpenBao credentials stored for %q — run `versola secrets login %s <address> <role-id>` first (it prompts for the secret ID separately)", target, target)
 		}
-		return err
+		return "", err
 	}
 
 	client := openbao.NewClient(creds)
 	ctx := context.Background()
 	if err := client.Login(ctx); err != nil {
-		return err
+		return "", err
 	}
 
+	// Everything is read before anything is written, so the Postgres
+	// password can be settled across all three services first (see
+	// pickPostgresPassword).
+	candidates := make(map[string]map[string]string, len(secretServices))
+	existing := make(map[string]map[string]string, len(secretServices))
 	for _, service := range secretServices {
-		if err := resolveServiceSecrets(ctx, client, dir, target, service); err != nil {
-			return fmt.Errorf("couldn't resolve secrets for %s: %w", service, err)
+		c, err := readDotenv(filepath.Join(dir, service+".generated-secrets.env"))
+		if err != nil {
+			return "", err
 		}
+		e, _, err := client.ReadSecret(ctx, openbao.SecretPath(target, service))
+		if err != nil {
+			return "", fmt.Errorf("couldn't read existing %s secrets from OpenBao: %w", service, err)
+		}
+		candidates[service], existing[service] = c, e
+	}
+	if services := conflictingPostgresPasswords(existing); services != nil {
+		return "", fmt.Errorf("OpenBao holds different Postgres passwords for %s, but they all log in as the same Postgres role, so at least one of them can't connect. "+
+			"This CLI can't tell which one the role actually has, so it won't pick one: set the same, correct %s under secret/versola/%s/<service> for each of them, then re-run configure",
+			strings.Join(services, ", "), postgresPasswordKey, target)
+	}
+	pgPassword, pgIsNew := pickPostgresPassword(existing, candidates)
+
+	// newPostgresPassword is returned as soon as the new password is
+	// actually stored in OpenBao for at least one service -- even if a
+	// later service fails. From then on the next configure finds it
+	// stored and treats it as old, so this run is the only one that can
+	// tell the operator about it (Configure prints it on error too).
+	for _, service := range secretServices {
+		wrotePg, err := resolveServiceSecrets(ctx, client, dir, target, service, existing[service], candidates[service], pgPassword)
+		if wrotePg && pgIsNew {
+			newPostgresPassword = pgPassword
+		}
+		if err != nil {
+			return newPostgresPassword, fmt.Errorf("couldn't resolve secrets for %s: %w", service, err)
+		}
+	}
+	return newPostgresPassword, nil
+}
+
+// postgresPasswordKey is the one secret that has to match something
+// outside Versola: the password of the Postgres role the services log in
+// as. gen-env.scala only emits it for vps (docker-local's Postgres is a
+// container created with a fixed password).
+const postgresPasswordKey = "POSTGRES_PASSWORD"
+
+// pickPostgresPassword settles the Postgres password once for all three
+// services, which share one Postgres role: a value already stored in
+// OpenBao wins (resolveSecrets has already refused stored values that
+// disagree, see conflictingPostgresPasswords), so a service missing it
+// gets the same one; otherwise auth's (or the first service's) freshly
+// generated candidate is used everywhere, and isNew reports that -- the
+// role on the Postgres server doesn't have it yet, and someone has to set
+// it there (see Configure). Returns "" when no service has the key at all
+// (local).
+func pickPostgresPassword(existing, candidates map[string]map[string]string) (password string, isNew bool) {
+	for _, service := range secretServices {
+		if v, ok := existing[service][postgresPasswordKey]; ok {
+			return v, false
+		}
+	}
+	for _, service := range secretServices {
+		if v, ok := candidates[service][postgresPasswordKey]; ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// conflictingPostgresPasswords returns the services that have a Postgres
+// password stored in OpenBao, if those stored values don't all agree; nil
+// when they do (or fewer than two are stored). Overwriting them with one
+// of the values would be a guess -- whichever one the Postgres role
+// really has is the one that works, and that's not knowable from here.
+func conflictingPostgresPasswords(existing map[string]map[string]string) []string {
+	var services []string
+	values := map[string]bool{}
+	for _, service := range secretServices {
+		if v, ok := existing[service][postgresPasswordKey]; ok {
+			services = append(services, service)
+			values[v] = true
+		}
+	}
+	if len(values) > 1 {
+		return services
 	}
 	return nil
 }
 
-func resolveServiceSecrets(ctx context.Context, client *openbao.Client, dir, target, service string) error {
-	candidates, err := readDotenv(filepath.Join(dir, service+".generated-secrets.env"))
-	if err != nil {
-		return err
-	}
-
-	path := openbao.SecretPath(target, service)
-	existing, found, err := client.ReadSecret(ctx, path)
-	if err != nil {
-		return fmt.Errorf("couldn't read existing secrets from OpenBao: %w", err)
-	}
-
+// mergeSecrets computes what's stored for one service: whatever OpenBao
+// already has, plus this run's candidate for every key it doesn't -- except
+// the Postgres password, which takes pgPassword so all three services
+// agree on it. wroteNew reports whether anything was added.
+func mergeSecrets(existing, candidates map[string]string, pgPassword string) (final map[string]string, wroteNew bool) {
 	// Starts as a copy of whatever's already stored, not empty -- the
-	// write below is a full replace (OpenBao's KV v2 "put", not a merge),
-	// so anything already at this path that isn't also touched by the
-	// loop after this has to already be in final or it's gone for good.
-	// Every key this run's candidates file could ever contain currently
-	// also has an entry in existing once seeded by hand (see develop.md's
-	// vps seeding section) or written by a previous run, but that's an
-	// invariant of what gen-env.scala happens to generate today, not
-	// something this function can rely on staying true — starting from
-	// existing instead of from candidates means it doesn't have to.
-	final := make(map[string]string, len(existing)+len(candidates))
-	if found {
-		for key, v := range existing {
-			final[key] = v
-		}
+	// write in resolveServiceSecrets is a full replace (OpenBao's KV v2
+	// "put", not a merge), so anything already at this path that isn't
+	// also touched by the loop after this has to already be in final or
+	// it's gone for good.
+	final = make(map[string]string, len(existing)+len(candidates))
+	for key, v := range existing {
+		final[key] = v
 	}
-
-	wroteAnyNew := false
 	for key, candidate := range candidates {
 		if _, has := final[key]; has {
 			continue
 		}
 		// Not in OpenBao yet -- this run's freshly generated candidate
 		// becomes the real value from here on.
-		final[key] = candidate
-		wroteAnyNew = true
-	}
-
-	if wroteAnyNew {
-		if err := client.WriteSecret(ctx, path, final); err != nil {
-			return fmt.Errorf("couldn't store new secrets in OpenBao: %w", err)
+		if key == postgresPasswordKey && pgPassword != "" {
+			candidate = pgPassword
 		}
+		final[key] = candidate
+		wroteNew = true
+	}
+	return final, wroteNew
+}
+
+// resolveServiceSecrets stores and writes out one service's secrets.
+// wrotePg reports whether this call stored a Postgres password in OpenBao
+// that wasn't there before.
+func resolveServiceSecrets(ctx context.Context, client *openbao.Client, dir, target, service string, existing, candidates map[string]string, pgPassword string) (wrotePg bool, err error) {
+	final, wroteNew := mergeSecrets(existing, candidates, pgPassword)
+	if wroteNew {
+		if err := client.WriteSecret(ctx, openbao.SecretPath(target, service), final); err != nil {
+			return false, fmt.Errorf("couldn't store new secrets in OpenBao: %w", err)
+		}
+		_, hadPg := existing[postgresPasswordKey]
+		_, hasPg := final[postgresPasswordKey]
+		wrotePg = hasPg && !hadPg
 	}
 
 	if err := writeDotenv(filepath.Join(dir, service+".secrets.env"), final); err != nil {
-		return err
+		return wrotePg, err
 	}
 
 	// The generated-secrets.env candidates versola-tools wrote are secret
@@ -170,9 +248,9 @@ func resolveServiceSecrets(ctx context.Context, client *openbao.Client, dir, tar
 	// for vps).
 	candidatesPath := filepath.Join(dir, service+".generated-secrets.env")
 	if err := os.Remove(candidatesPath); err != nil {
-		return fmt.Errorf("couldn't remove %s: %w", candidatesPath, err)
+		return wrotePg, fmt.Errorf("couldn't remove %s: %w", candidatesPath, err)
 	}
-	return nil
+	return wrotePg, nil
 }
 
 func readDotenv(path string) (map[string]string, error) {

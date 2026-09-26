@@ -142,9 +142,18 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if _, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging}); err != nil {
+	res, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging})
+	if err != nil {
 		return err
+	}
+	// Migrate would only fail to log in to Postgres: the role doesn't
+	// have the password Configure just generated until someone runs the
+	// SQL it printed. Stop here with the next steps instead.
+	if res.PostgresRoleSetupNeeded {
+		// An error, not nil: the deployment isn't up yet, and a script
+		// running bootstrap must be able to tell that from its exit code.
+		return fmt.Errorf("stopped before migrate: set the Postgres role's password with the SQL printed above, then run `versola migrate` and `versola up`")
 	}
 
 	// Loaded once here and passed to both Migrate and Up, rather than

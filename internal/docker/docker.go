@@ -105,3 +105,17 @@ func IsRootless() (bool, error) {
 	}
 	return strings.Contains(string(out), "name=rootless"), nil
 }
+
+// Inspect runs `docker inspect -f format name` and returns its trimmed
+// output. found is false, with no error, when there is no such container --
+// the same "doesn't exist is a plain negative" convention as IsRunning.
+func Inspect(name, format string) (out string, found bool, err error) {
+	b, err := exec.Command("docker", "inspect", "--type", "container", "-f", format, name).Output()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("couldn't inspect %s: %w", name, err)
+	}
+	return strings.TrimSpace(string(b)), true, nil
+}

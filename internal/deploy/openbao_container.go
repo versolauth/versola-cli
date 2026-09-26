@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/docker"
 	"github.com/versolauth/versola-cli/internal/openbao"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // openbaoConfigPath is where the compose fragments bind-mount openbao.hcl
@@ -65,11 +67,8 @@ func decideOpenbao(exists, running, configMissing, canUnseal bool) openbaoAction
 }
 
 // inspectOpenbao reports whether target's OpenBao container exists, is
-// running, and whether the openbao.hcl it bind-mounts is gone from disk.
-// The last check only runs for vps: there the CLI and Docker share one
-// filesystem, so the mount source is a path this process can stat. On
-// Docker Desktop (local) it's a path inside Docker's VM, which would
-// always look missing from here.
+// running, and whether the openbao.hcl it bind-mounts is gone from disk
+// (see configGone for when that last one can be told at all).
 func inspectOpenbao(target string) (exists, running, configMissing bool, err error) {
 	format := `{{.State.Running}}|{{range .Mounts}}{{if eq .Destination "` + openbaoConfigPath + `"}}{{.Source}}{{end}}{{end}}`
 	out, found, err := docker.Inspect(OpenbaoContainerName(target), format)
@@ -77,13 +76,31 @@ func inspectOpenbao(target string) (exists, running, configMissing bool, err err
 		return false, false, false, err
 	}
 	runningStr, source, _ := strings.Cut(out, "|")
-	running = runningStr == "true"
-	if target == "vps" && source != "" {
-		if _, statErr := os.Stat(source); errors.Is(statErr, os.ErrNotExist) {
-			configMissing = true
-		}
+	bundles, err := state.Dir()
+	if err != nil {
+		return false, false, false, err
 	}
-	return true, running, configMissing, nil
+	return true, runningStr == "true", configGone(source, bundles), nil
+}
+
+// configGone reports whether a bind-mount source is a file under
+// bundlesDir (~/.versola/active) that no longer exists. A source outside
+// bundlesDir is never reported as gone: that's how it looks when Docker
+// runs in a VM with its own view of the paths (Docker Desktop on Windows
+// reports e.g. /run/desktop/mnt/host/c/...), where this process can't
+// stat it and a missing file proves nothing. Native Docker on Linux --
+// vps, or local on a Linux machine -- reports the real path, so the check
+// works for either target.
+func configGone(source, bundlesDir string) bool {
+	if source == "" || !filepath.IsAbs(source) {
+		return false
+	}
+	rel, err := filepath.Rel(bundlesDir, source)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	_, err = os.Stat(source)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // canUnsealOpenbao reports whether Configure can recreate target's

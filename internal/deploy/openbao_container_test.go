@@ -3,6 +3,8 @@ package deploy
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/versolauth/versola-cli/internal/openbao"
@@ -79,6 +81,37 @@ func TestCanUnsealOpenbao(t *testing.T) {
 			}
 			if !ok && reason == "" {
 				t.Error("no reason given for refusing")
+			}
+		})
+	}
+}
+
+func TestConfigGone(t *testing.T) {
+	bundles := t.TempDir()
+	present := filepath.Join(bundles, "bundle-1", "openbao.hcl")
+	if err := os.MkdirAll(filepath.Dir(present), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(present, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "openbao.hcl") // missing, but not ours
+
+	cases := []struct {
+		name, source string
+		want         bool
+	}{
+		{"pruned bundle", filepath.Join(bundles, "bundle-0", "openbao.hcl"), true},
+		{"current bundle", present, false},
+		{"missing outside ~/.versola/active (Docker Desktop VM path)", outside, false},
+		{"relative path", "bundle-0/openbao.hcl", false},
+		{"no mount", "", false},
+		{"the bundles dir itself", bundles, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := configGone(c.source, bundles); got != c.want {
+				t.Errorf("configGone(%q) = %v, want %v", c.source, got, c.want)
 			}
 		})
 	}

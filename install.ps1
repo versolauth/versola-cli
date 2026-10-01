@@ -4,7 +4,7 @@
 #   iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 #
 # To pin a version instead of installing the latest release:
-#   $env:VERSOLA_VERSION = "v0.1.0"
+#   $env:VERSOLA_VERSION = "0.2.6"
 #   iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 
 $ErrorActionPreference = "Stop"

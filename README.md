@@ -38,10 +38,10 @@ if it isn't, the script prints the exact line to add to your shell
 profile. To pin a specific version instead of the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s v0.1.0
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.2.6
 ```
 ```powershell
-$env:VERSOLA_VERSION = "v0.1.0"
+$env:VERSOLA_VERSION = "0.2.6"
 iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 ```
 
@@ -168,8 +168,9 @@ Docker Compose, waiting on readiness at each stage. Prints the admin
 login on success.
 
 `<version>` is a Versola release, which is tagged **without** a leading
-`v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (Don't confuse it
-with versola-cli's own releases, which do use `v`.) Passing a version
+`v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (versola-cli's own
+releases use the same format since 0.2.6; older ones were `v0.2.5` and
+earlier.) Passing a version
 that was never published fails with a clear error explaining that,
 instead of Docker's raw `manifest unknown`; the available versions are
 the tags published for the `versola-tools` package under the
@@ -344,14 +345,15 @@ Binaries built from source without release flags report `dev`.
 
 ## Releasing
 
-Releases are automated: pushing a `v*` tag triggers
+Releases are automated: pushing a version tag — no leading `v`, same as
+Versola's own releases — triggers
 `.github/workflows/release.yml`, which cross-compiles all four platform
 binaries from that commit, generates `checksums.txt`, and publishes them
 as GitHub Release assets.
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag 0.2.6
+git push origin 0.2.6
 ```
 
 Nothing is built or uploaded by hand: the tag is the only input, and the

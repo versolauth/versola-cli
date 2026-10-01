@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s v0.1.0   # pin a version
+#   curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.2.6   # pin a version
 set -e
 
 REPO="versolauth/versola-cli"

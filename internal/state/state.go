@@ -230,8 +230,11 @@ func Prepare() (string, error) {
 // half-written, and never at nothing.
 //
 // bundleDir is the full path Prepare returned; only its base name ends up
-// stored (see State.BundleDir's own comment on why).
-func Finalize(target, version, bundleDir, authURL, proxyMode string) error {
+// stored (see State.BundleDir's own comment on why). keep names further
+// bundles to leave in place: containers this record doesn't track, like
+// OpenBao, which outlives the deployments and keeps mounting its
+// openbao.hcl from the bundle it was started from.
+func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...string) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -270,7 +273,7 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string) error {
 
 	// Everything else goes: the previous configure's bundle if it was never
 	// started, and any left behind by a configure that failed halfway.
-	pruneBundles(dir, append([]string{s.BundleDir}, s.MountedBundleDirs...)...)
+	pruneBundles(dir, append(append([]string{s.BundleDir}, s.MountedBundleDirs...), keep...)...)
 	return nil
 }
 
@@ -453,9 +456,10 @@ func MarkStarting() error {
 }
 
 // MarkRunning records that everything now runs from the current bundle --
-// called by `up` once the stack is up -- and removes every other bundle,
-// which nothing mounts any more.
-func MarkRunning() error {
+// called by `up` once the stack is up -- and removes every other bundle
+// except those in keep: bundles still mounted by containers `up` doesn't
+// manage (OpenBao -- see Finalize).
+func MarkRunning(keep ...string) error {
 	s, err := Load()
 	if err != nil {
 		return err
@@ -471,7 +475,7 @@ func MarkRunning() error {
 	if err != nil {
 		return err
 	}
-	pruneBundles(dir, s.BundleDir)
+	pruneBundles(dir, append([]string{s.BundleDir}, keep...)...)
 	return nil
 }
 

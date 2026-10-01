@@ -169,3 +169,42 @@ func TestPrepareUnique(t *testing.T) {
 		seen[b] = true
 	}
 }
+
+// OpenBao isn't recreated on every configure, so it can keep mounting an
+// older bundle's openbao.hcl after `up` moved everything else on: the
+// bundle callers pass as keep must survive both Finalize and MarkRunning.
+func TestBundleKeptForOpenbao(t *testing.T) {
+	dir := isolate(t)
+
+	b1 := configure(t) // OpenBao is started from b1
+	up(t)
+
+	b2, err := Prepare()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Finalize("vps", "1.0.0", b2, "https://id.example.com", "nginx", b1); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkStarting(); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkRunning(b1); err != nil {
+		t.Fatal(err)
+	}
+	expectBundles(t, dir, "up while OpenBao still mounts b1", b1, filepath.Base(b2))
+
+	b3, err := Prepare() // configure again, no up: b2 is still mounted, b1 still kept
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Finalize("vps", "1.0.0", b3, "https://id.example.com", "nginx", b1); err != nil {
+		t.Fatal(err)
+	}
+	expectBundles(t, dir, "configure while OpenBao still mounts b1", b1, filepath.Base(b2), filepath.Base(b3))
+
+	if err := MarkRunning(); err != nil { // OpenBao was recreated elsewhere: nothing to keep
+		t.Fatal(err)
+	}
+	expectBundles(t, dir, "up once OpenBao no longer mounts b1", filepath.Base(b3))
+}

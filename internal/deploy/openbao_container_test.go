@@ -116,3 +116,19 @@ func TestConfigGone(t *testing.T) {
 		})
 	}
 }
+
+func TestBundleOf(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{"/root/.versola/active/bundle-1727-abc/openbao.hcl", "bundle-1727-abc"},
+		// Docker Desktop reports the source in its VM's view of the path.
+		{"/run/desktop/mnt/host/c/Users/me/.versola/active/bundle-1727-abc/openbao.hcl", "bundle-1727-abc"},
+		{`C:\Users\me\.versola\active\bundle-1727-abc\openbao.hcl`, "bundle-1727-abc"},
+		{"/root/.versola/active/openbao.hcl", ""}, // legacy layout: no bundle directory
+		{"/etc/openbao/openbao.hcl", ""},
+		{"", ""},
+	} {
+		if got := bundleOf(tc.source); got != tc.want {
+			t.Errorf("bundleOf(%q) = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+}

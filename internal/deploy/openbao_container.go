@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -70,8 +71,7 @@ func decideOpenbao(exists, running, configMissing, canUnseal bool) openbaoAction
 // running, and whether the openbao.hcl it bind-mounts is gone from disk
 // (see configGone for when that last one can be told at all).
 func inspectOpenbao(target string) (exists, running, configMissing bool, err error) {
-	format := `{{.State.Running}}|{{range .Mounts}}{{if eq .Destination "` + openbaoConfigPath + `"}}{{.Source}}{{end}}{{end}}`
-	out, found, err := docker.Inspect(OpenbaoContainerName(target), format)
+	out, found, err := docker.Inspect(OpenbaoContainerName(target), "{{.State.Running}}|"+openbaoConfigSourceFormat)
 	if err != nil || !found {
 		return false, false, false, err
 	}
@@ -81,6 +81,47 @@ func inspectOpenbao(target string) (exists, running, configMissing bool, err err
 		return false, false, false, err
 	}
 	return true, runningStr == "true", configGone(source, bundles), nil
+}
+
+// openbaoConfigSourceFormat is a docker inspect template printing the
+// host path openbao.hcl is bind-mounted from.
+const openbaoConfigSourceFormat = `{{range .Mounts}}{{if eq .Destination "` + openbaoConfigPath + `"}}{{.Source}}{{end}}{{end}}`
+
+// openbaoBundles names the bundle directories OpenBao's containers (either
+// target's -- both can exist on one machine) currently mount openbao.hcl
+// from. Pruning has to leave these alone: OpenBao isn't recreated on every
+// configure, so it can keep mounting an older bundle's file long after
+// `up` moved everything else to a newer one, and deleting that file makes
+// the container fail to start again after a restart or reboot. A
+// container that's missing or can't be inspected contributes nothing.
+func openbaoBundles() []string {
+	var out []string
+	for _, target := range []string{"local", "vps"} {
+		source, found, err := docker.Inspect(OpenbaoContainerName(target), openbaoConfigSourceFormat)
+		if err != nil || !found {
+			continue
+		}
+		if b := bundleOf(source); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// bundleOf returns the name of the bundle directory a bind-mount source
+// sits directly in, or "" if it isn't in one. Matched by name rather than
+// against bundlesDir, so it also works for Docker Desktop, which reports
+// the source in its VM's view (/run/desktop/mnt/host/c/Users/...) -- the
+// bundle directory's name is the same either way.
+func bundleOf(source string) string {
+	if source == "" {
+		return ""
+	}
+	name := path.Base(path.Dir(strings.ReplaceAll(source, `\`, "/")))
+	if !strings.HasPrefix(name, "bundle-") {
+		return ""
+	}
+	return name
 }
 
 // configGone reports whether a bind-mount source is a file under

@@ -322,7 +322,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		proxyMode = proxyOpts.Mode
 	}
 
-	if err := state.Finalize(target, version, dir, authURL, proxyMode); err != nil {
+	if err := state.Finalize(target, version, dir, authURL, proxyMode, openbaoBundles()...); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

@@ -133,7 +133,7 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
 Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
-"v0.1.2" — that "v" prefix is only used for versola-cli's own releases).
+"v0.1.2").
 Check the available versions at https://github.com/orgs/versolauth/packages`, version)
 		}
 		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)

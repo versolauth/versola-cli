@@ -107,15 +107,27 @@ func IsRootless() (bool, error) {
 }
 
 // Inspect runs `docker inspect -f format name` and returns its trimmed
-// output. found is false, with no error, when there is no such container --
-// the same "doesn't exist is a plain negative" convention as IsRunning.
+// output. found is false, with no error, only when Docker answers that
+// there is no such container. Any other failure -- the daemon not
+// reachable, most plausibly -- is an error: callers decide from "not
+// found" that a container is gone (and, say, that files it mounts may be
+// deleted), which must never happen just because Docker couldn't answer.
 func Inspect(name, format string) (out string, found bool, err error) {
 	b, err := exec.Command("docker", "inspect", "--type", "container", "-f", format, name).Output()
 	if err != nil {
-		if _, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := err.(*exec.ExitError); ok && isNoSuchContainer(string(exitErr.Stderr)) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("couldn't inspect %s: %w", name, err)
 	}
 	return strings.TrimSpace(string(b)), true, nil
+}
+
+// isNoSuchContainer reports whether docker inspect's stderr says the
+// container doesn't exist. Docker has worded it as "Error: No such
+// object: x" and, with --type container, "Error: No such container: x"
+// across versions; both are matched, case-insensitively.
+func isNoSuchContainer(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "no such object") || strings.Contains(s, "no such container")
 }

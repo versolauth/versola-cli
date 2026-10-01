@@ -87,22 +87,60 @@ func inspectOpenbao(target string) (exists, running, configMissing bool, err err
 // host path openbao.hcl is bind-mounted from.
 const openbaoConfigSourceFormat = `{{range .Mounts}}{{if eq .Destination "` + openbaoConfigPath + `"}}{{.Source}}{{end}}{{end}}`
 
-// openbaoBundles names the bundle directories OpenBao's containers (either
-// target's -- both can exist on one machine) currently mount openbao.hcl
-// from. Pruning has to leave these alone: OpenBao isn't recreated on every
-// configure, so it can keep mounting an older bundle's file long after
-// `up` moved everything else to a newer one, and deleting that file makes
-// the container fail to start again after a restart or reboot. A
-// container that's missing or can't be inspected contributes nothing.
+// openbaoBundles names the bundle directories pruning must leave alone
+// because of OpenBao: the ones its containers (either target's -- both can
+// exist on one machine) currently mount openbao.hcl from. OpenBao isn't
+// recreated on every configure, so it can keep mounting an older bundle's
+// file long after `up` moved everything else to a newer one, and deleting
+// that file makes the container fail to start again after a restart or
+// reboot.
+//
+// If Docker can't say (anything but "no such container" -- see
+// docker.Inspect), every bundle on disk is kept instead: an extra
+// directory left for the next configure or up to clean up is harmless,
+// deleting OpenBao's isn't.
 func openbaoBundles() []string {
+	mounted, err := mountedOpenbaoBundles()
+	if err == nil {
+		return mounted
+	}
+	fmt.Printf("(couldn't check which bundle OpenBao runs from, so no old deployment files are removed this time: %v)\n", err)
+	dir, dirErr := state.Dir()
+	if dirErr != nil {
+		return nil
+	}
+	return bundlesIn(dir)
+}
+
+// mountedOpenbaoBundles is openbaoBundles' docker lookup. A container that
+// doesn't exist contributes nothing; any other inspect failure is returned.
+func mountedOpenbaoBundles() ([]string, error) {
 	var out []string
 	for _, target := range []string{"local", "vps"} {
 		source, found, err := docker.Inspect(OpenbaoContainerName(target), openbaoConfigSourceFormat)
-		if err != nil || !found {
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
 		if b := bundleOf(source); b != "" {
 			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// bundlesIn names every bundle-* directory in dir.
+func bundlesIn(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "bundle-") {
+			out = append(out, e.Name())
 		}
 	}
 	return out

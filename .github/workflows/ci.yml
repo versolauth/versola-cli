@@ -1,5 +1,5 @@
 # Runs go vet/build/test on every push and pull request -- unlike
-# release.yml (which only triggers on a "v*" tag, i.e. right before
+# release.yml (which only triggers on a version tag, i.e. right before
 # publishing), this catches a broken commit on every push/PR, not just the
 # one that happens to get tagged.
 name: ci

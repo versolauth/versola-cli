@@ -13,10 +13,13 @@
 # silently skipping.
 name: release
 
+# Tags are plain versions with no leading "v" (0.2.6, 0.3.0-rc1) -- the
+# same format as Versola's own releases. Releases up to v0.2.5 were tagged
+# with a "v"; those tags stay as they are.
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]*"
 
 permissions:
   contents: write
@@ -76,8 +79,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
-          # Tags containing a hyphen (v0.2.0-beta, v1.0.0-rc1) are
-          # pre-releases; plain vX.Y.Z tags are full releases. This matters
+          # Tags containing a hyphen (0.3.0-beta, 1.0.0-rc1) are
+          # pre-releases; plain X.Y.Z tags are full releases. This matters
           # beyond labelling: GitHub's "latest release" API excludes
           # pre-releases, and that's the endpoint both install scripts hit
           # when no version is given.

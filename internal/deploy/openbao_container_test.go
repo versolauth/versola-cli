@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/versolauth/versola-cli/internal/openbao"
@@ -130,5 +131,28 @@ func TestBundleOf(t *testing.T) {
 		if got := bundleOf(tc.source); got != tc.want {
 			t.Errorf("bundleOf(%q) = %q, want %q", tc.source, got, tc.want)
 		}
+	}
+}
+
+// bundlesIn is openbaoBundles' fallback when Docker can't be asked: it
+// must name every bundle directory, and nothing else, so pruning keeps
+// them all.
+func TestBundlesIn(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"bundle-1-a", "bundle-2-b", "other"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bundle-file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := bundlesIn(dir)
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "bundle-1-a" || got[1] != "bundle-2-b" {
+		t.Errorf("bundlesIn = %v, want [bundle-1-a bundle-2-b]", got)
+	}
+	if got := bundlesIn(filepath.Join(dir, "missing")); got != nil {
+		t.Errorf("bundlesIn(missing dir) = %v, want nil", got)
 	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // version is the versola-cli release this binary was built from. It's
-// overwritten at build time via -ldflags "-X .../internal/cmd.version=v1.2.3"
+// overwritten at build time via -ldflags "-X .../internal/cmd.version=1.2.3"
 // (see .github/workflows/release.yml). Builds made straight from source
 // without that flag report "dev", which is accurate: they don't correspond
 // to any published release.

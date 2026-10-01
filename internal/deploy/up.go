@@ -188,7 +188,7 @@ func Up(opts UpOptions, st *state.State) error {
 		}
 		fmt.Printf("\nVersola %s is running at %s\n", st.Version, authURL)
 		if st.ProxyMode == proxy.ModeExternal {
-			fmt.Printf("It listens on http://127.0.0.1:%d -- your own web server has to forward %s there, keeping the Host header and setting X-Forwarded-For ($proxy_add_x_forwarded_for in nginx).\n", proxy.ExternalPort, authURL)
+			fmt.Printf("It listens on http://127.0.0.1:%d -- your own web server has to forward %s there, keeping the Host header, setting X-Forwarded-For and X-Forwarded-Proto ($proxy_add_x_forwarded_for and $scheme in nginx) and allowing 8m request bodies (client_max_body_size 8m).\n", proxy.ExternalPort, authURL)
 		}
 		// vps doesn't use a fixed literal password the way local's
 		// "Admin1234!" is — it's a real, standing admin credential Configure
@@ -252,7 +252,7 @@ func ConfirmVpsDeploy(action string) error {
 // state.MarkRunning). Not fatal: the deployment is up either way, and the
 // worst case is an old bundle directory left on disk.
 func markRunning() {
-	if err := state.MarkRunning(); err != nil {
+	if err := state.MarkRunning(openbaoBundles()...); err != nil {
 		fmt.Printf("(couldn't record which deployment is running: %v)\n", err)
 	}
 }

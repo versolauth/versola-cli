@@ -14,6 +14,8 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
 var doctorTarget string
@@ -23,7 +25,7 @@ var doctorCmd = &cobra.Command{
 	Short: "Check that this machine has everything Versola needs",
 	Long: `doctor checks this machine for the dependencies Versola needs to run
 locally: a reachable Docker daemon, the Docker Compose plugin, and a
-free port for the gateway. It never installs anything on its own -- if
+free port for its reverse proxy. It never installs anything on its own -- if
 Docker isn't found at all, the most it does is offer to open an install
 page in your browser, and only after you confirm.
 
@@ -36,7 +38,7 @@ would actually pass, or pass one it would actually fail.`,
 }
 
 func init() {
-	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own gateway, not part of a vps deployment) is checked`)
+	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
@@ -61,7 +63,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// ports it needs depends on --proxy and --auth-url, which doctor
 	// doesn't take; "configure vps" checks them itself (checkProxyPorts).
 	if doctorTarget == "local" {
-		results = append(results, checks.PortFree(2821, "versola-nginx"))
+		owner, err := deploy.LocalPortOwner()
+		if err != nil {
+			owner = proxy.LocalContainerName // the daemon check above already says why
+		}
+		results = append(results, checks.PortFree(proxy.LocalPort, owner))
 	}
 	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
 

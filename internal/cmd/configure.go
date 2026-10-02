@@ -149,7 +149,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 }
 
 // rejectVpsOnlyFlags: --proxy/--acme-staging only mean something for vps
-// (local always runs its own gateway on 2821) -- say so instead of
+// (local's proxy is always on 127.0.0.1:2821, without TLS) -- say so instead of
 // silently ignoring them.
 func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {

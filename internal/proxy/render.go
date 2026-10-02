@@ -25,7 +25,7 @@ type Config struct {
 // Files renders the proxy's files, keyed by their path relative to the
 // deployment bundle.
 func (c Config) Files() (map[string][]byte, error) {
-	if _, err := ParseMode(c.Mode); err != nil {
+	if err := validMode(c.Mode); err != nil {
 		return nil, err
 	}
 	tls := c.AuthURL.TLS(c.Mode)
@@ -39,6 +39,8 @@ func (c Config) Files() (map[string][]byte, error) {
 
 	var listen []string
 	switch {
+	case c.Mode == ModeLocal:
+		listen = []string{strconv.Itoa(LocalPort)}
 	case c.Mode == ModeExternal:
 		listen = []string{"127.0.0.1:" + strconv.Itoa(ExternalPort)}
 	case tls:
@@ -51,6 +53,14 @@ func (c Config) Files() (map[string][]byte, error) {
 		if ipv6 {
 			listen = append(listen, "[::]:80")
 		}
+	}
+
+	// Where auth/edge are reached: on the host's loopback (vps, which
+	// shares the host's network) or by compose service name (local, on the
+	// project's bridge network).
+	authUpstream, edgeUpstream := "127.0.0.1:8080", "127.0.0.1:8095"
+	if c.Mode == ModeLocal {
+		authUpstream, edgeUpstream = "auth:8080", "edge:8095"
 	}
 
 	routes, err := templates.ReadFile("templates/routes.conf")
@@ -68,9 +78,14 @@ func (c Config) Files() (map[string][]byte, error) {
 		"ACMEStateDir":  acmeStateDir(c.ACMEDirectory),
 		"Routes":        string(routes),
 		"Image":         Image,
-		"ContainerName": ContainerName,
+		"ContainerName": ContainerFor(c.Mode),
 		"ACMEVolume":    ACMEVolume,
 		"ExternalPort":  ExternalPort,
+		"LocalPort":     LocalPort,
+		"HostNetwork":   c.Mode != ModeLocal,
+		"Resolve":       c.Mode == ModeLocal,
+		"AuthUpstream":  authUpstream,
+		"EdgeUpstream":  edgeUpstream,
 	}
 
 	files := map[string][]byte{}

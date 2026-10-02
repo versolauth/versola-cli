@@ -69,9 +69,9 @@ func renderCases() []renderCase {
 			want: []string{"listen 443 ssl;", "listen 80;", "server_name id.example.com;", "acme_certificate letsencrypt;",
 				"state_path /var/cache/nginx/acme-letsencrypt/production;",
 				"ssl_certificate $acme_certificate;", "resolver 127.0.0.53 ipv6=off;",
-				"uri " + ACMEProduction + ";", "return 301 https://$host$request_uri;", "server 127.0.0.1:8080;"},
+				"uri " + ACMEProduction + ";", "return 301 https://$host$request_uri;", "server 127.0.0.1:8080;", "server 127.0.0.1:8095;"},
 			wantNot: []string{"[::]", "set_real_ip_from", "2821"},
-			compose: []string{"image: " + Image, "container_name: " + ContainerName, "name: versola-vps", ACMEVolume + ":/var/cache/nginx/acme-letsencrypt", "external: true", "./central-ui:/usr/share/nginx/html/central/admin:ro"},
+			compose: []string{"image: " + Image, "container_name: " + ContainerName, "network_mode: host", ACMEVolume + ":/var/cache/nginx/acme-letsencrypt", "external: true", "./central-ui:/usr/share/nginx/html/central/admin:ro"},
 		},
 		{
 			name: "nginx mode, TLS, ipv6, staging",
@@ -101,6 +101,18 @@ func renderCases() []renderCase {
 				"map $http_x_forwarded_proto $versola_forwarded_proto {"},
 			wantNot:   []string{"ssl", "acme", "resolver", "[::]", "listen 80", "listen 443"},
 			noCompose: []string{ACMEVolume},
+		},
+		{
+			name: "local mode",
+			cfg: func(t *testing.T) Config {
+				// IPv6 must be ignored here too: only published on loopback.
+				return Config{Mode: ModeLocal, AuthURL: mustURL(t, "http://localhost:2821", ModeLocal), IPv6: true}
+			},
+			want: []string{"listen 2821;", "server_name localhost;", "resolver 127.0.0.11 valid=10s ipv6=off;",
+				"zone auth_backend 64k;", "server auth:8080 resolve;", "zone edge_backend 64k;", "server edge:8095 resolve;"},
+			wantNot:   []string{"ssl", "acme", "[::]", "set_real_ip_from", "127.0.0.1:"},
+			compose:   []string{"container_name: " + LocalContainerName, `- "127.0.0.1:2821:2821"`, "./central-ui:/usr/share/nginx/html/central/admin:ro"},
+			noCompose: []string{"network_mode: host", ACMEVolume},
 		},
 	}
 }

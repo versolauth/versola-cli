@@ -186,9 +186,12 @@ func dockerPortInUse(port int) (owner string, used, loopbackOnly bool) {
 	return portOwner(out, port)
 }
 
-// portOwner finds the container publishing port in `docker ps --format
-// "{{.Names}}\t{{.Ports}}"` output. loopbackOnly: every publish of it is
-// on a loopback address (127.0.0.1 / ::1), none on all interfaces.
+// portOwner finds the container publishing port on an address that takes
+// 127.0.0.1 too -- the address local's proxy binds -- in `docker ps --format
+// "{{.Names}}\t{{.Ports}}"` output. A publish on another specific address
+// (a LAN IP, ::1) is skipped: Docker binds both side by side, so it's no
+// conflict. loopbackOnly: every such publish is on 127.0.0.1 itself, none
+// on all interfaces.
 func portOwner(psOutput string, port int) (owner string, used, loopbackOnly bool) {
 	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
 		fields := strings.SplitN(strings.TrimSpace(line), "\t", 2)
@@ -196,18 +199,19 @@ func portOwner(psOutput string, port int) (owner string, used, loopbackOnly bool
 			continue
 		}
 		containerName, ports := fields[0], fields[1]
-		loopbackOnly = true
+		used, loopbackOnly = false, true
 		for _, m := range hostPortMapping.FindAllStringSubmatch(ports, -1) {
 			start, _ := strconv.Atoi(m[2])
 			end := start
 			if m[3] != "" {
 				end, _ = strconv.Atoi(m[3])
 			}
-			if port < start || port > end {
+			host := m[1]
+			if port < start || port > end || !takesLoopback(host) {
 				continue
 			}
 			used = true
-			if host := m[1]; host != "127.0.0.1" && host != "[::1]" && host != "::1" {
+			if host != "127.0.0.1" {
 				loopbackOnly = false
 			}
 		}
@@ -216,6 +220,17 @@ func portOwner(psOutput string, port int) (owner string, used, loopbackOnly bool
 		}
 	}
 	return "", false, false
+}
+
+// takesLoopback: whether a publish on host also takes 127.0.0.1 -- all
+// interfaces ("0.0.0.0", "[::]", which is dual-stack, or no address at all)
+// or 127.0.0.1 itself.
+func takesLoopback(host string) bool {
+	switch host {
+	case "", "0.0.0.0", "[::]", "::", "127.0.0.1":
+		return true
+	}
+	return false
 }
 
 // DockerMemory checks whether this machine has enough memory for

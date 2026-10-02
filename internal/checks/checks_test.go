@@ -27,8 +27,8 @@ func TestPortOwner(t *testing.T) {
 		// Another specific address doesn't take 127.0.0.1: Docker binds both.
 		{2830, "", false, false},
 		{2831, "", false, false},
-		// [::] is dual-stack: it takes 127.0.0.1 too.
-		{2832, "v6any", true, false},
+		// Docker binds [::] IPv6-only: it doesn't take 127.0.0.1.
+		{2832, "", false, false},
 		{2833, "lan-and-loop", true, true},
 		// Exposed but not published.
 		{5432, "", false, false},

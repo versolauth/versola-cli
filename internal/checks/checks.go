@@ -222,12 +222,13 @@ func portOwner(psOutput string, port int) (owner string, used, loopbackOnly bool
 	return "", false, false
 }
 
-// takesLoopback: whether a publish on host also takes 127.0.0.1 -- all
-// interfaces ("0.0.0.0", "[::]", which is dual-stack, or no address at all)
-// or 127.0.0.1 itself.
+// takesLoopback: whether a publish on host also takes 127.0.0.1 -- all IPv4
+// interfaces ("0.0.0.0", or no address at all) or 127.0.0.1 itself. Not
+// "[::]": Docker binds that IPv6-only, which is why a default publish shows
+// up as two entries, "0.0.0.0:P->..." and "[::]:P->...".
 func takesLoopback(host string) bool {
 	switch host {
-	case "", "0.0.0.0", "[::]", "::", "127.0.0.1":
+	case "", "0.0.0.0", "127.0.0.1":
 		return true
 	}
 	return false

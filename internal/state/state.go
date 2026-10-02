@@ -110,8 +110,9 @@ type State struct {
 	BundleDir string `json:"bundleDir,omitempty"`
 
 	// AuthURL is the public URL this deployment's auth service is
-	// reachable at -- empty for "local" (docker-local's own URL is fixed,
-	// not user-supplied, see up.go). For "vps" it's whatever --auth-url
+	// reachable at. For "local" it's the fixed http://localhost:2821 (empty
+	// for local deployments recorded before local had versola-cli's own
+	// proxy). For "vps" it's whatever --auth-url
 	// was passed to `bootstrap`/`configure`, recorded here so Up can
 	// print the right domain in its completion message instead of a
 	// hardcoded one that's wrong for any deployment other than the
@@ -119,11 +120,11 @@ type State struct {
 	// versolauth/versola-cli#7).
 	AuthURL string `json:"authUrl,omitempty"`
 
-	// ProxyMode is the vps reverse proxy's mode (proxy.ModeNginx or
-	// proxy.ModeExternal) this deployment was configured with -- what `up`
-	// waits on and what it tells the operator to do next. Empty for local
-	// deployments and for vps deployments configured before versola-cli
-	// generated the proxy itself.
+	// ProxyMode is the reverse proxy's mode this deployment was configured
+	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
+	// for local) -- what `up` waits on and what it tells the operator to do
+	// next. Empty for deployments configured before versola-cli generated
+	// the proxy itself.
 	ProxyMode string `json:"proxyMode,omitempty"`
 
 	// MountedBundleDirs are the bundles containers may currently be

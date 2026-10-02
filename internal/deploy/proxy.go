@@ -13,7 +13,7 @@ import (
 )
 
 // ProxyOptions: how a vps deployment's reverse proxy is set up (see
-// package proxy). Ignored for local.
+// package proxy). For local, Configure sets proxy.ModeLocal itself.
 type ProxyOptions struct {
 	// Mode is proxy.ModeNginx (the proxy owns 80/443 and does TLS) or
 	// proxy.ModeExternal (behind the host's existing web server).
@@ -21,6 +21,47 @@ type ProxyOptions struct {
 	// ACMEStaging requests the certificate from Let's Encrypt's staging
 	// environment: untrusted, but without production's rate limits.
 	ACMEStaging bool
+}
+
+// LegacyGatewayContainer is the gateway local deployments ran on before
+// versola-cli generated their proxy too: versola-tools' "nginx" service,
+// on Versola's own versola-gateway image. Up removes it before starting
+// the proxy, which binds the same port.
+const LegacyGatewayContainer = "versola-nginx"
+
+// LocalPortOwner: the container of this deployment's own that may hold
+// local's proxy port -- the old gateway while one is still running, else
+// the proxy. For checks.PortFree, which accepts the port being held only
+// by "our own" container.
+func LocalPortOwner() (string, error) {
+	// Bounded: callers ask this while checking prerequisites, which have to
+	// report an unresponsive daemon rather than hang on it.
+	running, err := docker.IsRunningWithin(LegacyGatewayContainer, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if running {
+		return LegacyGatewayContainer, nil
+	}
+	return proxy.LocalContainerName, nil
+}
+
+// removeLegacyGateway removes the old gateway container, if a deployment
+// made by an earlier versola-cli left one: it holds the port the proxy is
+// about to bind.
+func removeLegacyGateway() error {
+	_, found, err := docker.Inspect(LegacyGatewayContainer, "{{.Id}}")
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	fmt.Printf("Removing the old gateway (%s)...\n", LegacyGatewayContainer)
+	if err := docker.Run("rm", "-f", LegacyGatewayContainer); err != nil {
+		return fmt.Errorf("couldn't remove the old gateway: %w", err)
+	}
+	return nil
 }
 
 // checkProxyPorts fails early, before anything is generated, when the
@@ -128,11 +169,11 @@ func startProxy(composePath string, st *state.State) error {
 	fmt.Println("Waiting for it to serve Versola...")
 	err = proxy.WaitReady(st.ProxyMode, auth, 60*time.Second, 120*time.Second)
 	if errors.Is(err, proxy.ErrTLSPending) {
-		fmt.Printf("\nWarning: %v.\nThat's usually the certificate still being issued -- nginx keeps retrying on its own. Check that %s's DNS points at this server and that ports 80/443 are reachable from the internet; see `docker logs %s` for the ACME module's progress.\n", err, auth.Host, proxy.ContainerName)
+		fmt.Printf("\nWarning: %v.\nThat's usually the certificate still being issued -- nginx keeps retrying on its own. Check that %s's DNS points at this server and that ports 80/443 are reachable from the internet; see `docker logs %s` for the ACME module's progress.\n", err, auth.Host, proxy.ContainerFor(st.ProxyMode))
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("the reverse proxy isn't serving Versola: %w (see `docker logs %s`)", err, proxy.ContainerName)
+		return fmt.Errorf("the reverse proxy isn't serving Versola: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
 	}
 	return nil
 }

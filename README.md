@@ -11,7 +11,7 @@ about Versola's own service topology (ports, service names, config schema)
 `doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
 `secrets`, `uninstall`, and `version` are all implemented and have been
 tested end-to-end against a real local deployment (Postgres + auth +
-central + edge + the gateway, real browser login through to the admin
+central + edge + the reverse proxy, real browser login through to the admin
 console). Releases are automated (see Releasing below) and installed via
 the one-line scripts below.
 
@@ -163,9 +163,18 @@ downloads anything itself.
 
 Deploys a specific released version of Versola locally: pulls the
 matching `versola-tools` image to generate config, then brings up
-Postgres, central, auth, edge, and the gateway (nginx + central-ui) via
-Docker Compose, waiting on readiness at each stage. Prints the admin
-login on success.
+Postgres, central, auth, edge, and versola-cli's own reverse proxy (the
+official nginx image, serving the admin console too, on
+`127.0.0.1:2821`) via Docker Compose, waiting on readiness at each stage
+-- the proxy until auth, edge and the admin console all answer through
+it. Prints the admin login on success.
+
+The proxy is published on `127.0.0.1` only, so the deployment isn't
+reachable from other machines on the network. Versola releases whose
+`versola-tools` doesn't ship the admin console can't be deployed this way
+(`configure` says so) -- pick a newer version. A local deployment made by
+an older versola-cli keeps its previous gateway until it's configured
+again.
 
 `<version>` is a Versola release, which is tagged **without** a leading
 `v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (versola-cli's own

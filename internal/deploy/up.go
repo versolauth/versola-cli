@@ -135,15 +135,17 @@ func Up(opts UpOptions, st *state.State) error {
 	// start it, which may not be this bundle's. A bare "up -d" here would
 	// see openbao defined in this project's compose file but not part of
 	// this project, and try to create a second container under its fixed
-	// container_name, which Docker refuses. vps's reverse proxy isn't in
+	// container_name, which Docker refuses. The reverse proxy isn't in
 	// versola-tools' compose file at all -- versola-cli generates it
 	// (proxy.yml, see package proxy) and startProxy below starts it last.
-	if isVps {
+	if isVps || st.ProxyMode != "" {
 		fmt.Println("Starting auth and edge...")
 		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge")...); err != nil {
 			return fmt.Errorf("couldn't start auth/edge: %w", err)
 		}
 	} else {
+		// local, configured by a versola-cli from before it generated
+		// local's proxy too: still on versola-tools' own gateway.
 		fmt.Println("Starting auth, edge, and the gateway...")
 		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge", "nginx")...); err != nil {
 			return fmt.Errorf("couldn't start the rest of the stack: %w", err)
@@ -158,12 +160,19 @@ func Up(opts UpOptions, st *state.State) error {
 		return fmt.Errorf("edge never became ready: %w", err)
 	}
 
-	// vps: the reverse proxy versola-cli generated at configure time (see
+	// The reverse proxy versola-cli generated at configure time (see
 	// package proxy) -- started last, once what it routes to is ready, so
 	// it never serves traffic to a backend that isn't. Deployments
-	// configured before versola-cli generated it have no ProxyMode and
-	// keep relying on a proxy set up by hand.
-	if isVps && st.ProxyMode != "" {
+	// configured before versola-cli generated it have no ProxyMode: vps
+	// ones keep relying on a proxy set up by hand, local ones on the
+	// gateway started above. A local one moving to the proxy first loses
+	// that gateway, which holds the same port.
+	if st.ProxyMode != "" {
+		if !isVps {
+			if err := removeLegacyGateway(); err != nil {
+				return err
+			}
+		}
 		if err := startProxy(composePath, st); err != nil {
 			return err
 		}

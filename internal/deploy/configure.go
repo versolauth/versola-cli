@@ -87,27 +87,40 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		}
 		authURL = auth.URL
 	}
+	// local: its proxy is versola-cli's too (proxy.ModeLocal), at the
+	// address versola-tools builds every local issuer and redirect URI on.
+	if target == "local" {
+		var err error
+		auth, err = proxy.ParseAuthURL(fmt.Sprintf("http://localhost:%d", proxy.LocalPort), proxy.ModeLocal)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+	}
 
 	fmt.Println("Checking prerequisites...")
+	daemon := checks.DockerDaemon()
 	checksToRun := []checks.Result{
-		checks.DockerDaemon(),
+		daemon,
 		checks.ComposePlugin(),
 		checks.DockerMemory(target),
 		checks.DiskSpace(),
 	}
-	// Port 2821 is nginx's — local-only, checked here for the same reason
-	// as the readiness URLs in up.go (a local-deployment fact still
-	// hardcoded in this CLI rather than coming from the bundle
-	// versola-tools generates). vps's reverse proxy is versola-cli's own
-	// (see package proxy) and its ports are checked separately, by
+	// local's proxy port. vps's ports are checked separately, by
 	// checkProxyPorts below, once --proxy and --auth-url say which ones.
-	//
-	// "versola-nginx" is this deployment's own gateway from a previous
-	// run, if there was one — see PortFree's own comment for why that's
-	// fine, not a real conflict (the compose file's fixed `name:` means Up
-	// updates/restarts it in place rather than clashing with it).
+	// Held by a container of this deployment's own from a previous run --
+	// the proxy, or the old gateway Up replaces -- it isn't a conflict (see
+	// PortFree's own comment).
+	// Docker is only asked about the owner when it answered the daemon
+	// check: an unreachable or hung daemon is reported by that check, and
+	// asking again here would only delay the report.
 	if target == "local" {
-		checksToRun = append(checksToRun, checks.PortFree(2821, "versola-nginx"))
+		owner := proxy.LocalContainerName
+		if daemon.OK {
+			if o, err := LocalPortOwner(); err == nil {
+				owner = o
+			}
+		}
+		checksToRun = append(checksToRun, checks.PortFree(proxy.LocalPort, owner))
 	}
 	for _, r := range checksToRun {
 		fmt.Println(r.String())
@@ -152,10 +165,9 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// long as the one-time setup takes, on a shared machine where "just a
 	// Windows dev box" isn't the threat model.
 	restrictGeneratedSecretsPerms(dir)
-	if target == "vps" {
-		if err := requireAdminConsole(dir, version); err != nil {
-			return ConfigureResult{}, err
-		}
+	// Both targets' proxies serve the admin console from the bundle.
+	if err := requireAdminConsole(dir, version); err != nil {
+		return ConfigureResult{}, err
 	}
 
 	// OpenBao has to actually be up before secrets can be resolved against
@@ -313,16 +325,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// state.Finalize's own comment for why that ordering matters: it's
 	// what keeps a failed redeploy from costing this machine its record
 	// of whatever deployment was still running before this call started.
-	proxyMode := ""
-	if target == "vps" {
-		fmt.Println("Generating the reverse proxy's config...")
-		if err := setUpProxy(dir, auth, proxyOpts); err != nil {
-			return ConfigureResult{}, err
-		}
-		proxyMode = proxyOpts.Mode
+	if target == "local" {
+		proxyOpts = ProxyOptions{Mode: proxy.ModeLocal}
+		authURL = auth.URL
+	}
+	fmt.Println("Generating the reverse proxy's config...")
+	if err := setUpProxy(dir, auth, proxyOpts); err != nil {
+		return ConfigureResult{}, err
 	}
 
-	if err := state.Finalize(target, version, dir, authURL, proxyMode, openbaoBundles()...); err != nil {
+	if err := state.Finalize(target, version, dir, authURL, proxyOpts.Mode, openbaoBundles()...); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

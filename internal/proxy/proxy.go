@@ -26,12 +26,21 @@ const (
 	// the proxy listens on 127.0.0.1:ExternalPort behind it and leaves TLS
 	// to it.
 	ModeExternal = "external"
+	// ModeLocal: the proxy of a target "local" deployment -- never a
+	// --proxy value (ParseMode refuses it), configure sets it. On Docker
+	// Desktop auth/edge sit on the compose project's bridge network rather
+	// than the host's, so this proxy joins that network, reaches them by
+	// service name, and is published on 127.0.0.1:LocalPort only.
+	ModeLocal = "local"
 
 	// Image is the official nginx image -- 1.30 because
 	// ngx_http_acme_module ships in it (since 1.29.1).
 	Image = "nginx:1.30-alpine"
 	// ContainerName is fixed, like auth/central/edge's.
 	ContainerName = "versola-proxy"
+	// LocalContainerName is ModeLocal's, kept apart from the vps one (like
+	// OpenBao's) so neither target mistakes the other's proxy for its own.
+	LocalContainerName = "versola-proxy-local"
 	// ServiceName is the proxy's service name in ComposeFile.
 	ServiceName = "proxy"
 	// ComposeFile is written into the deployment bundle next to
@@ -41,6 +50,8 @@ const (
 	ACMEVolume = "versola-acme-vps"
 	// ExternalPort is where the proxy listens in ModeExternal.
 	ExternalPort = 2821
+	// LocalPort is where ModeLocal's proxy is published (loopback only).
+	LocalPort = 2821
 
 	// ACMEProduction / ACMEStaging: Let's Encrypt's ACME directories.
 	// Staging issues untrusted certificates without production's rate
@@ -58,9 +69,29 @@ func ParseMode(mode string) (string, error) {
 	return "", fmt.Errorf("--proxy must be %q or %q, got %q", ModeNginx, ModeExternal, mode)
 }
 
+// validMode: the modes a Config renders for -- ParseMode's, plus
+// ModeLocal, which only configure sets.
+func validMode(mode string) error {
+	if mode == ModeLocal {
+		return nil
+	}
+	_, err := ParseMode(mode)
+	return err
+}
+
+// ContainerFor returns the proxy's container name in the given mode.
+func ContainerFor(mode string) string {
+	if mode == ModeLocal {
+		return LocalContainerName
+	}
+	return ContainerName
+}
+
 // Ports returns the host ports the proxy binds for this auth URL and mode.
 func Ports(a AuthURL, mode string) []int {
 	switch {
+	case mode == ModeLocal:
+		return []int{LocalPort}
 	case mode == ModeExternal:
 		return []int{ExternalPort}
 	case a.TLS(mode):

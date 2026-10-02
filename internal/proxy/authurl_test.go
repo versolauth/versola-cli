@@ -102,7 +102,8 @@ func TestParseMode(t *testing.T) {
 			t.Errorf("ParseMode(%q): %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "NGINX", "caddy", "none"} {
+	// ModeLocal is set by configure for target local, never by --proxy.
+	for _, bad := range []string{"", "NGINX", "caddy", "none", ModeLocal} {
 		if _, err := ParseMode(bad); err == nil {
 			t.Errorf("ParseMode(%q): want error", bad)
 		}
@@ -117,6 +118,7 @@ func TestPorts(t *testing.T) {
 		{"https://id.example.com", ModeNginx, []int{80, 443}},
 		{"http://1.2.3.4", ModeNginx, []int{80}},
 		{"https://id.example.com", ModeExternal, []int{ExternalPort}},
+		{"http://localhost:2821", ModeLocal, []int{LocalPort}},
 	} {
 		a := mustParse(t, c.raw, c.mode)
 		got := Ports(a, c.mode)

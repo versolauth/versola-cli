@@ -109,7 +109,7 @@ func ComposePlugin() Result {
 func PortFree(port int, ownContainer string) Result {
 	name := fmt.Sprintf("Port %d free", port)
 
-	owner, used := dockerPortInUse(port)
+	owner, used, loopbackOnly := dockerPortInUse(port)
 	if used && owner != ownContainer {
 		return Result{
 			Name:   name,
@@ -136,7 +136,14 @@ func PortFree(port int, ownContainer string) Result {
 	// container — every ordinary redeploy of our own, healthy nginx would
 	// then fail this raw bind and get misreported as a conflict, which is
 	// worse than the rare WSL2 case this exists to catch.
-	if used && owner == ownContainer && runtime.GOOS != "windows" {
+	//
+	// Nor on Windows when our container is published on loopback only
+	// (127.0.0.1:2821, as local's proxy is): Docker Desktop then holds
+	// exactly that address, and the raw bind below would fail against our
+	// own healthy container every time (confirmed by hand) -- it can tell
+	// nothing there. Only an all-interfaces publish leaves 127.0.0.1 free
+	// for it.
+	if used && owner == ownContainer && (runtime.GOOS != "windows" || loopbackOnly) {
 		return Result{Name: name, OK: true}
 	}
 
@@ -156,45 +163,59 @@ func PortFree(port int, ownContainer string) Result {
 	return Result{Name: name, OK: true}
 }
 
-// hostPortMapping matches the host-side port(s) in one entry of `docker
-// ps`'s Ports column, e.g. the "8080" in "0.0.0.0:8080->80/tcp" or the
-// "8080" and "8081" in "0.0.0.0:8080-8081->8080-8081/tcp" (docker collapses
-// consecutive port mappings into a range like this — PORT and DPORT next
-// to each other, as Versola's services use, trigger it).
-var hostPortMapping = regexp.MustCompile(`:(\d+)(?:-(\d+))?->`)
+// hostPortMapping matches one published entry of `docker ps`'s Ports
+// column: the host address and the host-side port(s), e.g. "0.0.0.0" and
+// "8080" in "0.0.0.0:8080->80/tcp", "127.0.0.1" and "2821" in
+// "127.0.0.1:2821->2821/tcp", or "[::]" and "8080"-"8081" in
+// "[::]:8080-8081->8080-8081/tcp" (docker collapses consecutive port
+// mappings into a range like this — PORT and DPORT next to each other, as
+// Versola's services use, trigger it).
+var hostPortMapping = regexp.MustCompile(`([^\s,]*):(\d+)(?:-(\d+))?->`)
 
 // dockerPortInUse asks the Docker daemon directly whether a running
 // container already has this host port published, rather than relying on
 // the OS to notice — see the comment on PortFree for why that's not
 // always enough on its own.
-func dockerPortInUse(port int) (owner string, used bool) {
+func dockerPortInUse(port int) (owner string, used, loopbackOnly bool) {
 	out, err := run(5*time.Second, "docker", "ps", "--format", "{{.Names}}\t{{.Ports}}")
 	if err != nil {
 		// Docker unreachable — DockerDaemon() already reports this on its
 		// own, so don't also fail this check because of it.
-		return "", false
+		return "", false, false
 	}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line == "" {
-			continue
-		}
-		fields := strings.SplitN(line, "\t", 2)
+	return portOwner(out, port)
+}
+
+// portOwner finds the container publishing port in `docker ps --format
+// "{{.Names}}\t{{.Ports}}"` output. loopbackOnly: every publish of it is
+// on a loopback address (127.0.0.1 / ::1), none on all interfaces.
+func portOwner(psOutput string, port int) (owner string, used, loopbackOnly bool) {
+	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "\t", 2)
 		if len(fields) != 2 {
 			continue
 		}
 		containerName, ports := fields[0], fields[1]
+		loopbackOnly = true
 		for _, m := range hostPortMapping.FindAllStringSubmatch(ports, -1) {
-			start, _ := strconv.Atoi(m[1])
+			start, _ := strconv.Atoi(m[2])
 			end := start
-			if m[2] != "" {
-				end, _ = strconv.Atoi(m[2])
+			if m[3] != "" {
+				end, _ = strconv.Atoi(m[3])
 			}
-			if port >= start && port <= end {
-				return containerName, true
+			if port < start || port > end {
+				continue
+			}
+			used = true
+			if host := m[1]; host != "127.0.0.1" && host != "[::1]" && host != "::1" {
+				loopbackOnly = false
 			}
 		}
+		if used {
+			return containerName, true, loopbackOnly
+		}
 	}
-	return "", false
+	return "", false, false
 }
 
 // DockerMemory checks whether this machine has enough memory for

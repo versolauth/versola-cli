@@ -16,10 +16,12 @@
 package docker
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Cmd builds a docker exec.Cmd with stdout already wired to the user's
@@ -70,6 +72,30 @@ func RunQuiet(args ...string) error {
 // it gets.
 func IsRunning(name string) (bool, error) {
 	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", name).Output()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return false, nil
+		}
+		return false, fmt.Errorf("couldn't check whether %s is running: %w", name, err)
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+// IsRunningWithin is IsRunning bounded by timeout, for the prerequisite
+// checks: a Docker endpoint can accept a connection and never answer (Docker
+// Desktop after sleep or a WSL2 restart), and a check has to report that
+// rather than wait on it forever. Running out of time is an error.
+func IsRunningWithin(name string, timeout time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", name)
+	// Once docker is killed, don't go on waiting for output pipes a child
+	// of it may still hold open.
+	c.WaitDelay = time.Second
+	out, err := c.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return false, fmt.Errorf("docker didn't answer within %s", timeout)
+	}
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return false, nil

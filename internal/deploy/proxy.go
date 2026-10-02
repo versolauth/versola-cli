@@ -34,7 +34,9 @@ const LegacyGatewayContainer = "versola-nginx"
 // the proxy. For checks.PortFree, which accepts the port being held only
 // by "our own" container.
 func LocalPortOwner() (string, error) {
-	running, err := docker.IsRunning(LegacyGatewayContainer)
+	// Bounded: callers ask this while checking prerequisites, which have to
+	// report an unresponsive daemon rather than hang on it.
+	running, err := docker.IsRunningWithin(LegacyGatewayContainer, 5*time.Second)
 	if err != nil {
 		return "", err
 	}

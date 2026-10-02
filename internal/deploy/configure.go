@@ -98,8 +98,9 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	}
 
 	fmt.Println("Checking prerequisites...")
+	daemon := checks.DockerDaemon()
 	checksToRun := []checks.Result{
-		checks.DockerDaemon(),
+		daemon,
 		checks.ComposePlugin(),
 		checks.DockerMemory(target),
 		checks.DiskSpace(),
@@ -109,10 +110,15 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	// Held by a container of this deployment's own from a previous run --
 	// the proxy, or the old gateway Up replaces -- it isn't a conflict (see
 	// PortFree's own comment).
+	// Docker is only asked about the owner when it answered the daemon
+	// check: an unreachable or hung daemon is reported by that check, and
+	// asking again here would only delay the report.
 	if target == "local" {
-		owner, err := LocalPortOwner()
-		if err != nil {
-			owner = proxy.LocalContainerName // DockerDaemon above reports why
+		owner := proxy.LocalContainerName
+		if daemon.OK {
+			if o, err := LocalPortOwner(); err == nil {
+				owner = o
+			}
 		}
 		checksToRun = append(checksToRun, checks.PortFree(proxy.LocalPort, owner))
 	}

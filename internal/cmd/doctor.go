@@ -63,9 +63,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// ports it needs depends on --proxy and --auth-url, which doctor
 	// doesn't take; "configure vps" checks them itself (checkProxyPorts).
 	if doctorTarget == "local" {
-		owner, err := deploy.LocalPortOwner()
-		if err != nil {
-			owner = proxy.LocalContainerName // the daemon check above already says why
+		// Only when the daemon answered -- see deploy.Configure's own check.
+		owner := proxy.LocalContainerName
+		if dockerDaemon.OK {
+			if o, err := deploy.LocalPortOwner(); err == nil {
+				owner = o
+			}
 		}
 		results = append(results, checks.PortFree(proxy.LocalPort, owner))
 	}

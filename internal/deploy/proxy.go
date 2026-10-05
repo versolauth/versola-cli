@@ -111,10 +111,16 @@ func requireAdminConsole(dir, version string) error {
 	return nil
 }
 
+// proxyUpstreams are the replicas the proxy routes to.
+type proxyUpstreams struct {
+	Auth []proxy.Backend
+	Edge []proxy.Backend
+}
+
 // setUpProxy writes the proxy's files into the bundle and, for TLS,
 // prepares the volume the ACME module keeps its state in.
-func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions) error {
-	cfg := proxy.Config{Mode: opts.Mode, AuthURL: auth, ACMEDirectory: proxy.ACMEProduction}
+func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, upstreams proxyUpstreams) error {
+	cfg := proxy.Config{Mode: opts.Mode, AuthURL: auth, ACMEDirectory: proxy.ACMEProduction, Auth: upstreams.Auth, Edge: upstreams.Edge}
 	if opts.ACMEStaging {
 		cfg.ACMEDirectory = proxy.ACMEStaging
 	}

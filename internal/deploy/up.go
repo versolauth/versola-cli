@@ -53,6 +53,31 @@ func Up(opts UpOptions, st *state.State) error {
 	dir := filepath.Dir(composePath)
 	isVps := st.Target == "vps"
 
+	// Where each service listens -- and so where it reports readiness --
+	// comes from the compose file, with the replica slots recorded in
+	// state (a deployment made before slots existed is one replica of
+	// auth and of edge, in slot 1).
+	topo, err := loadTopology(composePath)
+	if err != nil {
+		return err
+	}
+	centralReplicas, err := replicasOf(topo, CentralService, []state.Slot{{N: 1, Version: st.Version}})
+	if err != nil {
+		return err
+	}
+	authReplicas, err := replicasOf(topo, AuthService, st.ActiveSlots(AuthService))
+	if err != nil {
+		return err
+	}
+	edgeReplicas, err := replicasOf(topo, EdgeService, st.ActiveSlots(EdgeService))
+	if err != nil {
+		return err
+	}
+	if err := checkNoPortClash(centralReplicas, authReplicas, edgeReplicas); err != nil {
+		return err
+	}
+	appServices := serviceNames(authReplicas, edgeReplicas)
+
 	// A warning, not a hard failure: the services themselves are the real
 	// check (they validate their schema at startup now rather than silently
 	// running against whatever's there -- see RUN_MIGRATIONS in
@@ -115,16 +140,12 @@ func Up(opts UpOptions, st *state.State) error {
 		}
 	}
 
-	// These URLs, like the service names above and the port checked in
-	// Configure, are still hardcoded here. They're deployment facts that
-	// by rights belong in the bundle versola-tools generates -- this CLI
-	// is meant not to know Versola's topology, so that one build of it can
-	// deploy any release (design doc §3.5). Hardcoding them was tolerable
-	// while "local" was the only target; vps happens to use the exact
-	// same ports (see deploy.md's table), which is the only reason this
-	// hasn't forced the issue yet.
+	// The readiness URL is read from the compose file (see loadTopology)
+	// rather than written down here: this CLI is meant not to know
+	// Versola's topology, so that one build of it can deploy any release
+	// (design doc §3.5). The service names are what is still assumed.
 	fmt.Println("Waiting for central to be ready...")
-	if err := wait.ForReady("http://localhost:8091/readiness", 60*time.Second); err != nil {
+	if err := wait.ForReady(readinessURL(centralReplicas[0].Ports), 60*time.Second); err != nil {
 		return fmt.Errorf("central never became ready: %w", err)
 	}
 
@@ -140,24 +161,23 @@ func Up(opts UpOptions, st *state.State) error {
 	// (proxy.yml, see package proxy) and startProxy below starts it last.
 	if isVps || st.ProxyMode != "" {
 		fmt.Println("Starting auth and edge...")
-		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge")...); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, appUpArgs(appServices, false)...)...); err != nil {
 			return fmt.Errorf("couldn't start auth/edge: %w", err)
 		}
 	} else {
 		// local, configured by a versola-cli from before it generated
 		// local's proxy too: still on versola-tools' own gateway.
 		fmt.Println("Starting auth, edge, and the gateway...")
-		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "auth", "edge", "nginx")...); err != nil {
+		if err := docker.Run(state.ComposeArgs(composePath, appUpArgs(appServices, true)...)...); err != nil {
 			return fmt.Errorf("couldn't start the rest of the stack: %w", err)
 		}
 	}
 
 	fmt.Println("Waiting for auth and edge to be ready...")
-	if err := wait.ForReady("http://localhost:8081/readiness", 60*time.Second); err != nil {
-		return fmt.Errorf("auth never became ready: %w", err)
-	}
-	if err := wait.ForReady("http://localhost:8096/readiness", 60*time.Second); err != nil {
-		return fmt.Errorf("edge never became ready: %w", err)
+	for _, r := range append(append([]replica{}, authReplicas...), edgeReplicas...) {
+		if err := wait.ForReady(readinessURL(r.Ports), 60*time.Second); err != nil {
+			return fmt.Errorf("%s never became ready: %w", r.Service, err)
+		}
 	}
 
 	// The reverse proxy versola-cli generated at configure time (see

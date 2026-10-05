@@ -135,6 +135,39 @@ type State struct {
 	// partly started. Nil in records written before this field existed;
 	// see Finalize for how that's treated.
 	MountedBundleDirs []string `json:"mountedBundleDirs,omitempty"`
+
+	// Slots records, per scalable service (compose service name of its
+	// first replica: "auth", "edge"), which replica slots are deployed and
+	// at which version -- see package topology for what a slot is. Absent
+	// (nil) means one replica in slot 1 at Version, which is what every
+	// deployment made before replicas existed is; ActiveSlots turns that
+	// into the list callers should use, so none of them has to know the
+	// difference.
+	//
+	// Finalize builds a fresh State, so a `configure` starts over from one
+	// replica in slot 1: carrying replicas across a re-configure is up to
+	// whatever adds replicas (0c's later steps) and rolling upgrades (0d).
+	Slots map[string][]Slot `json:"slots,omitempty"`
+}
+
+// Slot is one deployed replica of a service: its slot number and the
+// Versola version it runs. The version is per slot because a rolling
+// upgrade (0d) has replicas of two versions side by side.
+type Slot struct {
+	N       int    `json:"n"`
+	Version string `json:"version"`
+}
+
+// ActiveSlots returns the slots deployed for a service, in slot order as
+// recorded -- or, when none are recorded, the single implicit slot 1 at
+// the deployment's own version.
+func (s *State) ActiveSlots(service string) []Slot {
+	if slots := s.Slots[service]; len(slots) > 0 {
+		out := make([]Slot, len(slots))
+		copy(out, slots)
+		return out
+	}
+	return []Slot{{N: 1, Version: s.Version}}
 }
 
 // bundlePath resolves where this state's compose file and configs

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"text/template"
 )
@@ -20,6 +21,69 @@ type Config struct {
 	ACMEDirectory string // ACMEProduction or ACMEStaging; used only with TLS
 	IPv6          bool   // HostHasGlobalIPv6(); used only in ModeNginx
 	Resolvers     string // Resolvers(); required only with TLS
+
+	// Auth and Edge are the replicas the auth_backend / edge_backend
+	// upstreams route to, at least one each. Where they listen comes from
+	// the deployment's compose file (package topology), not from here.
+	Auth []Backend
+	Edge []Backend
+}
+
+// Backend is one replica an upstream routes to.
+type Backend struct {
+	// Service is the replica's compose service name -- its host name on
+	// local's bridge network. Unused on vps, where it is reached on the
+	// host's loopback.
+	Service string
+	// Port is the replica's PORT: the one carrying application traffic.
+	Port int
+}
+
+// upstreamAddrs returns the `server` address of each backend: on the
+// host's loopback (vps, which shares the host's network) or by compose
+// service name (local, on the project's bridge network).
+func upstreamAddrs(mode string, backends []Backend) []string {
+	addrs := make([]string, len(backends))
+	for i, b := range backends {
+		if mode == ModeLocal {
+			addrs[i] = fmt.Sprintf("%s:%d", b.Service, b.Port)
+		} else {
+			addrs[i] = fmt.Sprintf("127.0.0.1:%d", b.Port)
+		}
+	}
+	return addrs
+}
+
+// serviceName: what a compose service name may look like, which is also
+// what keeps a name from carrying nginx syntax into the config.
+var serviceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+
+// checkBackends: what an upstream needs to be a valid nginx block -- at
+// least one server, each a real port, none listed twice (nginx would
+// accept a duplicate and silently double its weight).
+func checkBackends(name, mode string, backends []Backend) error {
+	if len(backends) == 0 {
+		return fmt.Errorf("the %s upstream needs at least one replica", name)
+	}
+	seen := map[string]bool{}
+	for _, b := range backends {
+		if b.Port < 1 || b.Port > 65535 {
+			return fmt.Errorf("the %s upstream has a replica on port %d, which is not a port", name, b.Port)
+		}
+		if mode == ModeLocal && b.Service == "" {
+			return fmt.Errorf("the %s upstream has a replica without a service name", name)
+		}
+		if b.Service != "" && !serviceName.MatchString(b.Service) {
+			return fmt.Errorf("the %s upstream has a replica with an invalid service name %q", name, b.Service)
+		}
+	}
+	for _, addr := range upstreamAddrs(mode, backends) {
+		if seen[addr] {
+			return fmt.Errorf("the %s upstream lists %s twice", name, addr)
+		}
+		seen[addr] = true
+	}
+	return nil
 }
 
 // Files renders the proxy's files, keyed by their path relative to the
@@ -27,6 +91,22 @@ type Config struct {
 func (c Config) Files() (map[string][]byte, error) {
 	if err := validMode(c.Mode); err != nil {
 		return nil, err
+	}
+	if err := checkBackends("auth", c.Mode, c.Auth); err != nil {
+		return nil, err
+	}
+	if err := checkBackends("edge", c.Mode, c.Edge); err != nil {
+		return nil, err
+	}
+	// The same address in both would send auth traffic to edge (or back).
+	edgeAddrs := map[string]bool{}
+	for _, a := range upstreamAddrs(c.Mode, c.Edge) {
+		edgeAddrs[a] = true
+	}
+	for _, a := range upstreamAddrs(c.Mode, c.Auth) {
+		if edgeAddrs[a] {
+			return nil, fmt.Errorf("the auth and edge upstreams both route to %s", a)
+		}
 	}
 	tls := c.AuthURL.TLS(c.Mode)
 	if tls && c.Resolvers == "" {
@@ -55,14 +135,6 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 	}
 
-	// Where auth/edge are reached: on the host's loopback (vps, which
-	// shares the host's network) or by compose service name (local, on the
-	// project's bridge network).
-	authUpstream, edgeUpstream := "127.0.0.1:8080", "127.0.0.1:8095"
-	if c.Mode == ModeLocal {
-		authUpstream, edgeUpstream = "auth:8080", "edge:8095"
-	}
-
 	routes, err := templates.ReadFile("templates/routes.conf")
 	if err != nil {
 		return nil, err
@@ -84,8 +156,8 @@ func (c Config) Files() (map[string][]byte, error) {
 		"LocalPort":     LocalPort,
 		"HostNetwork":   c.Mode != ModeLocal,
 		"Resolve":       c.Mode == ModeLocal,
-		"AuthUpstream":  authUpstream,
-		"EdgeUpstream":  edgeUpstream,
+		"AuthUpstreams": upstreamAddrs(c.Mode, c.Auth),
+		"EdgeUpstreams": upstreamAddrs(c.Mode, c.Edge),
 	}
 
 	files := map[string][]byte{}

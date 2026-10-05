@@ -330,7 +330,30 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		authURL = auth.URL
 	}
 	fmt.Println("Generating the reverse proxy's config...")
-	if err := setUpProxy(dir, auth, proxyOpts); err != nil {
+	// A newly configured deployment starts with one replica of auth and of
+	// edge, in slot 1; where they listen is whatever its compose file says.
+	topo, err := loadTopology(composePath)
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	slotOne := []state.Slot{{N: 1, Version: version}}
+	authReplicas, err := replicasOf(topo, AuthService, slotOne)
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	edgeReplicas, err := replicasOf(topo, EdgeService, slotOne)
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	centralReplicas, err := replicasOf(topo, CentralService, slotOne)
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	if err := checkNoPortClash(centralReplicas, authReplicas, edgeReplicas); err != nil {
+		return ConfigureResult{}, err
+	}
+	upstreams := proxyUpstreams{Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
+	if err := setUpProxy(dir, auth, proxyOpts, upstreams); err != nil {
 		return ConfigureResult{}, err
 	}
 

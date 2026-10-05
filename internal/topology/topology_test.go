@@ -902,7 +902,7 @@ func TestDisabledServicesPublishNothing(t *testing.T) {
 	for _, p := range got {
 		names = append(names, p.Service+":"+p.Binding.String())
 	}
-	if want := []string{"c:1002", "d:1003"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"c:1002", "c:1002", "d:1003"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("got %v, want %v", names, want)
 	}
 }

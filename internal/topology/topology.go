@@ -78,6 +78,11 @@ type Service struct {
 	// for the others the variable means nothing.
 	additionalBad bool
 
+	// additionalSlot is the slot whose shifted APORT does not fit in a
+	// port, or 0: an error for auth (CheckAdditional) only, since no other
+	// service binds APORT.
+	additionalSlot int
+
 	hostNetwork bool
 }
 
@@ -85,6 +90,9 @@ type Service struct {
 // port. Callers ask it for the services that actually bind APORT; for any
 // other the value is never used and cannot fail a deployment.
 func (s Service) CheckAdditional(service string) error {
+	if s.additionalSlot > 0 {
+		return fmt.Errorf("slot %d would need APORT %d for %q, which is out of range", s.additionalSlot, s.AdditionalPort, service)
+	}
 	if s.additionalBad {
 		return fmt.Errorf("service %q sets APORT to something that is not a port number (1-65535)", service)
 	}
@@ -324,10 +332,13 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		}
 		out.unfixed = append(out.unfixed, t+off)
 	}
-	for _, p := range []int{out.Port, out.DiagnosticsPort, out.AdditionalPort} {
+	for _, p := range []int{out.Port, out.DiagnosticsPort} {
 		if p > 65535 {
 			return Service{}, fmt.Errorf("slot %d would need port %d, which is out of range", slot, p)
 		}
+	}
+	if out.AdditionalPort > 65535 {
+		out.additionalSlot = slot
 	}
 	return out, nil
 }
@@ -395,8 +406,12 @@ func (t Topology) PublicationsReachedFrom(roots []string, except ...string) []Se
 		if raw.malformed || raw.disabled {
 			continue
 		}
-		for _, p := range raw.service().Publications() {
-			out = append(out, ServicePublication{Service: name, Publication: p})
+		// One claim per container: scaled to 2, a service publishing a
+		// range needs two ports of it, and a fixed port clashes with itself.
+		for i := 0; i < max(raw.count, 1); i++ {
+			for _, p := range raw.service().Publications() {
+				out = append(out, ServicePublication{Service: name, Publication: p})
+			}
 		}
 	}
 	return out
@@ -421,6 +436,7 @@ type rawService struct {
 	hostNetwork bool
 	// disabled: scale or deploy.replicas is 0, so nothing publishes its ports.
 	disabled  bool
+	count     int      // containers `up` starts: scale or deploy.replicas, else 1
 	dependsOn []string // the services it needs started first
 	ports     []rawPort
 }
@@ -501,6 +517,17 @@ func dependencies(raw json.RawMessage) []string {
 	return out
 }
 
+// containers is how many containers of a service `up` starts.
+func containers(scale, replicas json.RawMessage) int {
+	for _, raw := range []json.RawMessage{scale, replicas} {
+		var f float64
+		if json.Unmarshal(raw, &f) == nil && f >= 1 {
+			return int(math.Min(f, 64))
+		}
+	}
+	return 1
+}
+
 // zero reports whether a compose number (scale, replicas) is 0.
 func zero(raw json.RawMessage) bool {
 	var f float64
@@ -551,6 +578,7 @@ func Parse(data []byte) (Topology, error) {
 			hostNetwork: jsonString(s.NetworkMode) == "host",
 			// `up` starts no container of a service scaled to 0.
 			disabled:  zero(s.Scale) || zero(s.Deploy.Replicas),
+			count:     containers(s.Scale, s.Deploy.Replicas),
 			dependsOn: dependencies(s.DependsOn),
 		}
 		var entries []json.RawMessage

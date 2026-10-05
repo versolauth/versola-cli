@@ -172,6 +172,13 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 	// the port is held on every address.
 	claims = append(claims, claim{service: openbaoHolder, reserved: true, binding: topology.Binding{Port: openbaoPort}})
 	for _, r := range reserved {
+		// What is held outside the replicas must not collide either: the
+		// proxy's port and a service of the compose file that publishes it.
+		for _, held := range claims {
+			if held.reserved && !held.binding.IsRange() && !r.Binding.IsRange() && held.binding.Overlaps(r.Binding) {
+				return fmt.Errorf("%s and %s would both use %s on the host", held.service, r.Name, r.Binding)
+			}
+		}
 		claims = append(claims, claim{service: r.Name, reserved: true, binding: r.Binding})
 	}
 	for _, group := range groups {
@@ -259,13 +266,13 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 			fixed = append(fixed, c)
 		}
 	}
-	// Narrowest end first, lowest free port: the order in which that greedy
-	// choice is the best one for ranges that share an address.
-	sort.SliceStable(ranges, func(i, j int) bool { return ranges[i].binding.Last < ranges[j].binding.Last })
-	var assigned []topology.Binding
-	for _, r := range ranges {
-		found := false
-		for p := r.binding.Port; p <= r.binding.Last && !found; p++ {
+	// Ranges on different addresses compete in ways a simple greedy choice
+	// gets wrong, so the assignment is searched. Each range's candidates are
+	// its free ports; every other range can take away at most one of them,
+	// so len(ranges) of them are enough to keep.
+	candidates := make([][]int, len(ranges))
+	for i, r := range ranges {
+		for p := r.binding.Port; p <= r.binding.Last && len(candidates[i]) <= len(ranges); p++ {
 			b := topology.Binding{HostIP: r.binding.HostIP, Port: p}
 			free := true
 			for _, f := range fixed {
@@ -274,27 +281,62 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 					break
 				}
 			}
+			if free {
+				candidates[i] = append(candidates[i], p)
+			}
+		}
+	}
+	// Most constrained first.
+	order := make([]int, len(ranges))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return len(candidates[order[a]]) < len(candidates[order[b]]) })
+	assigned := make([]topology.Binding, 0, len(ranges))
+	var search func(k int) bool
+	search = func(k int) bool {
+		if k == len(order) {
+			return true
+		}
+		i := order[k]
+		for _, p := range candidates[i] {
+			b := topology.Binding{HostIP: ranges[i].binding.HostIP, Port: p}
+			ok := true
 			for _, a := range assigned {
-				if free && a.Overlaps(b) {
-					free = false
+				if a.Overlaps(b) {
+					ok = false
+					break
 				}
 			}
-			if free {
-				assigned = append(assigned, b)
-				found = true
+			if !ok {
+				continue
+			}
+			assigned = append(assigned, b)
+			if search(k + 1) {
+				return true
+			}
+			assigned = assigned[:len(assigned)-1]
+		}
+		return false
+	}
+	if !search(0) {
+		// Name the most constrained range: the first the search could not place.
+		r := ranges[order[0]]
+		for _, i := range order {
+			if len(candidates[i]) == 0 {
+				r = ranges[i]
+				break
 			}
 		}
-		if !found {
-			who := r.service
-			if r.label != "" {
-				who += " (" + r.label + ")"
-			}
-			hint := ""
-			if !r.reserved {
-				hint = " -- check `ports:` in the compose file"
-			}
-			return fmt.Errorf("%s publishes %s, but every port in that range is taken by another publication%s%s", who, r.binding, slotNote(r.service, r.base, r.slot), hint)
+		who := r.service
+		if r.label != "" {
+			who += " (" + r.label + ")"
 		}
+		hint := ""
+		if !r.reserved {
+			hint = " -- check `ports:` in the compose file"
+		}
+		return fmt.Errorf("%s publishes %s, but the publications that share its addresses leave it no free port in that range%s%s", who, r.binding, slotNote(r.service, r.base, r.slot), hint)
 	}
 	return nil
 }
@@ -367,6 +409,11 @@ func replicasOf(topo topology.Topology, service string, slots []state.Slot) ([]r
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", service, err)
 		}
+		if service == AuthService {
+			if err := ports.CheckAdditional(topology.SlotService(service, s.N)); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, replica{Slot: s.N, Base: service, Service: topology.SlotService(service, s.N), Ports: ports})
 	}
 	return out, nil
@@ -436,6 +483,8 @@ func checkTopology(topo topology.Topology, hostNetwork bool, reserved []reservat
 			own = append(own, r.Service, r.Base)
 		}
 	}
+	// OpenBao's port is held by name above; its own service is not another claim.
+	own = append(own, "openbao")
 	// The services a start reaches: the replicas', what they depend on, and
 	// Postgres, which `up` starts by name on local. A service nothing starts
 	// holds no port, however it is declared.

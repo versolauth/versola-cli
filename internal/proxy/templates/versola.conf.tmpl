@@ -16,9 +16,13 @@ resolver 127.0.0.11 valid=10s ipv6=off;
 upstream auth_backend {
 {{- if .Resolve }}
     zone auth_backend 64k;
-    server {{ .AuthUpstream }} resolve;
+{{- range .AuthUpstreams }}
+    server {{ . }} resolve;
+{{- end }}
 {{- else }}
-    server {{ .AuthUpstream }};
+{{- range .AuthUpstreams }}
+    server {{ . }};
+{{- end }}
 {{- end }}
     keepalive 32;
 }
@@ -26,9 +30,13 @@ upstream auth_backend {
 upstream edge_backend {
 {{- if .Resolve }}
     zone edge_backend 64k;
-    server {{ .EdgeUpstream }} resolve;
+{{- range .EdgeUpstreams }}
+    server {{ . }} resolve;
+{{- end }}
 {{- else }}
-    server {{ .EdgeUpstream }};
+{{- range .EdgeUpstreams }}
+    server {{ . }};
+{{- end }}
 {{- end }}
     keepalive 32;
 }

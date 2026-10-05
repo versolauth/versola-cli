@@ -1,0 +1,105 @@
+{
+  "name": "versola-local",
+  "networks": {
+    "default": {
+      "name": "versola-local_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "auth": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "APORT": "8082",
+        "DPORT": "8081",
+        "PORT": "8080"
+      },
+      "image": "ghcr.io/versolauth/auth:0.6.2",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 8081,
+          "published": "18081",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 8083,
+          "published": "18000-18010",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 8082,
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 9999,
+          "published": "9999",
+          "protocol": "udp"
+        }
+      ]
+    },
+    "central": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "APORT": "",
+        "DPORT": "8091",
+        "PORT": "8090"
+      },
+      "image": "ghcr.io/versolauth/central:0.6.2",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 8091,
+          "published": "8091",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "edge": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "DPORT": "8096",
+        "PORT": "8095"
+      },
+      "image": "ghcr.io/versolauth/edge:0.6.2",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "::1",
+          "target": 8096,
+          "published": "18096",
+          "protocol": "tcp"
+        },
+        {
+          "mode": "ingress",
+          "target": 8095,
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "postgres": {
+      "command": null,
+      "entrypoint": null,
+      "image": "postgres:18",
+      "networks": {
+        "default": null
+      }
+    }
+  }
+}

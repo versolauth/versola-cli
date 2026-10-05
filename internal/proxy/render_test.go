@@ -49,6 +49,18 @@ func hasSub(lines []string, sub string) bool {
 	return false
 }
 
+// withBackends fills in the one-replica-each upstreams every config needs,
+// unless the case set its own -- most cases are about something else.
+func withBackends(c Config) Config {
+	if c.Auth == nil {
+		c.Auth = []Backend{{Service: "auth", Port: 8080}}
+	}
+	if c.Edge == nil {
+		c.Edge = []Backend{{Service: "edge", Port: 8095}}
+	}
+	return c
+}
+
 type renderCase struct {
 	name      string
 	cfg       func(t *testing.T) Config
@@ -57,6 +69,8 @@ type renderCase struct {
 	compose   []string // substrings proxy.yml must contain
 	noCompose []string
 }
+
+func (c renderCase) config(t *testing.T) Config { return withBackends(c.cfg(t)) }
 
 func renderCases() []renderCase {
 	return []renderCase{
@@ -114,13 +128,26 @@ func renderCases() []renderCase {
 			compose:   []string{"container_name: " + LocalContainerName, `- "127.0.0.1:2821:2821"`, "./central-ui:/usr/share/nginx/html/central/admin:ro"},
 			noCompose: []string{"network_mode: host", ACMEVolume},
 		},
+		{
+			// Also what `nginx -t` (TestNginxAcceptsConfig) checks with
+			// several servers sharing one zone.
+			name: "local mode, several replicas",
+			cfg: func(t *testing.T) Config {
+				return Config{Mode: ModeLocal, AuthURL: mustURL(t, "http://localhost:2821", ModeLocal),
+					Auth: []Backend{{Service: "auth", Port: 8080}, {Service: "auth-2", Port: 8180}},
+					Edge: []Backend{{Service: "edge", Port: 8095}, {Service: "edge-2", Port: 8195}}}
+			},
+			want: []string{"zone auth_backend 64k;", "server auth:8080 resolve;", "server auth-2:8180 resolve;",
+				"zone edge_backend 64k;", "server edge:8095 resolve;", "server edge-2:8195 resolve;"},
+			wantNot: []string{"ssl", "acme", "127.0.0.1:"},
+		},
 	}
 }
 
 func TestFiles(t *testing.T) {
 	for _, c := range renderCases() {
 		t.Run(c.name, func(t *testing.T) {
-			files, err := c.cfg(t).Files()
+			files, err := c.config(t).Files()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -204,9 +231,85 @@ func TestFilesRejectsBadConfig(t *testing.T) {
 		"tls, no resolver": {Mode: ModeNginx, AuthURL: tlsURL, ACMEDirectory: ACMEProduction},
 		"tls, bad acme":    {Mode: ModeNginx, AuthURL: tlsURL, ACMEDirectory: "https://evil.example/dir", Resolvers: "1.1.1.1"},
 	} {
-		if _, err := c.Files(); err == nil {
+		// With valid upstreams, so each case fails for the reason it names.
+		if _, err := withBackends(c).Files(); err == nil {
 			t.Errorf("%s: want error", name)
 		}
+	}
+}
+
+func TestFilesRejectsBadBackends(t *testing.T) {
+	plain := mustURL(t, "http://1.2.3.4", ModeNginx)
+	local := mustURL(t, "http://localhost:2821", ModeLocal)
+	ok := []Backend{{Service: "auth", Port: 8080}}
+	edge := []Backend{{Service: "edge", Port: 8095}}
+
+	// The valid baseline the cases below are one change away from.
+	if _, err := (Config{Mode: ModeNginx, AuthURL: plain, Auth: ok, Edge: edge}).Files(); err != nil {
+		t.Fatalf("baseline config rejected: %v", err)
+	}
+
+	for _, c := range []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{"no auth", Config{Mode: ModeNginx, AuthURL: plain, Edge: edge}, "auth upstream needs at least one"},
+		{"no edge", Config{Mode: ModeNginx, AuthURL: plain, Auth: ok}, "edge upstream needs at least one"},
+		{"port 0", Config{Mode: ModeNginx, AuthURL: plain, Auth: []Backend{{Service: "auth"}}, Edge: edge}, "not a port"},
+		{"port too high", Config{Mode: ModeNginx, AuthURL: plain, Auth: ok, Edge: []Backend{{Service: "edge", Port: 70000}}}, "not a port"},
+		{"same replica twice", Config{Mode: ModeNginx, AuthURL: plain, Auth: append(append([]Backend{}, ok...), ok...), Edge: edge}, "twice"},
+		{"local, no service", Config{Mode: ModeLocal, AuthURL: local, Auth: []Backend{{Port: 8080}}, Edge: edge}, "without a service name"},
+		{"service name with nginx syntax", Config{Mode: ModeLocal, AuthURL: local, Auth: []Backend{{Service: "auth; return 200", Port: 8080}}, Edge: edge}, "invalid service name"},
+		{"uppercase service name", Config{Mode: ModeLocal, AuthURL: local, Auth: []Backend{{Service: "Auth", Port: 8080}}, Edge: edge}, "invalid service name"},
+		{"auth and edge on one port", Config{Mode: ModeNginx, AuthURL: plain, Auth: ok, Edge: []Backend{{Service: "edge", Port: 8080}}}, "both route to"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := c.cfg.Files()
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("want an error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
+// Several replicas: one `server` line each, in the order given, in both
+// the vps form (loopback ports) and the local form (service names, re-
+// resolved at runtime).
+func TestFilesRendersEveryReplica(t *testing.T) {
+	auth := []Backend{{Service: "auth", Port: 8080}, {Service: "auth-2", Port: 8180}, {Service: "auth-3", Port: 8280}}
+	edge := []Backend{{Service: "edge", Port: 8095}, {Service: "edge-2", Port: 8195}}
+
+	files, err := Config{Mode: ModeNginx, AuthURL: mustURL(t, "http://1.2.3.4", ModeNginx), Auth: auth, Edge: edge}.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := directives(files["proxy/conf.d/versola.conf"])
+	for _, w := range []string{"server 127.0.0.1:8080;", "server 127.0.0.1:8180;", "server 127.0.0.1:8280;", "server 127.0.0.1:8095;", "server 127.0.0.1:8195;"} {
+		if !has(conf, w) {
+			t.Errorf("vps: versola.conf lacks %q", w)
+		}
+	}
+
+	files, err = Config{Mode: ModeLocal, AuthURL: mustURL(t, "http://localhost:2821", ModeLocal), Auth: auth, Edge: edge}.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf = directives(files["proxy/conf.d/versola.conf"])
+	for _, w := range []string{"server auth:8080 resolve;", "server auth-2:8180 resolve;", "server auth-3:8280 resolve;", "server edge:8095 resolve;", "server edge-2:8195 resolve;"} {
+		if !has(conf, w) {
+			t.Errorf("local: versola.conf lacks %q", w)
+		}
+	}
+	// One zone per upstream, however many servers it has.
+	zones := 0
+	for _, l := range conf {
+		if strings.HasPrefix(l, "zone ") {
+			zones++
+		}
+	}
+	if zones != 2 {
+		t.Errorf("want one zone per upstream (2), got %d", zones)
 	}
 }
 
@@ -226,7 +329,7 @@ func TestNginxAcceptsConfig(t *testing.T) {
 	for _, c := range renderCases() {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := Write(dir, c.cfg(t)); err != nil {
+			if err := Write(dir, c.config(t)); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.MkdirAll(filepath.Join(dir, "central-ui"), 0o755); err != nil {

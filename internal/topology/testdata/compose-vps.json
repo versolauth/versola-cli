@@ -1,0 +1,36 @@
+{
+  "name": "versola-vps",
+  "services": {
+    "auth": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "APORT": "8082",
+        "DPORT": "8081",
+        "PORT": "8080"
+      },
+      "image": "ghcr.io/versolauth/auth:0.6.2",
+      "network_mode": "host"
+    },
+    "central": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "DPORT": "8091",
+        "PORT": "8090"
+      },
+      "image": "ghcr.io/versolauth/central:0.6.2",
+      "network_mode": "host"
+    },
+    "edge": {
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "DPORT": "8096",
+        "PORT": "8095"
+      },
+      "image": "ghcr.io/versolauth/edge:0.6.2",
+      "network_mode": "host"
+    }
+  }
+}

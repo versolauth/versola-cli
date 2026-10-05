@@ -50,6 +50,10 @@ const legacyVersionFileName = "version"
 // no state.json, and no legacy version file either.
 var ErrNotConfigured = errors.New("no deployment configured yet")
 
+// ErrNewerSchema means state.json was written by a newer versola, whose
+// records this one would drop on its next Save.
+var ErrNewerSchema = errors.New("state written by a newer versola")
+
 // State is what the CLI records about the current deployment.
 type State struct {
 	SchemaVersion int `json:"schemaVersion"`
@@ -135,6 +139,39 @@ type State struct {
 	// partly started. Nil in records written before this field existed;
 	// see Finalize for how that's treated.
 	MountedBundleDirs []string `json:"mountedBundleDirs,omitempty"`
+
+	// Slots records, per scalable service (compose service name of its
+	// first replica: "auth", "edge"), which replica slots are deployed and
+	// at which version -- see package topology for what a slot is. Absent
+	// (nil) means one replica in slot 1 at Version, which is what every
+	// deployment made before replicas existed is; ActiveSlots turns that
+	// into the list callers should use, so none of them has to know the
+	// difference.
+	//
+	// Finalize builds a fresh State, so a `configure` starts over from one
+	// replica in slot 1: carrying replicas across a re-configure is up to
+	// whatever adds replicas (0c's later steps) and rolling upgrades (0d).
+	Slots map[string][]Slot `json:"slots,omitempty"`
+}
+
+// Slot is one deployed replica of a service: its slot number and the
+// Versola version it runs. The version is per slot because a rolling
+// upgrade (0d) has replicas of two versions side by side.
+type Slot struct {
+	N       int    `json:"n"`
+	Version string `json:"version"`
+}
+
+// ActiveSlots returns the slots deployed for a service, in slot order as
+// recorded -- or, when none are recorded, the single implicit slot 1 at
+// the deployment's own version.
+func (s *State) ActiveSlots(service string) []Slot {
+	if slots := s.Slots[service]; len(slots) > 0 {
+		out := make([]Slot, len(slots))
+		copy(out, slots)
+		return out
+	}
+	return []Slot{{N: 1, Version: s.Version}}
 }
 
 // bundlePath resolves where this state's compose file and configs
@@ -247,6 +284,11 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...str
 	// clean up afterward isn't this function's problem to report, just
 	// something to skip.
 	prev, prevErr := Load()
+	// ...except this one: overwriting a newer versola's state is the loss
+	// Load refuses to risk, and the bundles it names would be pruned.
+	if errors.Is(prevErr, ErrNewerSchema) {
+		return prevErr
+	}
 
 	s := &State{
 		SchemaVersion: SchemaVersion,
@@ -341,6 +383,11 @@ func Load() (*State, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("couldn't parse %s: %w", filepath.Join(dir, stateFileName), err)
 	}
+	// A newer versola may have recorded things this one does not know, and
+	// saving would drop them (replica slots, say).
+	if s.SchemaVersion > SchemaVersion {
+		return nil, fmt.Errorf("%s: %w (state layout %d, this one reads up to %d) -- upgrade versola", filepath.Join(dir, stateFileName), ErrNewerSchema, s.SchemaVersion, SchemaVersion)
+	}
 	return &s, nil
 }
 
@@ -417,7 +464,7 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 // ComposeArgs builds the arguments for a `docker compose` call against the
 // deployment whose compose.yml is at composePath: "compose -f
 // compose.yml", plus "-f proxy.yml" when versola-cli generated a reverse
-// proxy next to it (vps), then rest.
+// proxy next to it (vps and local), then rest.
 //
 // Every compose call goes through this, so the proxy is always part of
 // the same compose project as auth/edge/central (proxy.yml declares the

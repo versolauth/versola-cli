@@ -13,6 +13,7 @@ import (
 	"text/template"
 
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/fsutil"
 )
 
 //go:embed templates/*
@@ -245,13 +246,15 @@ func Reload(bundleDir string, c Config) error {
 	}
 	path := filepath.Join(bundleDir, UpstreamsFile)
 	old, readErr := os.ReadFile(path)
-	if err := os.WriteFile(path, files[UpstreamsFile], 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(path, files[UpstreamsFile], 0o644); err != nil {
 		return fmt.Errorf("couldn't write %s: %w", path, err)
 	}
 	name := ContainerFor(c.Mode)
 	if _, err := docker.Output("exec", name, "nginx", "-t"); err != nil {
 		if readErr == nil {
-			_ = os.WriteFile(path, old, 0o644)
+			_ = fsutil.WriteFileAtomic(path, old, 0o644)
+		} else if os.IsNotExist(readErr) {
+			_ = os.Remove(path)
 		}
 		// nginx's own words (stderr): which line it did not like.
 		var ee *exec.ExitError

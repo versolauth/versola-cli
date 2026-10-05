@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/versolauth/versola-cli/internal/fsutil"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/topology"
 )
@@ -122,7 +123,7 @@ func writeReplicasFile(dir, composeFile string, groups ...[]replica) error {
 		}
 		return nil
 	}
-	if err := os.WriteFile(path, content, 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(path, content, 0o644); err != nil {
 		return fmt.Errorf("couldn't write %s: %w", path, err)
 	}
 	return nil

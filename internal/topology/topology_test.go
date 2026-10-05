@@ -868,7 +868,7 @@ func TestRealComposeOutput(t *testing.T) {
 	if _, err := local.Service("postgres"); err != nil {
 		t.Errorf("a service with no environment or ports: %v", err)
 	}
-	if got := local.PublicationsExcept("central", "auth", "edge"); len(got) != 0 {
+	if got := local.PublicationsReachedFrom([]string{"central", "auth", "edge", "postgres"}, "central", "auth", "edge"); len(got) != 0 {
 		t.Errorf("postgres publishes nothing: %v", got)
 	}
 
@@ -897,12 +897,28 @@ func TestDisabledServicesPublishNothing(t *testing.T) {
 	  "b":{"deploy":{"replicas":0},"ports":[{"target":80,"published":"1001"}]},
 	  "c":{"scale":2,"deploy":{"replicas":3},"ports":[{"target":80,"published":"1002"}]},
 	  "d":{"environment":{"PORT":"nope"},"ports":[{"target":80,"published":"1003"}]}}}`)
-	got := topo.PublicationsExcept()
+	got := topo.PublicationsReachedFrom([]string{"a", "b", "c", "d"})
 	var names []string
 	for _, p := range got {
 		names = append(names, p.Service+":"+p.Binding.String())
 	}
 	if want := []string{"c:1002", "d:1003"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("got %v, want %v", names, want)
+	}
+}
+
+func TestPublicationsReachedFrom(t *testing.T) {
+	topo := mustParse(t, `{"services":{
+	  "edge":{"depends_on":{"gateway":{"condition":"service_started"}},"ports":[{"target":1,"published":"1000"}]},
+	  "gateway":{"depends_on":["db"],"ports":[{"target":80,"published":"1001"}]},
+	  "db":{"ports":[{"target":5432,"published":"1002"}]},
+	  "helper":{"ports":[{"target":80,"published":"1003"}]},
+	  "helper-dep":{"ports":[{"target":80,"published":"1004"}]}}}`)
+	var names []string
+	for _, p := range topo.PublicationsReachedFrom([]string{"edge", "nothing"}, "edge") {
+		names = append(names, p.Service)
+	}
+	if want := []string{"db", "gateway"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("got %v, want %v: edge's dependencies, transitively, and neither the helpers nor edge itself", names, want)
 	}
 }

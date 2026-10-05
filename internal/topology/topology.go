@@ -360,21 +360,33 @@ type ServicePublication struct {
 	Publication
 }
 
-// PublicationsExcept lists the published ports of every service that is
-// not named, in service-name order: the host ports the rest of the
-// deployment (Postgres, the old gateway, ...) holds. A service that is
-// malformed, scaled to 0 or on the host's network has none to list; what a
-// service's environment says is not looked at.
-func (t Topology) PublicationsExcept(names ...string) []ServicePublication {
+// PublicationsReachedFrom lists, in service-name order, the published ports
+// of the services that starting roots starts: the roots themselves and
+// everything they depend on, directly or not, except the services named in
+// except (the roots' own replicas, whose ports are checked on their own). A
+// service nothing reaches -- a stopped helper, a one-off task -- holds no
+// port, and one that is malformed, scaled to 0 or on the host's network
+// publishes none; what a service's environment says is not looked at.
+func (t Topology) PublicationsReachedFrom(roots []string, except ...string) []ServicePublication {
 	skip := map[string]bool{}
-	for _, n := range names {
+	for _, n := range except {
 		skip[n] = true
 	}
+	seen := map[string]bool{}
+	queue := append([]string(nil), roots...)
 	var services []string
-	for name := range t.services {
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		raw, ok := t.services[name]
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
 		if !skip[name] {
 			services = append(services, name)
 		}
+		queue = append(queue, raw.dependsOn...)
 	}
 	sort.Strings(services)
 	var out []ServicePublication
@@ -408,8 +420,9 @@ type rawService struct {
 	// ports and Docker ignores any `ports:` on it, so they are not read.
 	hostNetwork bool
 	// disabled: scale or deploy.replicas is 0, so nothing publishes its ports.
-	disabled bool
-	ports    []rawPort
+	disabled  bool
+	dependsOn []string // the services it needs started first
+	ports     []rawPort
 }
 
 // portVar is one of PORT, DPORT and APORT as the environment has it: a
@@ -466,9 +479,26 @@ type serviceJSON struct {
 	NetworkMode json.RawMessage `json:"network_mode"`
 	Ports       json.RawMessage `json:"ports"`
 	Scale       json.RawMessage `json:"scale"`
+	DependsOn   json.RawMessage `json:"depends_on"`
 	Deploy      struct {
 		Replicas json.RawMessage `json:"replicas"`
 	} `json:"deploy"`
+}
+
+// dependencies are the service names of a depends_on, which Compose writes
+// as a map (`config` normalises the list form into one) or a list.
+func dependencies(raw json.RawMessage) []string {
+	var out []string
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) == nil {
+		for name := range m {
+			out = append(out, name)
+		}
+		sort.Strings(out)
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 // zero reports whether a compose number (scale, replicas) is 0.
@@ -520,7 +550,8 @@ func Parse(data []byte) (Topology, error) {
 			env:         s.Environment,
 			hostNetwork: jsonString(s.NetworkMode) == "host",
 			// `up` starts no container of a service scaled to 0.
-			disabled: zero(s.Scale) || zero(s.Deploy.Replicas),
+			disabled:  zero(s.Scale) || zero(s.Deploy.Replicas),
+			dependsOn: dependencies(s.DependsOn),
 		}
 		var entries []json.RawMessage
 		if json.Unmarshal(s.Ports, &entries) != nil {

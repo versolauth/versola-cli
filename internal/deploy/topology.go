@@ -247,6 +247,55 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 			}
 		}
 	}
+
+	// A range clashes with no single port inside it, but Docker still needs
+	// a free port in it for each: 18080-18081 beside a fixed 18080 and a
+	// fixed 18081 has none left.
+	var fixed, ranges []claim
+	for _, c := range claims {
+		if c.binding.IsRange() {
+			ranges = append(ranges, c)
+		} else {
+			fixed = append(fixed, c)
+		}
+	}
+	// Narrowest end first, lowest free port: the order in which that greedy
+	// choice is the best one for ranges that share an address.
+	sort.SliceStable(ranges, func(i, j int) bool { return ranges[i].binding.Last < ranges[j].binding.Last })
+	var assigned []topology.Binding
+	for _, r := range ranges {
+		found := false
+		for p := r.binding.Port; p <= r.binding.Last && !found; p++ {
+			b := topology.Binding{HostIP: r.binding.HostIP, Port: p}
+			free := true
+			for _, f := range fixed {
+				if f.binding.Overlaps(b) {
+					free = false
+					break
+				}
+			}
+			for _, a := range assigned {
+				if free && a.Overlaps(b) {
+					free = false
+				}
+			}
+			if free {
+				assigned = append(assigned, b)
+				found = true
+			}
+		}
+		if !found {
+			who := r.service
+			if r.label != "" {
+				who += " (" + r.label + ")"
+			}
+			hint := ""
+			if !r.reserved {
+				hint = " -- check `ports:` in the compose file"
+			}
+			return fmt.Errorf("%s publishes %s, but every port in that range is taken by another publication%s%s", who, r.binding, slotNote(r.service, r.base, r.slot), hint)
+		}
+	}
 	return nil
 }
 
@@ -387,7 +436,14 @@ func checkTopology(topo topology.Topology, hostNetwork bool, reserved []reservat
 			own = append(own, r.Service, r.Base)
 		}
 	}
-	for _, p := range topo.PublicationsExcept(own...) {
+	// The services a start reaches: the replicas', what they depend on, and
+	// Postgres, which `up` starts by name on local. A service nothing starts
+	// holds no port, however it is declared.
+	roots := append([]string(nil), own...)
+	if !hostNetwork {
+		roots = append(roots, "postgres")
+	}
+	for _, p := range topo.PublicationsReachedFrom(roots, own...) {
 		reserved = append(reserved, reservation{Name: fmt.Sprintf("the compose file's %q service", p.Service), Binding: p.Binding})
 	}
 	if err := checkNoPortClash(hostNetwork, reserved, central, auth, edge); err != nil {

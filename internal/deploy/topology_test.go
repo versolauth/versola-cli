@@ -927,7 +927,7 @@ func TestCheckTopologyReservesOtherServices(t *testing.T) {
 	  "gateway":{"ports":[{"target":80,"published":"18095"}]},
 	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
 	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
-	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"18095"}]}}}`))
+	  "edge":{"depends_on":{"gateway":{}},"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"18095"}]}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1069,7 @@ func TestOtherServicesReservations(t *testing.T) {
 	const base = `
 	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
 	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
-	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}`
+	  "edge":{"depends_on":["mailer","zeta","alpha","old","dns"],"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}`
 	for name, other := range map[string]string{
 		"scale 0":          `"old":{"scale":0,"ports":[{"target":80,"published":"8096"}]},`,
 		"replicas 0":       `"old":{"deploy":{"replicas":0},"ports":[{"target":80,"published":"8096"}]},`,
@@ -1139,5 +1139,81 @@ func TestReplicasAreNotOtherServices(t *testing.T) {
 		if _, err := checkTopology(topo, false, nil, central, auth, edge); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// A service nothing starts holds no port: not a helper that is only run by
+// hand, though it publishes the same port as edge.
+func TestUnreferencedServiceHoldsNoPort(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "helper":{"ports":[{"target":80,"published":"8096"}]},
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e := replicasFor(t, topo)
+	if _, err := checkTopology(topo, false, nil, c, a, e); err != nil {
+		t.Errorf("a helper nothing starts: %v", err)
+	}
+	// Postgres is started by name on local.
+	topo, err = topology.Parse([]byte(`{"services":{
+	  "postgres":{"ports":[{"target":5432,"published":"8096"}]},
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e = replicasFor(t, topo)
+	if _, err := checkTopology(topo, false, nil, c, a, e); err == nil || !strings.Contains(err.Error(), `"postgres"`) {
+		t.Errorf("local: got %v", err)
+	}
+}
+
+// A range needs a free port of its own.
+func TestRangeNeedsAFreePort(t *testing.T) {
+	mk := func(auth, edge string) ([]replica, []replica) {
+		topo, err := topology.Parse([]byte(`{"services":{
+		  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[` + auth + `]},
+		  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[` + edge + `]}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a, e
+	}
+	// 18080-18081, 18080 and 18081: three publications, two ports.
+	a, e := mk(`{"target":8080,"published":"18080-18081"},{"target":8081,"published":"18080"}`, `{"target":8096,"published":"18081"}`)
+	err := checkNoPortClash(false, nil, a, e)
+	if err == nil || !strings.Contains(err.Error(), "18080-18081") || !strings.Contains(err.Error(), "every port in that range") {
+		t.Errorf("got %v", err)
+	}
+	// One of the two is free.
+	a, e = mk(`{"target":8080,"published":"18080-18081"},{"target":8081,"published":"18080"}`, `{"target":8096,"published":"18090"}`)
+	if err := checkNoPortClash(false, nil, a, e); err != nil {
+		t.Errorf("a free port left: %v", err)
+	}
+	// Different addresses do not compete.
+	a, e = mk(`{"target":8080,"host_ip":"127.0.0.2","published":"18080-18081"},{"target":8081,"host_ip":"127.0.0.1","published":"18080"}`, `{"target":8096,"host_ip":"127.0.0.1","published":"18081"}`)
+	if err := checkNoPortClash(false, nil, a, e); err != nil {
+		t.Errorf("another address: %v", err)
+	}
+	// Two ranges that can share out their ports.
+	a, e = mk(`{"target":8080,"published":"18080-18081"}`, `{"target":8096,"published":"18080"}`)
+	if err := checkNoPortClash(false, nil, a, e); err != nil {
+		t.Errorf("a range and a fixed port: %v", err)
+	}
+	a, e = mk(`{"target":8080,"published":"18080-18081"},{"target":8081,"published":"18080-18080"}`, `{"target":8096,"published":"18080-18081"}`)
+	if err := checkNoPortClash(false, nil, a, e); err == nil {
+		t.Error("three claims on two ports: want an error")
 	}
 }

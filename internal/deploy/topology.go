@@ -24,6 +24,7 @@ const (
 // replica is one running (or about to run) copy of auth or edge.
 type replica struct {
 	Slot    int
+	Base    string           // the service it is a copy of: "auth", "edge", "central"
 	Service string           // compose service name: "auth", "auth-2", ...
 	Ports   topology.Service // this replica's own ports (shifted for its slot)
 }
@@ -36,62 +37,111 @@ type replica struct {
 func loadTopology(composePath string) (topology.Topology, error) {
 	out, err := docker.Output(state.ComposeArgs(composePath, "config", "--format", "json")...)
 	if err != nil {
-		return topology.Topology{}, composeConfigError(err)
+		return topology.Topology{}, composeConfigError(composePath, err)
 	}
 	return topology.Parse(out)
 }
 
-// composeConfigError explains a failed `docker compose config`. Compose's
-// stderr is quoted only as its first line, shortened: that is where the
-// reason is, and a longer excerpt of a parse error could carry a piece of
-// an env file -- a secret.
-func composeConfigError(err error) error {
+// composeConfigError explains a failed `docker compose config`.
+//
+// Compose's stderr is never quoted. Its parse errors for env files repeat
+// the offending text (an unterminated quote in auth.secrets.env comes back
+// as "unterminated quoted value <the rest of the line>"), so any excerpt,
+// however short, can carry a secret into the terminal and the logs. The
+// causes worth naming are recognised from the stderr and answered with a
+// fixed sentence; for everything else the user is pointed at the command to
+// run themselves, where the output goes only where they send it.
+func composeConfigError(composePath string, err error) error {
+	const prefix = "couldn't read the compose configuration"
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
-		return fmt.Errorf("couldn't read the compose configuration: %w", err)
+		return fmt.Errorf("%s: %w", prefix, err)
 	}
-	msg := firstLine(string(exitErr.Stderr), 300)
-	if strings.Contains(msg, "unknown flag") {
-		return fmt.Errorf("couldn't read the compose configuration: this Docker Compose is too old for `config --format json` -- update the Compose plugin (%s)", msg)
+	stderr := strings.ToLower(string(exitErr.Stderr))
+	switch {
+	case strings.Contains(stderr, "unknown flag"):
+		return fmt.Errorf("%s: this Docker Compose is too old for `config --format json` -- update the Compose plugin", prefix)
+	case strings.Contains(stderr, "docker daemon") || strings.Contains(stderr, "error during connect"):
+		return fmt.Errorf("%s: can't reach Docker -- is it running?", prefix)
 	}
-	if msg == "" {
-		return fmt.Errorf("couldn't read the compose configuration: %w", err)
-	}
-	return fmt.Errorf("couldn't read the compose configuration: %w: %s", err, msg)
+	return fmt.Errorf("%s (%w); run `docker %s` to see why -- its output can include values from your env files, so mind where you paste it", prefix, err, shellJoin(state.ComposeArgs(composePath, "config")))
 }
 
-// firstLine returns the first non-empty line of s, cut to max characters.
-func firstLine(s string, max int) string {
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+// shellJoin renders args as a command line to paste into a shell, quoting
+// those with spaces or other characters a shell would split or expand.
+func shellJoin(args []string) string {
+	parts := make([]string, len(args))
+	for i, a := range args {
+		if a == "" || strings.ContainsAny(a, " \t\"'$`\\&;|<>()*?[]{}!#~") {
+			a = `"` + strings.NewReplacer(`"`, `\"`, "`", "\\`", `$`, `\$`).Replace(a) + `"`
 		}
-		if r := []rune(line); len(r) > max {
-			return string(r[:max]) + "..."
-		}
-		return line
+		parts[i] = a
 	}
-	return ""
+	return strings.Join(parts, " ")
 }
 
-// checkNoPortClash refuses replicas that would listen on the same port.
-// A service whose compose entry sets no PORT or DPORT silently gets the
+// listener is one port a replica's process opens, named by the environment
+// variable that sets it.
+type listener struct {
+	Name string
+	Port int
+}
+
+// listeners are the ports a replica's process binds: PORT and DPORT
+// everywhere, and APORT for auth, the only service with an additional
+// listener. (topology.Service carries a default APORT for every service, but
+// edge and central never bind it; counting it would report auth's APORT as
+// clashing with them.)
+func (r replica) listeners() []listener {
+	ls := []listener{{"PORT", r.Ports.Port}, {"DPORT", r.Ports.DiagnosticsPort}}
+	if r.Base == AuthService {
+		ls = append(ls, listener{"APORT", r.Ports.AdditionalPort})
+	}
+	return ls
+}
+
+// checkNoPortClash refuses replicas that would collide on a port. A
+// service whose compose entry sets no PORT or DPORT silently gets the
 // application's default (topology.DefaultPort...), which is another
 // service's port; reading the compose file instead of hardcoding must not
 // turn that into a deployment that starts and then misroutes.
-func checkNoPortClash(groups ...[]replica) error {
-	owner := map[int]string{}
+//
+// What collides depends on the network. Within one replica the listeners
+// are one process's and must always differ. Between replicas, hostNetwork
+// (vps: network_mode: host) puts every container on the host's network, so
+// any two container ports must differ; on a bridge (local) each container
+// has its own, auth and edge may both listen on 8080 in theirs, and only
+// the host ports that `ports:` publishes can collide.
+func checkNoPortClash(hostNetwork bool, groups ...[]replica) error {
+	type claim struct{ service, listener string }
+	owner := map[int]claim{}
 	for _, group := range groups {
 		for _, r := range group {
-			for _, p := range []int{r.Ports.Port, r.Ports.DiagnosticsPort} {
-				if other, dup := owner[p]; dup {
-					if other == r.Service {
-						return fmt.Errorf("%s uses port %d for both PORT and DPORT -- check the compose file", r.Service, p)
-					}
-					return fmt.Errorf("%s and %s would both listen on port %d -- check PORT/DPORT in the compose file", other, r.Service, p)
+			ls := r.listeners()
+			own := map[int]string{}
+			for _, l := range ls {
+				if prev, dup := own[l.Port]; dup {
+					return fmt.Errorf("%s uses port %d for both %s and %s -- check the compose file", r.Service, l.Port, prev, l.Name)
 				}
-				owner[p] = r.Service
+				own[l.Port] = l.Name
+			}
+			for _, l := range ls {
+				hostPort, occupies := l.Port, true
+				if !hostNetwork {
+					hostPort, occupies = r.Ports.Published(l.Port)
+				}
+				if !occupies {
+					continue
+				}
+				if other, dup := owner[hostPort]; dup {
+					hint := "PORT/DPORT/APORT"
+					if !hostNetwork {
+						hint += " and `ports:`"
+					}
+					return fmt.Errorf("%s (%s) and %s (%s) would both use port %d on the host -- check %s in the compose file",
+						other.service, other.listener, r.Service, l.Name, hostPort, hint)
+				}
+				owner[hostPort] = claim{r.Service, l.Name}
 			}
 		}
 	}
@@ -122,7 +172,7 @@ func replicasOf(topo topology.Topology, service string, slots []state.Slot) ([]r
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", service, err)
 		}
-		out = append(out, replica{Slot: s.N, Service: topology.SlotService(service, s.N), Ports: ports})
+		out = append(out, replica{Slot: s.N, Base: service, Service: topology.SlotService(service, s.N), Ports: ports})
 	}
 	return out, nil
 }

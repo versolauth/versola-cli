@@ -73,7 +73,7 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	if err := checkNoPortClash(centralReplicas, authReplicas, edgeReplicas); err != nil {
+	if err := checkNoPortClash(isVps, centralReplicas, authReplicas, edgeReplicas); err != nil {
 		return err
 	}
 	appServices := serviceNames(authReplicas, edgeReplicas)

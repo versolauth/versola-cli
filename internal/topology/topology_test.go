@@ -278,3 +278,48 @@ func TestSlotsNeverCollide(t *testing.T) {
 		}
 	}
 }
+
+func TestPublished(t *testing.T) {
+	topo, err := Parse([]byte(localConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := topo.Service("auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := auth.Published(8081); !ok || p != 8081 {
+		t.Errorf("DPORT is published on 8081, got %d, %v", p, ok)
+	}
+	// Unpublished container ports occupy nothing on the host, unlike
+	// HostPort, which falls back to the container port for reaching it.
+	if p, ok := auth.Published(8080); ok {
+		t.Errorf("PORT is not published, got %d", p)
+	}
+	if got := auth.HostPort(8080); got != 8080 {
+		t.Errorf("HostPort falls back to the port itself, got %d", got)
+	}
+	slot2, err := auth.ForSlot(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := slot2.Published(8181); !ok || p != 8181 {
+		t.Errorf("slot 2's DPORT publishes on 8181, got %d, %v", p, ok)
+	}
+}
+
+// The value in a "not a port" error can come from an env file that
+// `compose config` inlined, so only a short prefix of it is quoted.
+func TestBadPortErrorShortensValue(t *testing.T) {
+	topo := mustParse(t, `{"services":{"auth":{"environment":{"PORT":"`+strings.Repeat("s3cret", 20)+`"}}}}`)
+	_, err := topo.Service("auth")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(err.Error(), strings.Repeat("s3cret", 4)) || len(err.Error()) > 120 {
+		t.Errorf("the value must be shortened, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "PORT") || !strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("still names the variable and the start of its value: %q", err)
+	}
+}

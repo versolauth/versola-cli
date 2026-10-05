@@ -72,6 +72,16 @@ func (s Service) HostPort(containerPort int) int {
 	return containerPort
 }
 
+// Published returns the host port Compose publishes containerPort on, and
+// whether it publishes it at all. Only a published port occupies a port on
+// the host when containers have their own network (local); HostPort, in
+// contrast, falls back to the container port itself for callers that need
+// "where do I reach it".
+func (s Service) Published(containerPort int) (int, bool) {
+	p, ok := s.published[containerPort]
+	return p, ok
+}
+
 // ForSlot returns the ports of this service's replica in the given slot.
 // Slot 1 is the service as compose declares it; slot n is shifted by
 // (n-1)*100 -- ports and published ports alike. Shifting the published
@@ -250,6 +260,11 @@ func envPort(service string, env envVars, key string, def int) (int, error) {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 || n > 65535 {
+		// The value is quoted shortened: compose config inlines env_file
+		// values, so this one could in principle come from a secrets file.
+		if r := []rune(v); len(r) > 16 {
+			v = string(r[:16]) + "..."
+		}
 		return 0, fmt.Errorf("service %q sets %s=%q, which is not a port", service, key, v)
 	}
 	return n, nil

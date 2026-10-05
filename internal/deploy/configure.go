@@ -349,7 +349,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if err := checkNoPortClash(centralReplicas, authReplicas, edgeReplicas); err != nil {
+	if err := checkNoPortClash(target == "vps", centralReplicas, authReplicas, edgeReplicas); err != nil {
 		return ConfigureResult{}, err
 	}
 	upstreams := proxyUpstreams{Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}

@@ -82,16 +82,17 @@ func TestServicePorts(t *testing.T) {
 	for _, c := range []struct {
 		name             string
 		port, diag, addl int
+		probe            string
 	}{
-		{"central", 8090, 8091, DefaultAdditionalPort},
-		{"auth", 8080, 8081, 8082},
-		{"edge", 8095, 8096, DefaultAdditionalPort}, // published as a number, not a string
+		{"central", 8090, 8091, DefaultAdditionalPort, "localhost:8091"},
+		{"auth", 8080, 8081, 8082, "127.0.0.1:8081"},                  // bound to one loopback address, dialled by it
+		{"edge", 8095, 8096, DefaultAdditionalPort, "localhost:8096"}, // published as a number, not a string
 	} {
 		s := mustService(t, topo, c.name)
 		if s.Port != c.port || s.DiagnosticsPort != c.diag || s.AdditionalPort != c.addl {
 			t.Errorf("%s: got %d/%d/%d, want %d/%d/%d", c.name, s.Port, s.DiagnosticsPort, s.AdditionalPort, c.port, c.diag, c.addl)
 		}
-		if got, want := s.ProbeAddr(s.DiagnosticsPort), fmt.Sprintf("localhost:%d", c.diag); got != want {
+		if got, want := s.ProbeAddr(s.DiagnosticsPort), c.probe; got != want {
 			t.Errorf("%s: ProbeAddr(DPORT) = %s, want %s", c.name, got, want)
 		}
 	}
@@ -272,7 +273,7 @@ func TestForSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.Port != 8080 || one.DiagnosticsPort != 8081 || one.AdditionalPort != 8082 || one.ProbeAddr(8081) != "localhost:18081" {
+	if one.Port != 8080 || one.DiagnosticsPort != 8081 || one.AdditionalPort != 8082 || one.ProbeAddr(8081) != "127.0.0.1:18081" {
 		t.Errorf("slot 1 must be the service as declared, got %+v", one)
 	}
 
@@ -283,11 +284,11 @@ func TestForSlot(t *testing.T) {
 	if three.Port != 8280 || three.DiagnosticsPort != 8281 || three.AdditionalPort != 8282 {
 		t.Errorf("slot 3: got %d/%d/%d", three.Port, three.DiagnosticsPort, three.AdditionalPort)
 	}
-	if got := three.ProbeAddr(three.DiagnosticsPort); got != "localhost:18281" {
-		t.Errorf("slot 3 published DPORT: got %s, want localhost:18281", got)
+	if got := three.ProbeAddr(three.DiagnosticsPort); got != "127.0.0.1:18281" {
+		t.Errorf("slot 3 published DPORT: got %s, want 127.0.0.1:18281", got)
 	}
 	// ForSlot must not alter the service it was called on.
-	if auth.ProbeAddr(8081) != "localhost:18081" || auth.Port != 8080 {
+	if auth.ProbeAddr(8081) != "127.0.0.1:18081" || auth.Port != 8080 {
 		t.Error("ForSlot modified its receiver")
 	}
 }
@@ -378,7 +379,7 @@ func TestPublications(t *testing.T) {
 	}
 	// A copy: changing it must not change the service.
 	auth.Publications()[0].Port = 1
-	if got := auth.ProbeAddr(8081); got != "localhost:18081" {
+	if got := auth.ProbeAddr(8081); got != "127.0.0.1:18081" {
 		t.Errorf("Publications must return a copy, ProbeAddr is now %s", got)
 	}
 	// Unpublished container ports occupy nothing on the host, unlike
@@ -410,11 +411,17 @@ func TestSeveralBindingsForOneTarget(t *testing.T) {
 		ports string
 		want  string
 	}{
-		{"loopback first", `[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`, "localhost:8081"},
-		{"loopback last", `[{"target":8081,"host_ip":"192.168.1.10","published":"18081"},{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`, "localhost:8081"},
+		{"loopback first", `[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`, "127.0.0.1:8081"},
+		{"loopback last", `[{"target":8081,"host_ip":"192.168.1.10","published":"18081"},{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`, "127.0.0.1:8081"},
 		{"every interface", `[{"target":8081,"host_ip":"192.168.1.10","published":"18081"},{"target":8081,"host_ip":"0.0.0.0","published":"28081"}]`, "localhost:28081"},
 		{"no host_ip", `[{"target":8081,"published":"18081"}]`, "localhost:18081"},
-		{"ipv6 loopback", `[{"target":8081,"host_ip":"::1","published":"18081"}]`, "localhost:18081"},
+		{"ipv6 loopback", `[{"target":8081,"host_ip":"::1","published":"18081"}]`, "[::1]:18081"},
+		{"ipv6 loopback in brackets", `[{"target":8081,"host_ip":"[::1]","published":"18081"}]`, "[::1]:18081"},
+		{"v4 and v6 loopback: the first", `[{"target":8081,"host_ip":"::1","published":"18081"},{"target":8081,"host_ip":"127.0.0.1","published":"18081"}]`, "[::1]:18081"},
+		{"loopback with a zone", `[{"target":8081,"host_ip":"::1%lo","published":"18081"}]`, "[::1]:18081"},
+		{"v4-mapped loopback", `[{"target":8081,"host_ip":"::ffff:127.0.0.1","published":"18081"}]`, "127.0.0.1:18081"},
+		{"the name localhost", `[{"target":8081,"host_ip":"localhost","published":"18081"}]`, "localhost:18081"},
+		{"every interface beats nothing: IPv6 wildcard", `[{"target":8081,"host_ip":"::","published":"18081"}]`, "localhost:18081"},
 		{"only a LAN address", `[{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`, "192.168.1.10:18081"},
 		{"other loopback address", `[{"target":8081,"host_ip":"127.0.0.2","published":"18081"}]`, "127.0.0.2:18081"},
 		{"a name instead of an address", `[{"target":8081,"host_ip":"myhost","published":"18081"}]`, "myhost:18081"},
@@ -612,5 +619,18 @@ func TestEntryWithoutPublished(t *testing.T) {
 	}
 	if got := s.ProbeAddr(8081); got != "localhost:8081" {
 		t.Errorf("got %s", got)
+	}
+}
+
+// Services published on different loopback addresses with the same port
+// must be probed at those addresses: "localhost" would be the same for both.
+func TestLoopbackAddressesAreProbedApart(t *testing.T) {
+	topo := mustParse(t, `{"services":{
+	  "auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"18081"}]},
+	  "edge":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"host_ip":"::1","published":"18081"}]}}}`)
+	a := mustService(t, topo, "auth").ProbeAddr(8081)
+	e := mustService(t, topo, "edge").ProbeAddr(8081)
+	if a == e || a != "127.0.0.1:18081" || e != "[::1]:18081" {
+		t.Errorf("auth %s, edge %s: want two different addresses", a, e)
 	}
 }

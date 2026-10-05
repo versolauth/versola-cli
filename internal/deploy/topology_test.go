@@ -438,12 +438,31 @@ func TestReadinessUsesALocalBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := readinessURL(auth[0].Ports); got != "http://localhost:8081/readiness" {
+		if got := readinessURL(auth[0].Ports); got != "http://127.0.0.1:8081/readiness" {
 			t.Errorf("%s, slot 1: got %s", name, got)
 		}
-		if got := readinessURL(auth[1].Ports); got != "http://localhost:8181/readiness" {
+		if got := readinessURL(auth[1].Ports); got != "http://127.0.0.1:8181/readiness" {
 			t.Errorf("%s, slot 2: got %s", name, got)
 		}
+	}
+}
+
+// The same port on two loopback addresses is two services: each is probed
+// at its own address.
+func TestReadinessOfServicesOnDifferentLoopbacks(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"18081"}]},
+	  "edge":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"host_ip":"::1","published":"18081"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+	edge, _ := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
+	if got := readinessURL(auth[0].Ports); got != "http://127.0.0.1:18081/readiness" {
+		t.Errorf("auth: %s", got)
+	}
+	if got := readinessURL(edge[0].Ports); got != "http://[::1]:18081/readiness" {
+		t.Errorf("edge: %s", got)
 	}
 }
 

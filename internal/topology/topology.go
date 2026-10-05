@@ -445,12 +445,11 @@ func envPort(service string, env envVars, key string, def int) (int, error) {
 	}
 	n, ok := portFromString(v)
 	if !ok {
-		// The value is quoted shortened: compose config inlines env_file
-		// values, so this one could in principle come from a secrets file.
-		if r := []rune(v); len(r) > 16 {
-			v = string(r[:16]) + "..."
-		}
-		return 0, fmt.Errorf("service %q sets %s=%q, which is not a port", service, key, v)
+		// The value is not quoted, not even in part: `compose config`
+		// inlines env_file values into the environment, so a PORT that is
+		// not a port may well be a password that landed in the wrong
+		// variable, and this error goes to the terminal.
+		return 0, fmt.Errorf("service %q sets %s to something that is not a port number (1-65535)", service, key)
 	}
 	return n, nil
 }

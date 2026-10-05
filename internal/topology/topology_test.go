@@ -498,18 +498,30 @@ func TestBinding(t *testing.T) {
 }
 
 // The value in a "not a port" error can come from an env file that
-// `compose config` inlined, so only a short prefix of it is quoted.
-func TestBadPortErrorShortensValue(t *testing.T) {
-	topo := mustParse(t, `{"services":{"auth":{"environment":{"PORT":"`+strings.Repeat("s3cret", 20)+`"}}}}`)
-	_, err := topo.Service("auth")
-	if err == nil {
-		t.Fatal("want an error")
+// `compose config` inlined -- a password in the wrong variable -- so none
+// of it, however short, may reach the message.
+func TestBadPortErrorHidesValue(t *testing.T) {
+	for _, secret := range []string{"hunter2", "pw", "x", strings.Repeat("s3cret", 20), "p@ss w0rd!", "8080hunter2"} {
+		for _, key := range []string{"PORT", "DPORT", "APORT"} {
+			topo := mustParse(t, `{"services":{"auth":{"environment":{"`+key+`":"`+secret+`"}}}}`)
+			_, err := topo.Service("auth")
+			if err == nil {
+				t.Fatalf("%s=%q: want an error", key, secret)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, secret) {
+				t.Errorf("%s=%q leaked into %q", key, secret, msg)
+			}
+			if want := `service "auth" sets ` + key + ` to something that is not a port number (1-65535)`; msg != want {
+				t.Errorf("got %q, want %q", msg, want)
+			}
+		}
 	}
-	if strings.Contains(err.Error(), strings.Repeat("s3cret", 4)) || len(err.Error()) > 120 {
-		t.Errorf("the value must be shortened, got %q", err)
-	}
-	if !strings.Contains(err.Error(), "PORT") || !strings.Contains(err.Error(), "s3cret") {
-		t.Errorf("still names the variable and the start of its value: %q", err)
+	// Values that are not strings are kept as JSON text for the check; that
+	// text must stay out of the message as well.
+	topo := mustParse(t, `{"services":{"auth":{"environment":{"PORT":{"password":"hunter2"}}}}}`)
+	if _, err := topo.Service("auth"); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("an object value: got %v", err)
 	}
 }
 

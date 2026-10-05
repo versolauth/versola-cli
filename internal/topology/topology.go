@@ -21,7 +21,11 @@ package topology
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"net"
+	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // The ports VersolaApp.scala uses when a service's environment sets none
@@ -42,8 +46,9 @@ const (
 	MaxSlot = 9
 
 	// slotStride is how far apart consecutive slots' ports are. 100 keeps
-	// every slot of every service clear of the others (Versola's base
-	// ports are all below 8100, 100 apart at most within a service).
+	// every slot of every service clear of the others: Versola's base
+	// ports (8080-8096) span less than 100, so slot n's range never
+	// reaches slot n+1's.
 	slotStride = 100
 )
 
@@ -56,30 +61,140 @@ type Service struct {
 	DiagnosticsPort int
 	AdditionalPort  int
 
-	// published maps a container port to the host port Compose publishes
-	// it on (`ports:`). Empty on vps, where containers use the host's
-	// network and a port is the host's port.
-	published map[int]int
+	// published is every tcp `ports:` entry with one plain host port, in
+	// compose's order. Empty for a `network_mode: host` service (vps),
+	// where a port is the host's port and Docker ignores `ports:`.
+	// Compose refuses `ports:` together with any other network_mode that
+	// shares or removes the network, so those services have none.
+	published []Publication
+
+	hostNetwork bool
 }
 
-// HostPort returns the port on the host that reaches this container port:
-// the published one when `ports:` maps it (local, Docker Desktop), else
-// the port itself (vps, network_mode: host).
-func (s Service) HostPort(containerPort int) int {
-	if p, ok := s.published[containerPort]; ok {
-		return p
+// HostNetwork reports whether the compose file gives this service the
+// host's network (`network_mode: host`).
+func (s Service) HostNetwork() bool { return s.hostNetwork }
+
+// Binding is a host address and port a container port is published on.
+type Binding struct {
+	// HostIP is the address Compose binds, as written in `host_ip`; empty
+	// means every interface.
+	HostIP string
+	Port   int
+}
+
+// Publication is one `ports:` entry: a container port and where it is
+// published. A container port can have several (a loopback one and a LAN
+// one, say).
+type Publication struct {
+	Target int // the container's port
+	Binding
+}
+
+// String is the container port and where it is published, for messages
+// (Publication embeds Binding and would otherwise print only the binding).
+func (p Publication) String() string {
+	return fmt.Sprintf("%d published on %s", p.Target, p.Binding)
+}
+
+// String is the binding as it would be written in `ports:`.
+func (b Binding) String() string {
+	if b.HostIP == "" {
+		return strconv.Itoa(b.Port)
 	}
-	return containerPort
+	return net.JoinHostPort(strings.Trim(b.HostIP, "[]"), strconv.Itoa(b.Port))
 }
 
-// Published returns the host port Compose publishes containerPort on, and
-// whether it publishes it at all. Only a published port occupies a port on
-// the host when containers have their own network (local); HostPort, in
-// contrast, falls back to the container port itself for callers that need
-// "where do I reach it".
-func (s Service) Published(containerPort int) (int, bool) {
-	p, ok := s.published[containerPort]
-	return p, ok
+// addr parses HostIP. ok is false for empty (every interface, both
+// families) and for anything that is not an IP address.
+func (b Binding) addr() (a netip.Addr, ok bool) {
+	a, err := netip.ParseAddr(strings.Trim(b.HostIP, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
+}
+
+var (
+	loopback4 = netip.MustParseAddr("127.0.0.1")
+	loopback6 = netip.MustParseAddr("::1")
+)
+
+// local reports whether the binding can be reached as localhost from the
+// host: it covers loopback (or every interface).
+func (b Binding) local() bool {
+	if b.HostIP == "" || strings.EqualFold(b.HostIP, "localhost") {
+		return true
+	}
+	a, ok := b.addr()
+	a = a.WithZone("")
+	return ok && (a.IsUnspecified() || a == loopback4 || a == loopback6)
+}
+
+// Overlaps reports whether two bindings would compete for the same socket:
+// the same port, and addresses that are equal or one of which covers the
+// other (a wildcard of the same IP family, or an empty one, which covers
+// both). 127.0.0.1:8080 and 127.0.0.2:8080 do not overlap. Compose only
+// writes IP addresses; a host_ip that is not one is compared by its text
+// with another such, and is assumed to overlap with an address.
+func (b Binding) Overlaps(o Binding) bool {
+	if b.Port != o.Port {
+		return false
+	}
+	if b.HostIP == "" || o.HostIP == "" {
+		return true
+	}
+	ba, bok := b.addr()
+	oa, ook := o.addr()
+	if !bok && !ook {
+		return strings.EqualFold(b.HostIP, o.HostIP)
+	}
+	if !bok || !ook {
+		return true // a name against an address: can't tell, so assume the worst
+	}
+	if ba.Is4() != oa.Is4() {
+		return false
+	}
+	if ba.Zone() != "" && oa.Zone() != "" && ba.Zone() != oa.Zone() {
+		return false // fe80::1 on two different interfaces
+	}
+	ba, oa = ba.WithZone(""), oa.WithZone("")
+	return ba == oa || ba.IsUnspecified() || oa.IsUnspecified()
+}
+
+// ProbeAddr is the host:port at which the host this CLI runs on reaches
+// this container port: localhost and the first published port that
+// localhost can reach (loopback or every interface; local, Docker
+// Desktop), else the address of a binding to some other host IP, else
+// localhost and the port itself (a host-network service on vps, or a
+// container port that is not published). A container port published only
+// on a LAN IP is therefore probed there, not at a port that is not on the
+// host at all.
+func (s Service) ProbeAddr(containerPort int) string {
+	var other Binding // the first binding that is not localhost's
+	found := false
+	for _, p := range s.published {
+		if p.Target != containerPort {
+			continue
+		}
+		if p.local() {
+			return net.JoinHostPort("localhost", strconv.Itoa(p.Port))
+		}
+		if !found {
+			other, found = p.Binding, true
+		}
+	}
+	if found {
+		return net.JoinHostPort(strings.Trim(other.HostIP, "[]"), strconv.Itoa(other.Port))
+	}
+	return net.JoinHostPort("localhost", strconv.Itoa(containerPort))
+}
+
+// Publications returns every published port of this service (a copy).
+// Only these occupy ports on the host when containers have their own
+// network (local); ProbeAddr, in contrast, says where to reach a port.
+func (s Service) Publications() []Publication {
+	return append([]Publication(nil), s.published...)
 }
 
 // ForSlot returns the ports of this service's replica in the given slot.
@@ -97,19 +212,22 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		Port:            s.Port + off,
 		DiagnosticsPort: s.DiagnosticsPort + off,
 		AdditionalPort:  s.AdditionalPort + off,
-		published:       make(map[int]int, len(s.published)),
+		published:       make([]Publication, 0, len(s.published)),
+		hostNetwork:     s.hostNetwork,
 	}
-	for container, host := range s.published {
-		out.published[container+off] = host + off
+	for _, p := range s.published {
+		target, host := p.Target+off, p.Port+off
+		if target > 65535 {
+			return Service{}, fmt.Errorf("slot %d would need container port %d, which is out of range", slot, target)
+		}
+		if host > 65535 {
+			return Service{}, fmt.Errorf("slot %d would need host port %d (for container port %d), which is out of range", slot, host, target)
+		}
+		out.published = append(out.published, Publication{Target: target, Binding: Binding{HostIP: p.HostIP, Port: host}})
 	}
 	for _, p := range []int{out.Port, out.DiagnosticsPort, out.AdditionalPort} {
 		if p > 65535 {
 			return Service{}, fmt.Errorf("slot %d would need port %d, which is out of range", slot, p)
-		}
-	}
-	for _, p := range out.published {
-		if p > 65535 {
-			return Service{}, fmt.Errorf("slot %d would need published port %d, which is out of range", slot, p)
 		}
 	}
 	return out, nil
@@ -146,8 +264,14 @@ type Topology struct {
 // is retained -- `compose config` inlines env_file values into
 // `environment`, secrets included, and they must not outlive Parse.
 type rawService struct {
-	env   envVars
-	ports []rawPort
+	env envVars
+	// malformed: the service is not an object at all; asking for it is an
+	// error, since reading nothing from it would mean the default ports.
+	malformed bool
+	// hostNetwork: `network_mode: host`. The container then has the host's
+	// ports and Docker ignores any `ports:` on it, so they are not read.
+	hostNetwork bool
+	ports       []rawPort
 }
 
 // envVars holds just PORT, DPORT and APORT of a service's environment, as
@@ -173,35 +297,62 @@ func (e *envVars) UnmarshalJSON(b []byte) error {
 			out[key] = s
 			continue
 		}
-		var n int
-		if json.Unmarshal(raw, &n) == nil {
-			out[key] = strconv.Itoa(n)
+		var f float64
+		if json.Unmarshal(raw, &f) == nil && f == math.Trunc(f) && math.Abs(f) < 1e9 {
+			out[key] = strconv.Itoa(int(f))
+			continue
 		}
+		// Not a string or a whole number (8080.5, true, an object): kept as
+		// its JSON text so that envPort rejects it, rather than falling
+		// back to the default port unnoticed.
+		out[key] = string(raw)
 	}
 	*e = out
 	return nil
 }
 
 type rawPort struct {
-	target    int
+	target    json.RawMessage
+	hostIP    string
 	published json.RawMessage
 	protocol  string
 }
 
+// serviceJSON and portJSON are the parts of a compose service and of a
+// `ports:` entry that are read. Everything is decoded as raw JSON first and
+// then leniently, so that a value of an unexpected shape costs the entry
+// (or the service's ports), never the whole configuration.
+type serviceJSON struct {
+	Environment envVars         `json:"environment"`
+	NetworkMode json.RawMessage `json:"network_mode"`
+	Ports       json.RawMessage `json:"ports"`
+}
+
+type portJSON struct {
+	Target    json.RawMessage `json:"target"`
+	HostIP    json.RawMessage `json:"host_ip"`
+	Published json.RawMessage `json:"published"`
+	Protocol  json.RawMessage `json:"protocol"`
+}
+
+// jsonString is raw as a string, or "" when it is not one.
+func jsonString(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
 // Parse reads the output of `docker compose config --format json`.
-// Nothing is validated per service here: a service's ports are checked
-// when it is asked for (Service), so one odd service that nothing here
-// cares about -- Postgres, OpenBao -- cannot fail a deployment.
+// A service's ports are checked when it is asked for (Service), not here:
+// an entry of an unexpected shape costs only that entry, and a service
+// that is not an object only fails when it is asked for, so one odd service
+// that nothing here cares about -- Postgres, OpenBao -- cannot fail a
+// deployment.
 func Parse(data []byte) (Topology, error) {
 	var cfg struct {
-		Services map[string]struct {
-			Environment envVars `json:"environment"`
-			Ports       []struct {
-				Target    int             `json:"target"`
-				Published json.RawMessage `json:"published"`
-				Protocol  string          `json:"protocol"`
-			} `json:"ports"`
-		} `json:"services"`
+		Services map[string]json.RawMessage `json:"services"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Topology{}, fmt.Errorf("couldn't read the compose configuration: %w", err)
@@ -210,10 +361,23 @@ func Parse(data []byte) (Topology, error) {
 		return Topology{}, fmt.Errorf("the compose configuration declares no services")
 	}
 	t := Topology{services: make(map[string]rawService, len(cfg.Services))}
-	for name, s := range cfg.Services {
-		raw := rawService{env: s.Environment}
-		for _, p := range s.Ports {
-			raw.ports = append(raw.ports, rawPort{target: p.Target, published: p.Published, protocol: p.Protocol})
+	for name, body := range cfg.Services {
+		var s serviceJSON
+		if json.Unmarshal(body, &s) != nil {
+			t.services[name] = rawService{malformed: true}
+			continue
+		}
+		raw := rawService{env: s.Environment, hostNetwork: jsonString(s.NetworkMode) == "host"}
+		var entries []json.RawMessage
+		if json.Unmarshal(s.Ports, &entries) != nil {
+			entries = nil
+		}
+		for _, e := range entries {
+			var p portJSON
+			if json.Unmarshal(e, &p) != nil {
+				continue
+			}
+			raw.ports = append(raw.ports, rawPort{target: p.Target, hostIP: jsonString(p.HostIP), published: p.Published, protocol: jsonString(p.Protocol)})
 		}
 		t.services[name] = raw
 	}
@@ -226,7 +390,10 @@ func (t Topology) Service(name string) (Service, error) {
 	if !ok {
 		return Service{}, fmt.Errorf("the compose file has no %q service", name)
 	}
-	svc := Service{published: map[int]int{}}
+	if raw.malformed {
+		return Service{}, fmt.Errorf("service %q has an unexpected shape in the compose configuration", name)
+	}
+	svc := Service{hostNetwork: raw.hostNetwork}
 	var err error
 	if svc.Port, err = envPort(name, raw.env, "PORT", DefaultPort); err != nil {
 		return Service{}, err
@@ -238,14 +405,18 @@ func (t Topology) Service(name string) (Service, error) {
 		return Service{}, err
 	}
 	for _, p := range raw.ports {
-		if p.protocol != "" && p.protocol != "tcp" {
+		if raw.hostNetwork || (p.protocol != "" && !strings.EqualFold(p.protocol, "tcp")) {
+			continue
+		}
+		target, ok := plainPort(p.target)
+		if !ok {
 			continue
 		}
 		// A range, an empty value (Compose picks the port) or anything
 		// else that isn't one plain port can't be reached at a known
 		// address, so it is treated as not published.
-		if host, ok := publishedPort(p.published); ok {
-			svc.published[p.target] = host
+		if host, ok := plainPort(p.published); ok {
+			svc.published = append(svc.published, Publication{Target: target, Binding: Binding{HostIP: p.hostIP, Port: host}})
 		}
 	}
 	return svc, nil
@@ -258,8 +429,8 @@ func envPort(service string, env envVars, key string, def int) (int, error) {
 	if !ok {
 		return def, nil
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > 65535 {
+	n, ok := portFromString(v)
+	if !ok {
 		// The value is quoted shortened: compose config inlines env_file
 		// values, so this one could in principle come from a secrets file.
 		if r := []rune(v); len(r) > 16 {
@@ -270,20 +441,31 @@ func envPort(service string, env envVars, key string, def int) (int, error) {
 	return n, nil
 }
 
-// publishedPort reads the `published` value of a compose port, which
-// Compose writes as a string ("8081") and some versions as a number.
-func publishedPort(raw json.RawMessage) (int, bool) {
+// portFromString reads a port from digits only: no sign, no spaces, no
+// range, nothing outside 1-65535.
+func portFromString(s string) (int, bool) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil && n >= 1 && n <= 65535
+}
+
+// plainPort reads one port number from a compose value, which Compose
+// writes as a string of digits ("8081") and some versions as a number. A
+// range, an empty value (Compose picks the port), a sign, a fraction or
+// anything outside 1-65535 is not one plain port.
+func plainPort(raw json.RawMessage) (int, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		n, err := strconv.Atoi(s)
-		return n, err == nil && n > 0
+	if json.Unmarshal(raw, &s) == nil {
+		return portFromString(s)
 	}
-	var n int
-	if err := json.Unmarshal(raw, &n); err == nil {
-		return n, n > 0
+	var f float64
+	if json.Unmarshal(raw, &f) != nil || f < 1 || f > 65535 || f != math.Trunc(f) {
+		return 0, false
 	}
-	return 0, false
+	return int(f), true
 }

@@ -450,7 +450,7 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 // ComposeArgs builds the arguments for a `docker compose` call against the
 // deployment whose compose.yml is at composePath: "compose -f
 // compose.yml", plus "-f proxy.yml" when versola-cli generated a reverse
-// proxy next to it (vps), then rest.
+// proxy next to it (vps and local), then rest.
 //
 // Every compose call goes through this, so the proxy is always part of
 // the same compose project as auth/edge/central (proxy.yml declares the

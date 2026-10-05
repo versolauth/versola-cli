@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"errors"
+	"net/url"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -132,7 +133,7 @@ func TestCheckNoPortClash(t *testing.T) {
 	// carry a default APORT of 8082 too, which is auth's -- it must not
 	// count, they never bind it.)
 	for _, host := range []bool{true, false} {
-		if err := checkNoPortClash(host, central, auth, edge); err != nil {
+		if err := checkNoPortClash(host, nil, central, auth, edge); err != nil {
 			t.Errorf("hostNetwork=%v: Versola's own ports are distinct: %v", host, err)
 		}
 	}
@@ -146,7 +147,7 @@ func TestCheckNoPortClash(t *testing.T) {
 	}
 	a, _ := replicasOf(bare, AuthService, one)
 	e, _ := replicasOf(bare, EdgeService, one)
-	err = checkNoPortClash(true, a, e)
+	err = checkNoPortClash(true, nil, a, e)
 	if err == nil || !strings.Contains(err.Error(), "auth (PORT)") || !strings.Contains(err.Error(), "edge (PORT)") || !strings.Contains(err.Error(), "8080") {
 		t.Errorf("want auth (PORT) and edge (PORT) clashing on 8080, got %v", err)
 	}
@@ -154,7 +155,7 @@ func TestCheckNoPortClash(t *testing.T) {
 	// Several slots of one service are distinct by construction.
 	many, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}, {N: 9}})
 	for _, host := range []bool{true, false} {
-		if err := checkNoPortClash(host, many, edge); err != nil {
+		if err := checkNoPortClash(host, nil, many, edge); err != nil {
 			t.Errorf("hostNetwork=%v: slots of auth must not clash with each other or edge: %v", host, err)
 		}
 	}
@@ -166,7 +167,7 @@ func TestCheckNoPortClash(t *testing.T) {
 	}
 	s, _ := replicasOf(same, AuthService, one)
 	for _, host := range []bool{true, false} {
-		if err := checkNoPortClash(host, s); err == nil {
+		if err := checkNoPortClash(host, nil, s); err == nil {
 			t.Errorf("hostNetwork=%v: PORT == DPORT: want error", host)
 		}
 	}
@@ -184,16 +185,16 @@ func TestCheckNoPortClashAdditionalPort(t *testing.T) {
 	one := []state.Slot{{N: 1}}
 	central, _ := replicasOf(topo, CentralService, one)
 	auth, _ := replicasOf(topo, AuthService, one)
-	err = checkNoPortClash(true, central, auth)
+	err = checkNoPortClash(true, nil, central, auth)
 	if err == nil || !strings.Contains(err.Error(), "central (PORT)") || !strings.Contains(err.Error(), "auth (APORT)") || !strings.Contains(err.Error(), "8090") {
-		t.Errorf("auth's APORT against central's PORT: want a clash on 8090, got %v", err)
+		t.Fatalf("auth's APORT against central's PORT: want a clash on 8090, got %v", err)
 	}
 	if strings.Contains(err.Error(), "`ports:`") {
 		t.Errorf("on the host network there is no ports: to check: %v", err)
 	}
 	// ... but not on a bridge, where nothing is published and the two
 	// containers have their own network.
-	if err := checkNoPortClash(false, central, auth); err != nil {
+	if err := checkNoPortClash(false, nil, central, auth); err != nil {
 		t.Errorf("bridge, nothing published: %v", err)
 	}
 
@@ -204,7 +205,7 @@ func TestCheckNoPortClashAdditionalPort(t *testing.T) {
 	}
 	o, _ := replicasOf(own, AuthService, one)
 	for _, host := range []bool{true, false} {
-		if err := checkNoPortClash(host, o); err == nil {
+		if err := checkNoPortClash(host, nil, o); err == nil {
 			t.Errorf("hostNetwork=%v: APORT == PORT: want error", host)
 		}
 	}
@@ -218,7 +219,7 @@ func TestCheckNoPortClashAdditionalPort(t *testing.T) {
 	}
 	c2, _ := replicasOf(shifted, CentralService, one)
 	a2, _ := replicasOf(shifted, AuthService, []state.Slot{{N: 1}, {N: 2}})
-	if err := checkNoPortClash(true, c2, a2); err == nil || !strings.Contains(err.Error(), "8182") {
+	if err := checkNoPortClash(true, nil, c2, a2); err == nil || !strings.Contains(err.Error(), "8182") {
 		t.Errorf("auth-2's APORT (8182) against central's PORT: want a clash, got %v", err)
 	}
 }
@@ -236,11 +237,11 @@ func TestCheckNoPortClashBridge(t *testing.T) {
 	one := []state.Slot{{N: 1}}
 	auth, _ := replicasOf(topo, AuthService, one)
 	edge, _ := replicasOf(topo, EdgeService, one)
-	if err := checkNoPortClash(false, auth, edge); err != nil {
+	if err := checkNoPortClash(false, nil, auth, edge); err != nil {
 		t.Errorf("same container ports behind different published host ports are fine on a bridge: %v", err)
 	}
 	// The same layout on the host network really would collide.
-	if err := checkNoPortClash(true, auth, edge); err == nil {
+	if err := checkNoPortClash(true, nil, auth, edge); err == nil {
 		t.Error("hostNetwork: two services on 8080 must clash")
 	}
 
@@ -253,12 +254,154 @@ func TestCheckNoPortClashBridge(t *testing.T) {
 	}
 	a, _ := replicasOf(dup, AuthService, one)
 	e, _ := replicasOf(dup, EdgeService, one)
-	err = checkNoPortClash(false, a, e)
+	err = checkNoPortClash(false, nil, a, e)
 	if err == nil || !strings.Contains(err.Error(), "auth (DPORT)") || !strings.Contains(err.Error(), "edge (DPORT)") || !strings.Contains(err.Error(), "8081") {
-		t.Errorf("same published host port: want auth (DPORT) and edge (DPORT) clashing on 8081, got %v", err)
+		t.Fatalf("same published host port: want auth (DPORT) and edge (DPORT) clashing on 8081, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "`ports:`") {
 		t.Errorf("on a bridge the hint should mention ports: %v", err)
+	}
+}
+
+// Publishing is per address: auth on 127.0.0.1:18080 and edge on
+// 127.0.0.2:18080 are different sockets. And every published port counts,
+// not just PORT/DPORT/APORT.
+func TestCheckNoPortClashBridgeAddresses(t *testing.T) {
+	check := func(authPorts, edgePorts string) error {
+		t.Helper()
+		topo, err := topology.Parse([]byte(`{"services":{
+		  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":` + authPorts + `},
+		  "edge":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":` + edgePorts + `}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		one := []state.Slot{{N: 1}}
+		auth, _ := replicasOf(topo, AuthService, one)
+		edge, _ := replicasOf(topo, EdgeService, one)
+		return checkNoPortClash(false, nil, auth, edge)
+	}
+
+	if err := check(
+		`[{"target":8080,"host_ip":"127.0.0.1","published":"18080"},{"target":8081,"host_ip":"127.0.0.1","published":"18081"}]`,
+		`[{"target":8080,"host_ip":"127.0.0.2","published":"18080"},{"target":8081,"host_ip":"127.0.0.2","published":"18081"}]`); err != nil {
+		t.Errorf("distinct addresses on the same ports are fine: %v", err)
+	}
+	err := check(
+		`[{"target":8080,"host_ip":"127.0.0.1","published":"18080"}]`,
+		`[{"target":8080,"host_ip":"127.0.0.1","published":"18080"}]`)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:18080") {
+		t.Errorf("same address and port: want a clash naming it, got %v", err)
+	}
+	err = check(
+		`[{"target":8080,"host_ip":"127.0.0.1","published":"18080"}]`,
+		`[{"target":8080,"published":"18080"}]`)
+	if err == nil || !strings.Contains(err.Error(), "auth (PORT) publishes 127.0.0.1:18080") || !strings.Contains(err.Error(), "edge (PORT) publishes 18080") {
+		t.Errorf("a wildcard binding covers a specific one: want a clash naming both spellings, got %v", err)
+	}
+	if err := check(
+		`[{"target":8080,"host_ip":"0.0.0.0","published":"18080"}]`,
+		`[{"target":8080,"host_ip":"::1","published":"18080"}]`); err != nil {
+		t.Errorf("an IPv4 wildcard does not cover an IPv6 address: %v", err)
+	}
+
+	// One container port published on two addresses is fine, and so is
+	// publishing a port that is none of the listeners (MPORT) -- until two
+	// services publish it on the same address.
+	if err := check(
+		`[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`,
+		`[{"target":8081,"host_ip":"127.0.0.1","published":"8096"}]`); err != nil {
+		t.Errorf("several bindings of one target: %v", err)
+	}
+	err = check(
+		`[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]`,
+		`[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]`)
+	if err == nil || !strings.Contains(err.Error(), "port 8083") {
+		t.Errorf("a non-listener port published twice: want a clash labelled 'port 8083', got %v", err)
+	}
+	// Every binding of a target takes part, not only the first or the last.
+	err = check(
+		`[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`,
+		`[{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`)
+	if err == nil || !strings.Contains(err.Error(), "192.168.1.10:18081") {
+		t.Errorf("the second binding of a target must be checked: got %v", err)
+	}
+	err = check(
+		`[{"target":8081,"host_ip":"192.168.1.10","published":"18081"},{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`,
+		`[{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:8081") {
+		t.Errorf("the first binding of a target must be checked: got %v", err)
+	}
+	// The same target published twice on one binding is Docker's error too.
+	err = check(
+		`[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`,
+		`[]`)
+	if err == nil || !strings.Contains(err.Error(), "auth publishes 127.0.0.1:8081 for both DPORT and DPORT") {
+		t.Errorf("a target published twice on one binding: got %v", err)
+	}
+	// ... and one service publishing two targets on the same binding.
+	err = check(
+		`[{"target":8080,"host_ip":"127.0.0.1","published":"9000"},{"target":8081,"host_ip":"127.0.0.1","published":"9000"}]`,
+		`[]`)
+	if err == nil || !strings.Contains(err.Error(), "auth publishes 127.0.0.1:9000 for both PORT and DPORT") {
+		t.Errorf("two targets on one binding: want auth (PORT) and auth (DPORT), got %v", err)
+	}
+}
+
+// The wording of each kind of clash.
+func TestCheckNoPortClashMessages(t *testing.T) {
+	one := []state.Slot{{N: 1}}
+	build := func(config string, slots []state.Slot) (auth, edge []replica) {
+		t.Helper()
+		topo, err := topology.Parse([]byte(config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, _ = replicasOf(topo, AuthService, slots)
+		edge, _ = replicasOf(topo, EdgeService, one)
+		return auth, edge
+	}
+
+	// A host-network listener against a publication: one listens, one publishes.
+	a, e := build(`{"services":{
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"}},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"host_ip":"127.0.0.1","published":"8080"}]}}}`, one)
+	err := checkNoPortClash(false, nil, a, e)
+	want := "auth (PORT) listens on 8080 and edge (DPORT) publishes 127.0.0.1:8080, which is the same port on the host -- check PORT/DPORT/APORT and `ports:` in the compose file"
+	if err == nil || err.Error() != want {
+		t.Errorf("listener against publication:\n got %v\nwant %s", err, want)
+	}
+
+	// Two host-network listeners.
+	a, e = build(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"}},
+	  "edge":{"environment":{"PORT":"8080","DPORT":"8096"}}}}`, one)
+	err = checkNoPortClash(true, nil, a, e)
+	want = "auth (PORT) and edge (PORT) would both use port 8080 on the host -- check PORT/DPORT/APORT in the compose file"
+	if err == nil || err.Error() != want {
+		t.Errorf("two listeners:\n got %v\nwant %s", err, want)
+	}
+
+	// A replica clashing with itself in slot 2: the slot is explained once.
+	a, _ = build(`{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8080"}}}}`, []state.Slot{{N: 2}})
+	err = checkNoPortClash(true, nil, a)
+	want = "auth-2 uses port 8180 for both PORT and DPORT (auth-2 is slot 2: its ports are auth's in the compose file plus 100) -- check the compose file"
+	if err == nil || err.Error() != want {
+		t.Errorf("own duplicate in slot 2:\n got %v\nwant %s", err, want)
+	}
+	a, _ = build(`{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[
+	  {"target":8080,"host_ip":"127.0.0.1","published":"9000"},{"target":8081,"host_ip":"127.0.0.1","published":"9000"}]}}}`, []state.Slot{{N: 2}})
+	err = checkNoPortClash(false, nil, a)
+	if err == nil || strings.Count(err.Error(), "auth-2 is slot 2") != 1 {
+		t.Errorf("a service's slot is explained once, got %v", err)
+	}
+
+	// Ports that are none of the listeners: only `ports:` to check.
+	a, e = build(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]}}}`, one)
+	err = checkNoPortClash(false, nil, a, e)
+	if err == nil || !strings.HasSuffix(err.Error(), "-- check `ports:` in the compose file") || !strings.Contains(err.Error(), "auth (port 8083)") {
+		t.Errorf("non-listener ports: got %v", err)
 	}
 }
 
@@ -273,9 +416,238 @@ func TestCheckNoPortClashBridgeSlots(t *testing.T) {
 	}
 	central, _ := replicasOf(topo, CentralService, []state.Slot{{N: 1}})
 	auth, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
-	err = checkNoPortClash(false, central, auth)
-	if err == nil || !strings.Contains(err.Error(), "auth-2 (DPORT)") || !strings.Contains(err.Error(), "8181") {
-		t.Errorf("want auth-2's published DPORT (8181) to clash with central, got %v", err)
+	err = checkNoPortClash(false, nil, central, auth)
+	if err == nil || !strings.Contains(err.Error(), "auth-2 (DPORT)") || !strings.Contains(err.Error(), "8181") ||
+		!strings.Contains(err.Error(), "auth-2 is slot 2: its ports are auth's in the compose file plus 100") {
+		t.Errorf("want auth-2's published DPORT (8181) to clash with central, with the slot explained, got %v", err)
+	}
+}
+
+// A loopback binding wins over a LAN one whatever the order, so the
+// readiness probe does not time out on an address localhost does not reach.
+func TestReadinessUsesALocalBinding(t *testing.T) {
+	for name, ports := range map[string]string{
+		"loopback first": `[{"target":8081,"host_ip":"127.0.0.1","published":"8081"},{"target":8081,"host_ip":"192.168.1.10","published":"18081"}]`,
+		"loopback last":  `[{"target":8081,"host_ip":"192.168.1.10","published":"18081"},{"target":8081,"host_ip":"127.0.0.1","published":"8081"}]`,
+	} {
+		topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":` + ports + `}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := readinessURL(auth[0].Ports); got != "http://localhost:8081/readiness" {
+			t.Errorf("%s, slot 1: got %s", name, got)
+		}
+		if got := readinessURL(auth[1].Ports); got != "http://localhost:8181/readiness" {
+			t.Errorf("%s, slot 2: got %s", name, got)
+		}
+	}
+}
+
+// A port published only on another host IP is probed there, not at a port
+// that is not on the host at all.
+func TestReadinessUsesTheBindingsAddress(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[
+	  {"target":8081,"host_ip":"192.168.1.10","published":"18081"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readinessURL(auth[0].Ports); got != "http://192.168.1.10:18081/readiness" {
+		t.Errorf("slot 1: got %s", got)
+	}
+	if got := readinessURL(auth[1].Ports); got != "http://192.168.1.10:18181/readiness" {
+		t.Errorf("slot 2: got %s", got)
+	}
+}
+
+// The proxy holds host ports too; a service must not take them.
+func TestCheckNoPortClashProxy(t *testing.T) {
+	one := []state.Slot{{N: 1}}
+	replicas := func(config string) ([]replica, []replica) {
+		topo, err := topology.Parse([]byte(config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, _ := replicasOf(topo, AuthService, one)
+		e, _ := replicasOf(topo, EdgeService, one)
+		return a, e
+	}
+	local := proxyReservations([]int{2821}, proxy.ModeLocal)
+
+	// bridge (local): a service publishing the proxy's address
+	a, e := replicas(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"2821"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"}}}}`)
+	err := checkNoPortClash(false, local, a, e)
+	if err == nil || !strings.Contains(err.Error(), "reverse proxy") || !strings.Contains(err.Error(), "auth (DPORT)") || !strings.Contains(err.Error(), "127.0.0.1:2821") {
+		t.Errorf("auth publishing the proxy's port: want a clash naming the proxy, got %v", err)
+	}
+	// ... on another address it does not
+	a, e = replicas(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"host_ip":"127.0.0.2","published":"2821"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"}}}}`)
+	if err := checkNoPortClash(false, local, a, e); err != nil {
+		t.Errorf("another address: %v", err)
+	}
+
+	// host network (vps): a service listening on the proxy's port
+	a, e = replicas(`{"services":{
+	  "auth":{"environment":{"PORT":"2821","DPORT":"8081"}},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"}}}}`)
+	err = checkNoPortClash(true, proxyReservations([]int{2821}, proxy.ModeExternal), a, e)
+	if err == nil || !strings.Contains(err.Error(), "reverse proxy") || !strings.Contains(err.Error(), "auth (PORT)") || !strings.Contains(err.Error(), "2821") {
+		t.Errorf("PORT 2821 next to the external proxy: want a clash naming both, got %v", err)
+	}
+	if err := checkNoPortClash(true, proxyReservations([]int{80, 443}, proxy.ModeNginx), a, e); err != nil {
+		t.Errorf("nginx mode holds 80 and 443, not 2821: %v", err)
+	}
+	a, e = replicas(`{"services":{
+	  "auth":{"environment":{"PORT":"443","DPORT":"8081"}},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"}}}}`)
+	err = checkNoPortClash(true, proxyReservations([]int{80, 443}, proxy.ModeNginx), a, e)
+	if err == nil || !strings.Contains(err.Error(), "reverse proxy") || !strings.Contains(err.Error(), "auth (PORT)") || !strings.Contains(err.Error(), "443") {
+		t.Errorf("PORT 443 next to the nginx proxy: want a clash naming both, got %v", err)
+	}
+
+	// A replica in slot 2 listens on its base port + 100: the message says
+	// so, or 2821 would not be a number in the compose file.
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"PORT":"2721","DPORT":"8081"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
+	err = checkNoPortClash(true, proxyReservations([]int{2821}, proxy.ModeExternal), two)
+	if err == nil || !strings.Contains(err.Error(), "auth-2 (PORT)") || !strings.Contains(err.Error(), "auth-2 is slot 2: its ports are auth's in the compose file plus 100") {
+		t.Errorf("slot 2 onto the proxy's port: want the slot explained, got %v", err)
+	}
+	// A reservation against a host-network listener: PORT/DPORT/APORT to
+	// check, no `ports:`.
+	if err == nil || strings.Contains(err.Error(), "`ports:`") || !strings.Contains(err.Error(), "check PORT/DPORT/APORT in the compose file") {
+		t.Errorf("hint for a listener against the proxy: %v", err)
+	}
+	// A reservation against a wildcard publication on a bridge.
+	topo, err = topology.Parse([]byte(`{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"published":"2821"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wild, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+	err = checkNoPortClash(false, proxyReservations([]int{2821}, proxy.ModeLocal), wild)
+	if err == nil || !strings.Contains(err.Error(), "auth (DPORT) would use 2821 on the host, which Versola's reverse proxy holds") {
+		t.Errorf("a wildcard publication of the proxy's port: got %v", err)
+	}
+}
+
+// A service the compose file puts on the host network is checked as one
+// whatever the target, and its slots too; a stray `ports:` on it is not
+// what it occupies.
+func TestCheckNoPortClashHostNetworkFromCompose(t *testing.T) {
+	replicasFor := func(config string, slots []state.Slot) ([]replica, []replica) {
+		topo, err := topology.Parse([]byte(config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := replicasOf(topo, AuthService, slots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a, e
+	}
+	one := []state.Slot{{N: 1}}
+
+	// Two host-network services on 8080 clash even though the target says bridge.
+	a, e := replicasFor(`{"services":{
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"}},
+	  "edge":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8096"}}}}`, one)
+	if err := checkNoPortClash(false, nil, a, e); err == nil || !strings.Contains(err.Error(), "would both use port 8080") {
+		t.Errorf("want a host-network clash on 8080, got %v", err)
+	}
+
+	// A stray `ports:` on a host-network service is not what it occupies:
+	// auth "publishes" 9999, edge listens on 9999, and that is no clash.
+	a, e = replicasFor(`{"services":{
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"published":"9999"}]},
+	  "edge":{"network_mode":"host","environment":{"PORT":"8095","DPORT":"9999"}}}}`, one)
+	if err := checkNoPortClash(false, nil, a, e); err != nil {
+		t.Errorf("a discarded ports: entry must not count: %v", err)
+	}
+
+	// Slot 2 of a host-network service stays one (this was once lost in ForSlot).
+	a, e = replicasFor(`{"services":{
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"}},
+	  "edge":{"network_mode":"host","environment":{"PORT":"8180","DPORT":"8096"}}}}`, []state.Slot{{N: 1}, {N: 2}})
+	if err := checkNoPortClash(false, nil, a, e); err == nil || !strings.Contains(err.Error(), "auth-2 (PORT)") {
+		t.Errorf("auth-2 (8180) against edge on 8180: want a clash, got %v", err)
+	}
+}
+
+// A zone in a link-local host_ip must survive into a URL that parses.
+func TestReadinessURLWithZone(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[
+	  {"target":8081,"host_ip":"fe80::1%eth0","published":"18081"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+	u, err := url.Parse(readinessURL(auth[0].Ports))
+	if err != nil {
+		t.Fatalf("readinessURL is not a URL: %v", err)
+	}
+	if u.Hostname() != "fe80::1%eth0" || u.Port() != "18081" || u.Path != "/readiness" {
+		t.Errorf("got %s", u)
+	}
+}
+
+func TestDeployedProxyReservations(t *testing.T) {
+	if got := deployedProxyReservations(&state.State{Target: "local"}); got != nil {
+		t.Errorf("a deployment from before the CLI's proxy holds nothing: %+v", got)
+	}
+	ports := func(st state.State) string {
+		var out []string
+		for _, r := range deployedProxyReservations(&st) {
+			out = append(out, r.Binding.String())
+		}
+		return strings.Join(out, ",")
+	}
+	for name, c := range map[string]struct {
+		st   state.State
+		want string
+	}{
+		"local":                  {state.State{Target: "local", ProxyMode: proxy.ModeLocal, AuthURL: "http://localhost:2821"}, "127.0.0.1:2821"},
+		"external":               {state.State{Target: "vps", ProxyMode: proxy.ModeExternal, AuthURL: "https://id.example.com"}, "127.0.0.1:2821"},
+		"nginx https":            {state.State{Target: "vps", ProxyMode: proxy.ModeNginx, AuthURL: "https://id.example.com"}, "80,443"},
+		"nginx http":             {state.State{Target: "vps", ProxyMode: proxy.ModeNginx, AuthURL: "http://id.example.com"}, "80"},
+		"nginx, unusable URL":    {state.State{Target: "vps", ProxyMode: proxy.ModeNginx, AuthURL: "not a url"}, "80,443"},
+		"external, empty URL":    {state.State{Target: "vps", ProxyMode: proxy.ModeExternal}, "127.0.0.1:2821"},
+		"external, unusable URL": {state.State{Target: "vps", ProxyMode: proxy.ModeExternal, AuthURL: "::"}, "127.0.0.1:2821"},
+	} {
+		if got := ports(c.st); got != c.want {
+			t.Errorf("%s: reserved %q, want %q", name, got, c.want)
+		}
+	}
+	// nginx serves 80/443 on every interface, the others on loopback.
+	for _, r := range deployedProxyReservations(&state.State{Target: "vps", ProxyMode: proxy.ModeNginx, AuthURL: "https://id.example.com"}) {
+		if r.Binding.HostIP != "" {
+			t.Errorf("nginx binds every interface, got %+v", r)
+		}
+	}
+	// configure asks the same place.
+	auth, err := proxy.ParseAuthURL("https://id.example.com", proxy.ModeNginx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reservationsFor(auth, proxy.ModeNginx); len(got) != 2 {
+		t.Errorf("reservationsFor: %+v", got)
 	}
 }
 

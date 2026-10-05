@@ -1,5 +1,5 @@
 // Package wait polls an HTTP endpoint until it answers 200 or a timeout
-// elapses. Used by "bootstrap" to know when a service is actually ready
+// elapses. Used by `configure` and `up` to know when a service is actually ready
 // to receive traffic, not just that its container has started — see the
 // comment on auth's depends_on in versola-tools/compose.fragment.yml.template
 // for why "container started" isn't good enough here.
@@ -11,12 +11,22 @@ import (
 	"time"
 )
 
+// client is the HTTP client of the probes. They are always to this host
+// (localhost, a published address), so it never goes through a proxy from
+// HTTP_PROXY: Go bypasses it for loopback only, and a probe to another
+// address of this host would otherwise be sent to the proxy and time out.
+func client() *http.Client {
+	return &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+}
+
 // ForReady polls url every second until it returns HTTP 200, or returns
 // an error once timeout has elapsed without that happening.
 func ForReady(url string, timeout time.Duration) error {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := client()
+	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(timeout)
 
+	last := "no answer"
 	for {
 		resp, err := client.Get(url)
 		if err == nil {
@@ -24,10 +34,13 @@ func ForReady(url string, timeout time.Duration) error {
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
+			last = fmt.Sprintf("last answer: %s", resp.Status)
+		} else {
+			last = fmt.Sprintf("last error: %v", err)
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out after %s waiting for %s to answer 200", timeout, url)
+			return fmt.Errorf("timed out after %s waiting for %s to answer 200 (%s)", timeout, url, last)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -44,7 +57,8 @@ func ForReady(url string, timeout time.Duration) error {
 // (ForReachable is for confirming that much; whether it's sealed is the
 // caller's problem to detect from there, not this function's).
 func ForReachable(url string, timeout time.Duration) error {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := client()
+	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(timeout)
 
 	for {

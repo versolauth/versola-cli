@@ -183,3 +183,24 @@ func startProxy(composePath string, st *state.State) error {
 	}
 	return nil
 }
+
+// deployedProxyReservations are the host ports the proxy of an existing
+// deployment holds, for `up`'s port-clash check: none for a deployment made
+// before this CLI generated the proxy (no ProxyMode).
+func deployedProxyReservations(st *state.State) []reservation {
+	if st.ProxyMode == "" {
+		return nil
+	}
+	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
+	if err != nil {
+		// The proxy step reports an unusable auth URL itself, but until
+		// then its ports are not free to take. Without a scheme to go by,
+		// reserve both of nginx's.
+		ports := proxy.Ports(proxy.AuthURL{}, st.ProxyMode)
+		if st.ProxyMode == proxy.ModeNginx {
+			ports = []int{80, 443}
+		}
+		return proxyReservations(ports, st.ProxyMode)
+	}
+	return reservationsFor(auth, st.ProxyMode)
+}

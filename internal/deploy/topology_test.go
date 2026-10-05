@@ -3,7 +3,9 @@ package deploy
 import (
 	"errors"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -57,7 +59,7 @@ func TestReplicasOfSlotOne(t *testing.T) {
 		{"auth", auth[0], "http://localhost:8081/readiness"},
 		{"edge", edge[0], "http://localhost:8096/readiness"},
 	} {
-		if got := readinessURL(c.r.Ports); got != c.url {
+		if got := readyURL(t, true, c.r.Ports); got != c.url {
 			t.Errorf("%s: got %s, want %s", c.name, got, c.url)
 		}
 	}
@@ -83,7 +85,7 @@ func TestReplicasOfSeveralSlots(t *testing.T) {
 	if got := serviceNames(auth); !reflect.DeepEqual(got, []string{"auth", "auth-3"}) {
 		t.Errorf("service names: %v", got)
 	}
-	if got := readinessURL(auth[1].Ports); got != "http://localhost:8281/readiness" {
+	if got := readyURL(t, true, auth[1].Ports); got != "http://localhost:8281/readiness" {
 		t.Errorf("slot 3 readiness: %s", got)
 	}
 	want := []proxy.Backend{{Service: "auth", Port: 8080}, {Service: "auth-3", Port: 8280}}
@@ -115,10 +117,10 @@ func TestReadinessUsesPublishedPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := readinessURL(auth[0].Ports); got != "http://localhost:18081/readiness" {
+	if got := readyURL(t, false, auth[0].Ports); got != "http://localhost:18081/readiness" {
 		t.Errorf("slot 1: got %s", got)
 	}
-	if got := readinessURL(auth[1].Ports); got != "http://localhost:18181/readiness" {
+	if got := readyURL(t, false, auth[1].Ports); got != "http://localhost:18181/readiness" {
 		t.Errorf("slot 2: got %s", got)
 	}
 }
@@ -438,10 +440,10 @@ func TestReadinessUsesALocalBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := readinessURL(auth[0].Ports); got != "http://127.0.0.1:8081/readiness" {
+		if got := readyURL(t, false, auth[0].Ports); got != "http://127.0.0.1:8081/readiness" {
 			t.Errorf("%s, slot 1: got %s", name, got)
 		}
-		if got := readinessURL(auth[1].Ports); got != "http://127.0.0.1:8181/readiness" {
+		if got := readyURL(t, false, auth[1].Ports); got != "http://127.0.0.1:8181/readiness" {
 			t.Errorf("%s, slot 2: got %s", name, got)
 		}
 	}
@@ -458,10 +460,10 @@ func TestReadinessOfServicesOnDifferentLoopbacks(t *testing.T) {
 	}
 	auth, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
 	edge, _ := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
-	if got := readinessURL(auth[0].Ports); got != "http://127.0.0.1:18081/readiness" {
+	if got := readyURL(t, false, auth[0].Ports); got != "http://127.0.0.1:18081/readiness" {
 		t.Errorf("auth: %s", got)
 	}
-	if got := readinessURL(edge[0].Ports); got != "http://[::1]:18081/readiness" {
+	if got := readyURL(t, false, edge[0].Ports); got != "http://[::1]:18081/readiness" {
 		t.Errorf("edge: %s", got)
 	}
 }
@@ -478,10 +480,10 @@ func TestReadinessUsesTheBindingsAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := readinessURL(auth[0].Ports); got != "http://192.168.1.10:18081/readiness" {
+	if got := readyURL(t, false, auth[0].Ports); got != "http://192.168.1.10:18081/readiness" {
 		t.Errorf("slot 1: got %s", got)
 	}
-	if got := readinessURL(auth[1].Ports); got != "http://192.168.1.10:18181/readiness" {
+	if got := readyURL(t, false, auth[1].Ports); got != "http://192.168.1.10:18181/readiness" {
 		t.Errorf("slot 2: got %s", got)
 	}
 }
@@ -618,7 +620,7 @@ func TestReadinessURLWithZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	auth, _ := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
-	u, err := url.Parse(readinessURL(auth[0].Ports))
+	u, err := url.Parse(readyURL(t, false, auth[0].Ports))
 	if err != nil {
 		t.Fatalf("readinessURL is not a URL: %v", err)
 	}
@@ -729,5 +731,413 @@ func TestComposeConfigError(t *testing.T) {
 	plain := composeConfigError(path, errors.New("docker: executable file not found"))
 	if !strings.Contains(plain.Error(), "executable file not found") {
 		t.Errorf("a non-exit error is passed along: %v", plain)
+	}
+}
+
+// readyURL is readinessURL for a test that expects an answer.
+func readyURL(t *testing.T, hostNetwork bool, r topology.Service) string {
+	t.Helper()
+	u, err := readinessURL(hostNetwork, r)
+	if err != nil {
+		t.Fatalf("readinessURL: %v", err)
+	}
+	return u
+}
+
+// A bridge-network service whose diagnostics port is not published cannot
+// be asked from the host. Probing the same number there would reach
+// whatever else publishes it -- auth's 8081, say, answering for edge.
+func TestReadinessOfUnpublishedPortIsAnError(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8081"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &state.State{}
+	auth, err := replicasOf(topo, AuthService, st.ActiveSlots(AuthService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := replicasOf(topo, EdgeService, st.ActiveSlots(EdgeService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readyURL(t, false, auth[0].Ports); got != "http://localhost:8081/readiness" {
+		t.Errorf("auth publishes it: got %s", got)
+	}
+	_, err = readinessURL(false, edge[0].Ports)
+	if err == nil || !strings.Contains(err.Error(), "8081 is not published") {
+		t.Fatalf("edge does not publish it: got %v", err)
+	}
+	// On the host's network the port is the host's own.
+	if got := readyURL(t, true, edge[0].Ports); got != "http://localhost:8081/readiness" {
+		t.Errorf("host network: got %s", got)
+	}
+
+	// Naming the replica, so the operator knows which to look at.
+	_, err = readinessURLs(false, auth, edge)
+	if err == nil || !strings.HasPrefix(err.Error(), "edge: ") {
+		t.Errorf("readinessURLs: got %v", err)
+	}
+	urls, err := readinessURLs(true, auth, edge)
+	if err != nil || urls["auth"] != urls["edge"] {
+		t.Errorf("host network: %v, %v", urls, err)
+	}
+	// A slot's own published port is found there.
+	two, err := replicasOf(topo, AuthService, []state.Slot{{N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readinessURL(false, two[0].Ports); err != nil {
+		t.Errorf("slot 2 publishes 8181: %v", err)
+	}
+}
+
+// OpenBao runs on this machine at 8200 for as long as the stack does.
+func TestOpenBaoPortIsReserved(t *testing.T) {
+	for name, cfg := range map[string]struct {
+		hostNetwork bool
+		json        string
+	}{
+		"vps APORT":   {true, `{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8200"}}}}`},
+		"vps PORT":    {true, `{"services":{"auth":{"environment":{"PORT":"8200","DPORT":"8081","APORT":"8082"}}}}`},
+		"local ports": {false, `{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"published":"8200"}]}}}`},
+		"local addr":  {false, `{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"8200"}]}}}`},
+	} {
+		topo, err := topology.Parse([]byte(cfg.json))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkNoPortClash(cfg.hostNetwork, nil, auth)
+		if err == nil || !strings.Contains(err.Error(), "Versola's OpenBao") || !strings.Contains(err.Error(), "8200") {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	// The bridge's own 8200 inside the container is not the host's.
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"PORT":"8200","DPORT":"8081"},"ports":[{"target":8081,"published":"18081"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkNoPortClash(false, nil, auth); err != nil {
+		t.Errorf("an unpublished 8200 on a bridge: %v", err)
+	}
+}
+
+// state.json is a file people edit and old CLIs rewrite: a slot recorded
+// twice is reported as that, and slots come out in order.
+func TestReplicasOfSlotsFromState(t *testing.T) {
+	topo := testTopology(t)
+	_, err := replicasOf(topo, AuthService, []state.Slot{{N: 2}, {N: 1}, {N: 2}})
+	if err == nil || !strings.Contains(err.Error(), "lists slot 2 twice") {
+		t.Errorf("duplicate slots: got %v", err)
+	}
+	got, err := replicasOf(topo, AuthService, []state.Slot{{N: 3}, {N: 1}, {N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := serviceNames(got); !reflect.DeepEqual(names, []string{"auth", "auth-2", "auth-3"}) {
+		t.Errorf("order: %v", names)
+	}
+	in := []state.Slot{{N: 3}, {N: 1}}
+	if _, err := replicasOf(topo, AuthService, in); err != nil || in[0].N != 3 {
+		t.Errorf("the caller's slice is not reordered: %v, %v", in, err)
+	}
+}
+
+// Only auth binds APORT. An empty one on edge -- `APORT: ${APORT:-}` --
+// is nothing; on auth it is a bad port.
+func TestAPORTIsAnErrorForAuthOnly(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "auth":{"environment":{"APORT":""}},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096","APORT":""}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replicasOf(topo, EdgeService, []state.Slot{{N: 1}, {N: 2}}); err != nil {
+		t.Errorf("edge: %v", err)
+	}
+	if _, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}}); err == nil || !strings.Contains(err.Error(), "APORT") || strings.Contains(err.Error(), "hunter") {
+		t.Errorf("auth: got %v", err)
+	}
+}
+
+func replicasFor(t *testing.T, topo topology.Topology) (central, auth, edge []replica) {
+	t.Helper()
+	var err error
+	if central, err = replicasOf(topo, CentralService, []state.Slot{{N: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if auth, err = replicasOf(topo, AuthService, []state.Slot{{N: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if edge, err = replicasOf(topo, EdgeService, []state.Slot{{N: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+// What up and configure both ask: ports, then readiness URLs, by service.
+func TestCheckTopology(t *testing.T) {
+	topo := testTopology(t)
+	c, a, e := replicasFor(t, topo)
+	urls, err := checkTopology(topo, true, nil, c, a, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"central": "http://localhost:8091/readiness",
+		"auth":    "http://localhost:8081/readiness",
+		"edge":    "http://localhost:8096/readiness",
+	}
+	if !reflect.DeepEqual(urls, want) {
+		t.Errorf("got %v, want %v", urls, want)
+	}
+	if _, err := checkTopology(topo, false, nil, c, a, e); err != nil {
+		t.Errorf("local publishes every diagnostics port: %v", err)
+	}
+}
+
+// The rest of the compose file holds host ports too.
+func TestCheckTopologyReservesOtherServices(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "postgres":{"ports":[{"target":5432,"host_ip":"127.0.0.1","published":"5432"}]},
+	  "gateway":{"ports":[{"target":80,"published":"18090-18100"}]},
+	  "host":{"network_mode":"host","ports":[{"target":1,"published":"9"}]},
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"19095"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e := replicasFor(t, topo)
+	if _, err := checkTopology(topo, false, nil, c, a, e); err != nil {
+		t.Fatalf("no clash: %v", err)
+	}
+	// edge's published port is the gateway's.
+	topo2, err := topology.Parse([]byte(`{"services":{
+	  "gateway":{"ports":[{"target":80,"published":"18095"}]},
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"18095"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e = replicasFor(t, topo2)
+	_, err = checkTopology(topo2, false, nil, c, a, e)
+	if err == nil || !strings.Contains(err.Error(), `the compose file's "gateway" service`) || !strings.Contains(err.Error(), "18095") {
+		t.Errorf("got %v", err)
+	}
+	// Another service's own listeners are not host ports on a vps.
+	topo3, err := topology.Parse([]byte(`{"services":{
+	  "mailer":{"network_mode":"host","environment":{"PORT":"8080"}},
+	  "central":{"network_mode":"host","environment":{"PORT":"8090","DPORT":"8091"}},
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"}},
+	  "edge":{"network_mode":"host","environment":{"PORT":"8095","DPORT":"8096"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e = replicasFor(t, topo3)
+	if _, err := checkTopology(topo3, true, nil, c, a, e); err != nil {
+		t.Errorf("vps: %v", err)
+	}
+}
+
+// A local proxy reaches the replicas by name over Docker's network; a
+// service on the host's network is not there.
+func TestCheckTopologyRefusesHostNetworkOnLocal(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"}},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e := replicasFor(t, topo)
+	_, err = checkTopology(topo, false, nil, c, a, e)
+	if err == nil || !strings.Contains(err.Error(), "auth has `network_mode: host`") {
+		t.Errorf("local: got %v", err)
+	}
+	if _, err := checkTopology(topo, true, nil, c, a, e); err != nil {
+		t.Errorf("vps: %v", err)
+	}
+}
+
+func TestReadinessOfRangeAndOfSlots(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"18081-18090"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = readinessURLs(false, auth)
+	if err == nil || !strings.Contains(err.Error(), "range of host ports") || strings.Contains(err.Error(), "is not published") {
+		t.Errorf("a range: got %v", err)
+	}
+	edge, err := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readinessURLs(false, edge); err == nil || !strings.Contains(err.Error(), "one Docker picks") {
+		t.Errorf("no host port: got %v", err)
+	}
+	// For a slot, the base service's entry is what to change.
+	_, err = readinessURLs(false, auth[1:])
+	if err == nil || !strings.Contains(err.Error(), "auth-3: ") || !strings.Contains(err.Error(), "the fix is in auth's entry (DPORT 8081)") {
+		t.Errorf("slot 3: got %v", err)
+	}
+}
+
+// The same checks on real Compose output (see topology's testdata).
+func TestCheckTopologyOnRealComposeOutput(t *testing.T) {
+	load := func(name string) topology.Topology {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("..", "topology", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		topo, err := topology.Parse(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return topo
+	}
+	local := load("compose-local.json")
+	c, a, e := replicasFor(t, local)
+	urls, err := checkTopology(local, false, nil, c, a, e)
+	if err != nil {
+		t.Fatalf("local: %v", err)
+	}
+	want := map[string]string{
+		"central": "http://localhost:8091/readiness",
+		"auth":    "http://127.0.0.1:18081/readiness",
+		"edge":    "http://[::1]:18096/readiness",
+	}
+	if !reflect.DeepEqual(urls, want) {
+		t.Errorf("local: got %v, want %v", urls, want)
+	}
+
+	vps := load("compose-vps.json")
+	c, a, e = replicasFor(t, vps)
+	if _, err := checkTopology(vps, true, nil, c, a, e); err != nil {
+		t.Errorf("vps: %v", err)
+	}
+	// The same compose file is no local one: its services are on the host.
+	if _, err := checkTopology(vps, false, nil, c, a, e); err == nil {
+		t.Error("vps services on a local target: want an error")
+	}
+}
+
+// Docker takes whichever port of a range is free: a range clashes with
+// nothing it contains, nor with another range.
+func TestRangesDoNotClash(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "other":{"ports":[{"target":80,"published":"18000-18100"},{"target":81,"published":"8000-8300"}]},
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"18000-18050"},{"target":8082,"published":"18050"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"18020"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e := replicasFor(t, topo)
+	_, err = checkTopology(topo, false, nil, c, a, e)
+	// Only the readiness check has anything to say: auth's diagnostics port
+	// is on a range, with no address to ask.
+	if err == nil || !strings.Contains(err.Error(), "auth: ") || !strings.Contains(err.Error(), "range of host ports") {
+		t.Errorf("got %v", err)
+	}
+	if err := checkNoPortClash(false, nil, a, e); err != nil {
+		t.Errorf("ranges: %v", err)
+	}
+}
+
+// A service up never starts holds no port, and what another service's
+// environment says does not hide what it publishes.
+func TestOtherServicesReservations(t *testing.T) {
+	const base = `
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}`
+	for name, other := range map[string]string{
+		"scale 0":          `"old":{"scale":0,"ports":[{"target":80,"published":"8096"}]},`,
+		"replicas 0":       `"old":{"deploy":{"replicas":0},"ports":[{"target":80,"published":"8096"}]},`,
+		"udp":              `"dns":{"ports":[{"target":53,"published":"8096","protocol":"udp"}]},`,
+		"a null service":   `"old":null,`,
+		"a string service": `"old":"x",`,
+	} {
+		topo, err := topology.Parse([]byte(`{"services":{` + other + base + `}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, a, e := replicasFor(t, topo)
+		if _, err := checkTopology(topo, false, nil, c, a, e); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// A bad PORT on a service we only read the publications of.
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "mailer":{"environment":{"PORT":"${MAILER_PORT:-}"},"ports":[{"target":25,"published":"8096"}]},` + base + `}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e := replicasFor(t, topo)
+	if _, err := checkTopology(topo, false, nil, c, a, e); err == nil || !strings.Contains(err.Error(), `"mailer"`) {
+		t.Errorf("mailer holds 8096: got %v", err)
+	}
+	// Several services holding the same port: the first by name is named.
+	topo, err = topology.Parse([]byte(`{"services":{
+	  "zeta":{"ports":[{"target":25,"published":"8096"}]},
+	  "alpha":{"ports":[{"target":25,"published":"8096"}]},` + base + `}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, a, e = replicasFor(t, topo)
+	for i := 0; i < 20; i++ {
+		if _, err := checkTopology(topo, false, nil, c, a, e); err == nil || !strings.Contains(err.Error(), `"alpha"`) {
+			t.Fatalf("got %v", err)
+		}
+	}
+}
+
+// A compose file that already declares auth-2 (a replica's own service)
+// does not hold its ports against that replica, nor does auth against
+// auth-2.
+func TestReplicasAreNotOtherServices(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{
+	  "central":{"environment":{"PORT":"8090","DPORT":"8091"},"ports":[{"target":8091,"published":"8091"}]},
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081","APORT":"8082"},"ports":[{"target":8081,"published":"8081"}]},
+	  "auth-2":{"environment":{"PORT":"8180","DPORT":"8181","APORT":"8182"},"ports":[{"target":8181,"published":"8181"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"published":"8096"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	central, err := replicasOf(topo, CentralService, []state.Slot{{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := replicasOf(topo, EdgeService, []state.Slot{{N: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, slots := range map[string][]state.Slot{"slots 1 and 2": {{N: 1}, {N: 2}}, "slot 2 only": {{N: 2}}} {
+		auth, err := replicasOf(topo, AuthService, slots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := checkTopology(topo, false, nil, central, auth, edge); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

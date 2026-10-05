@@ -15,6 +15,7 @@
 package deploy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,6 +133,12 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		if err := checkProxyPorts(auth, proxyOpts.Mode); err != nil {
 			return ConfigureResult{}, err
 		}
+	}
+
+	// A state.json from a newer versola is found before anything is pulled
+	// or started, not when configure tries to record its result.
+	if _, err := state.Load(); errors.Is(err, state.ErrNewerSchema) {
+		return ConfigureResult{}, err
 	}
 
 	fmt.Printf("\nPreparing Versola %s...\n", version)
@@ -349,7 +356,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if err := checkNoPortClash(target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, authReplicas, edgeReplicas); err != nil {
+	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, authReplicas, edgeReplicas); err != nil {
 		return ConfigureResult{}, err
 	}
 	upstreams := proxyUpstreams{Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}

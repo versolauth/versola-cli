@@ -50,6 +50,10 @@ const legacyVersionFileName = "version"
 // no state.json, and no legacy version file either.
 var ErrNotConfigured = errors.New("no deployment configured yet")
 
+// ErrNewerSchema means state.json was written by a newer versola, whose
+// records this one would drop on its next Save.
+var ErrNewerSchema = errors.New("state written by a newer versola")
+
 // State is what the CLI records about the current deployment.
 type State struct {
 	SchemaVersion int `json:"schemaVersion"`
@@ -280,6 +284,11 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...str
 	// clean up afterward isn't this function's problem to report, just
 	// something to skip.
 	prev, prevErr := Load()
+	// ...except this one: overwriting a newer versola's state is the loss
+	// Load refuses to risk, and the bundles it names would be pruned.
+	if errors.Is(prevErr, ErrNewerSchema) {
+		return prevErr
+	}
 
 	s := &State{
 		SchemaVersion: SchemaVersion,
@@ -373,6 +382,11 @@ func Load() (*State, error) {
 	var s State
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("couldn't parse %s: %w", filepath.Join(dir, stateFileName), err)
+	}
+	// A newer versola may have recorded things this one does not know, and
+	// saving would drop them (replica slots, say).
+	if s.SchemaVersion > SchemaVersion {
+		return nil, fmt.Errorf("%s: %w (state layout %d, this one reads up to %d) -- upgrade versola", filepath.Join(dir, stateFileName), ErrNewerSchema, s.SchemaVersion, SchemaVersion)
 	}
 	return &s, nil
 }

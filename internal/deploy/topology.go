@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -111,6 +112,15 @@ type reservation struct {
 // proxyHolder is how the reverse proxy is named in an error.
 const proxyHolder = "Versola's reverse proxy"
 
+// openbaoHolder and openbaoPort: configure starts OpenBao on this machine
+// at localhost:8200 (a published port locally, the host's own on vps), and
+// it stays there while the stack runs. Every replica, whatever its target,
+// must stay off that port.
+const (
+	openbaoHolder = "Versola's OpenBao"
+	openbaoPort   = 8200
+)
+
 // proxyReservations are the host ports the reverse proxy binds: loopback
 // only for local and external, every interface for a proxy that serves
 // 80/443 itself.
@@ -158,6 +168,9 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 		binding        topology.Binding
 	}
 	var claims []claim
+	// The address OpenBao binds is not in the compose file this reads, so
+	// the port is held on every address.
+	claims = append(claims, claim{service: openbaoHolder, reserved: true, binding: topology.Binding{Port: openbaoPort}})
 	for _, r := range reserved {
 		claims = append(claims, claim{service: r.Name, reserved: true, binding: r.Binding})
 	}
@@ -186,6 +199,11 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 			for _, t := range taken {
 				for _, other := range claims {
 					if !other.binding.Overlaps(t.binding) {
+						continue
+					}
+					// Docker takes whichever port of a range is free, so a
+					// range clashes with nothing it merely contains.
+					if other.binding.IsRange() || t.binding.IsRange() {
 						continue
 					}
 					var msg string
@@ -273,11 +291,26 @@ func appUpArgs(services []string, legacyGateway bool) []string {
 	return args
 }
 
-// replicasOf returns the replicas of one service for the given slots.
+// replicasOf returns the replicas of one service for the given slots, in
+// slot order. Slots come from state.json: a slot recorded twice is that
+// file's mistake, and is reported as that, not as a clash of ports.
 func replicasOf(topo topology.Topology, service string, slots []state.Slot) ([]replica, error) {
 	base, err := topo.Service(service)
 	if err != nil {
 		return nil, err
+	}
+	// Only auth binds APORT; for the others a bad one means nothing.
+	if service == AuthService {
+		if err := base.CheckAdditional(service); err != nil {
+			return nil, err
+		}
+	}
+	slots = append([]state.Slot(nil), slots...)
+	sort.SliceStable(slots, func(i, j int) bool { return slots[i].N < slots[j].N })
+	for i := 1; i < len(slots); i++ {
+		if slots[i].N == slots[i-1].N {
+			return nil, fmt.Errorf("%s: the deployment's state lists slot %d twice", service, slots[i].N)
+		}
 	}
 	out := make([]replica, 0, len(slots))
 	for _, s := range slots {
@@ -293,10 +326,74 @@ func replicasOf(topo topology.Topology, service string, slots []state.Slot) ([]r
 // readinessURL is where a replica reports whether it is ready, as seen
 // from the host this CLI runs on: its diagnostics port at the address it is
 // published on (local; another host IP if that is all there is), or the
-// host's own port (vps, or when it is not published).
-func readinessURL(r topology.Service) string {
+// host's own port (vps). A diagnostics port that is neither -- not
+// published on a bridge network -- cannot be asked at all, and asking the
+// same port on the host would reach whatever else holds it (auth's, say),
+// so that is an error, not a guess.
+func readinessURL(hostNetwork bool, r topology.Service) (string, error) {
+	if !hostNetwork && !r.Reachable(r.DiagnosticsPort) {
+		if r.Unfixed(r.DiagnosticsPort) {
+			return "", fmt.Errorf("diagnostics port %d is published on a range of host ports or on one Docker picks, so there is no address to check its readiness at -- publish it on one fixed host port in `ports:` in the compose file", r.DiagnosticsPort)
+		}
+		return "", fmt.Errorf("diagnostics port %d is not published to the host, so its readiness cannot be checked -- add it to `ports:` in the compose file", r.DiagnosticsPort)
+	}
 	u := url.URL{Scheme: "http", Host: r.ProbeAddr(r.DiagnosticsPort), Path: "/readiness"}
-	return u.String()
+	return u.String(), nil
+}
+
+// readinessURLs maps each replica's service to its readiness URL, failing
+// on the first one that has none -- before anything is started.
+func readinessURLs(hostNetwork bool, groups ...[]replica) (map[string]string, error) {
+	out := map[string]string{}
+	for _, group := range groups {
+		for _, r := range group {
+			u, err := readinessURL(hostNetwork, r.Ports)
+			if err != nil {
+				// A slot's ports are the base service's shifted: it is the
+				// base service's entry that has to change.
+				hint := ""
+				if r.Slot > 1 {
+					hint = fmt.Sprintf(" -- the fix is in %s's entry (DPORT %d)", r.Base, r.Ports.DiagnosticsPort-topology.SlotOffset(r.Slot))
+				}
+				return nil, fmt.Errorf("%s: %w%s%s", r.Service, err, slotNote(r.Service, r.Base, r.Slot), hint)
+			}
+			out[r.Service] = u
+		}
+	}
+	return out, nil
+}
+
+// checkTopology is everything about where the replicas listen that can be
+// known before anything starts: they stay off the ports the proxy, OpenBao
+// and the rest of the compose file hold and off each other's, and each has
+// a readiness URL. It returns the URLs by service. Up and Configure both
+// call it, so what one accepts the other does.
+func checkTopology(topo topology.Topology, hostNetwork bool, reserved []reservation, central, auth, edge []replica) (map[string]string, error) {
+	if !hostNetwork {
+		// A local deployment's proxy sits on Docker's network and reaches
+		// the replicas by service name; a service on the host's network is
+		// not there.
+		for _, group := range [][]replica{central, auth, edge} {
+			for _, r := range group {
+				if r.Ports.HostNetwork() {
+					return nil, fmt.Errorf("%s has `network_mode: host`, which only a vps deployment supports: on local the proxy reaches it by name over Docker's network", r.Service)
+				}
+			}
+		}
+	}
+	var own []string // the replicas' own services, which are not "the rest"
+	for _, group := range [][]replica{central, auth, edge} {
+		for _, r := range group {
+			own = append(own, r.Service, r.Base)
+		}
+	}
+	for _, p := range topo.PublicationsExcept(own...) {
+		reserved = append(reserved, reservation{Name: fmt.Sprintf("the compose file's %q service", p.Service), Binding: p.Binding})
+	}
+	if err := checkNoPortClash(hostNetwork, reserved, central, auth, edge); err != nil {
+		return nil, err
+	}
+	return readinessURLs(hostNetwork, central, auth, edge)
 }
 
 // serviceNames lists the compose service names of the replicas.

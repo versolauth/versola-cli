@@ -3,6 +3,7 @@ package topology
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,8 +196,13 @@ func TestUnpublishedAndUDPPortsIgnored(t *testing.T) {
 	  {"target":8081,"published":"","protocol":"tcp"},
 	  {"target":8081,"published":"9000","protocol":"udp"}]}}}`)
 	s := mustService(t, topo, "auth")
-	if got := s.Publications(); len(got) != 0 {
-		t.Errorf("none of those is a usable mapping, got %+v", got)
+	// The range is kept, so that its host ports count as taken; the empty
+	// one and the udp one are not host ports anybody holds.
+	if got := s.Publications(); len(got) != 1 || got[0].String() != "8081 published on 8000-8010" {
+		t.Errorf("got %+v", got)
+	}
+	if s.Reachable(8081) || !s.Unfixed(8081) {
+		t.Errorf("a range and a port Compose picks have no address to ask: Reachable=%v Unfixed=%v", s.Reachable(8081), s.Unfixed(8081))
 	}
 	if got := s.ProbeAddr(8081); got != "localhost:8081" {
 		t.Errorf("got %s, want localhost:8081", got)
@@ -504,7 +510,15 @@ func TestBadPortErrorHidesValue(t *testing.T) {
 	for _, secret := range []string{"hunter2", "pw", "x", strings.Repeat("s3cret", 20), "p@ss w0rd!", "8080hunter2"} {
 		for _, key := range []string{"PORT", "DPORT", "APORT"} {
 			topo := mustParse(t, `{"services":{"auth":{"environment":{"`+key+`":"`+secret+`"}}}}`)
-			_, err := topo.Service("auth")
+			s, err := topo.Service("auth")
+			if key == "APORT" {
+				// Only auth binds APORT, so the service loads and the
+				// caller that needs it asks.
+				if err != nil {
+					t.Fatalf("APORT=%q: %v", secret, err)
+				}
+				err = s.CheckAdditional("auth")
+			}
 			if err == nil {
 				t.Fatalf("%s=%q: want an error", key, secret)
 			}
@@ -536,7 +550,6 @@ func TestOddShapesDoNotFailParse(t *testing.T) {
 		"host_ip a number":    `{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"host_ip":5,"published":"18081"}]}}}`,
 		"network_mode number": `{"services":{"auth":{"environment":{"DPORT":"8081"},"network_mode":5}}}`,
 		"protocol a number":   `{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"published":"18081","protocol":7}]}}}`,
-		"the service null":    `{"services":{"auth":null}}`,
 	} {
 		topo, err := Parse([]byte(cfg))
 		if err != nil {
@@ -550,6 +563,11 @@ func TestOddShapesDoNotFailParse(t *testing.T) {
 	topo := mustParse(t, `{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[{"target":8081,"published":"18081","protocol":7}]}}}`)
 	if got := len(mustService(t, topo, "auth").Publications()); got != 1 {
 		t.Errorf("a protocol that is not a string counts as the default (tcp), got %d publications", got)
+	}
+	// A null service is as unusable as a string: not the default ports.
+	null := mustParse(t, `{"services":{"auth":null}}`)
+	if _, err := null.Service("auth"); err == nil {
+		t.Error("a null service: want an error")
 	}
 	if _, err := Parse([]byte(`{"services":5}`)); err == nil {
 		t.Error("services that is not an object: want an error")
@@ -644,5 +662,247 @@ func TestLoopbackAddressesAreProbedApart(t *testing.T) {
 	e := mustService(t, topo, "edge").ProbeAddr(8081)
 	if a == e || a != "127.0.0.1:18081" || e != "[::1]:18081" {
 		t.Errorf("auth %s, edge %s: want two different addresses", a, e)
+	}
+}
+
+func TestReachable(t *testing.T) {
+	topo := mustParse(t, `{"services":{
+	  "bridge":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8081,"published":"18081"}]},
+	  "host":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"}},
+	  "none":{"environment":{"PORT":"8080","DPORT":"8081"}}}}`)
+	for name, c := range map[string]struct {
+		port int
+		want bool
+	}{"bridge": {8081, true}, "host": {8081, true}, "none": {8081, false}} {
+		s := mustService(t, topo, name)
+		if got := s.Reachable(c.port); got != c.want {
+			t.Errorf("%s: Reachable(%d) = %v", name, c.port, got)
+		}
+	}
+	if mustService(t, topo, "bridge").Reachable(8080) {
+		t.Error("8080 is not published")
+	}
+	if !mustService(t, topo, "host").Reachable(8080) {
+		t.Error("a host-network service has all its ports")
+	}
+	// A slot's ports move with it.
+	s, err := mustService(t, topo, "bridge").ForSlot(2)
+	if err != nil || !s.Reachable(8181) || s.Reachable(8081) {
+		t.Errorf("slot 2: %v, %v", s, err)
+	}
+}
+
+// Nothing that holds a Topology can print an invalid port value: it is
+// not kept at all, only the fact that it was bad.
+func TestBadPortValueIsNotRetained(t *testing.T) {
+	topo := mustParse(t, `{"services":{"a":{"environment":{"PORT":"hunter2","DPORT":{"password":"hunter2"},"APORT":"hunter2"}}}}`)
+	for _, dump := range []string{fmt.Sprintf("%v", topo), fmt.Sprintf("%+v", topo), fmt.Sprintf("%#v", topo)} {
+		if strings.Contains(dump, "hunter2") {
+			t.Errorf("a topology prints a bad port value: %s", dump)
+		}
+	}
+}
+
+// Only auth binds APORT: an empty or invalid one elsewhere must not fail
+// a deployment that works.
+func TestBadAPORTFailsOnlyWhereItIsBound(t *testing.T) {
+	topo := mustParse(t, `{"services":{
+	  "auth":{"environment":{"APORT":""}},
+	  "edge":{"environment":{"APORT":"${APORT:-}"}}}}`)
+	edge := mustService(t, topo, "edge")
+	if err := edge.CheckAdditional("edge"); err == nil {
+		t.Error("CheckAdditional reports it for whoever asks")
+	}
+	if _, err := edge.ForSlot(2); err != nil {
+		t.Errorf("a slot of edge: %v", err)
+	}
+	slot, _ := edge.ForSlot(2)
+	if slot.CheckAdditional("edge-2") == nil {
+		t.Error("the flag follows the slot")
+	}
+	if _, err := topo.Service("auth"); err != nil {
+		t.Errorf("auth loads; CheckAdditional is what rejects it: %v", err)
+	}
+}
+
+func TestPublishedRanges(t *testing.T) {
+	for in, c := range map[string]struct {
+		first, last int
+		kind        hostPortKind
+	}{
+		`"18081"`:        {18081, 0, oneHostPort},
+		`18081`:          {18081, 0, oneHostPort},
+		`"8000-8010"`:    {8000, 8010, hostPortRange},
+		`"8000-8000"`:    {8000, 0, oneHostPort},
+		`"8010-8000"`:    {0, 0, badHostPort},
+		`"8000-"`:        {0, 0, badHostPort},
+		`"-8000"`:        {0, 0, badHostPort},
+		`"a-b"`:          {0, 0, badHostPort},
+		`"1-70000"`:      {0, 0, badHostPort},
+		`""`:             {0, 0, noHostPort},
+		`null`:           {0, 0, noHostPort},
+		`[1]`:            {0, 0, badHostPort},
+		`"8000-8001-02"`: {0, 0, badHostPort},
+	} {
+		first, last, kind := hostPorts(json.RawMessage(in))
+		if first != c.first || last != c.last || kind != c.kind {
+			t.Errorf("%s: got %d, %d, %v; want %d, %d, %v", in, first, last, kind, c.first, c.last, c.kind)
+		}
+	}
+	if first, _, kind := hostPorts(nil); first != 0 || kind != noHostPort {
+		t.Errorf("an absent value is Compose picking: %v", kind)
+	}
+}
+
+func TestRangeBindings(t *testing.T) {
+	r := Binding{HostIP: "127.0.0.1", Port: 8000, Last: 8010}
+	for b, want := range map[Binding]bool{
+		{HostIP: "127.0.0.1", Port: 8005}:             true,
+		{HostIP: "127.0.0.1", Port: 8000}:             true,
+		{HostIP: "127.0.0.1", Port: 8010}:             true,
+		{HostIP: "127.0.0.1", Port: 8011}:             false,
+		{HostIP: "127.0.0.1", Port: 7999}:             false,
+		{HostIP: "127.0.0.2", Port: 8005}:             false,
+		{Port: 8005}:                                  true,
+		{HostIP: "127.0.0.1", Port: 7990, Last: 8000}: true,
+		{HostIP: "127.0.0.1", Port: 8010, Last: 8020}: true,
+		{HostIP: "127.0.0.1", Port: 8011, Last: 8020}: false,
+		{HostIP: "127.0.0.1", Port: 7000, Last: 9000}: true,
+	} {
+		if got := r.Overlaps(b); got != want {
+			t.Errorf("%v overlaps %v: %v, want %v", r, b, got, want)
+		}
+		if got := b.Overlaps(r); got != want {
+			t.Errorf("%v overlaps %v: %v, want %v (symmetry)", b, r, got, want)
+		}
+	}
+	if got := r.String(); got != "127.0.0.1:8000-8010" {
+		t.Errorf("String: %s", got)
+	}
+}
+
+// A range moves with the slot, as every other published port does, and an
+// unfixed port stays unfixed.
+func TestRangeForSlot(t *testing.T) {
+	topo := mustParse(t, `{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":[
+	  {"target":8081,"host_ip":"127.0.0.1","published":"18000-18010"},{"target":8080}]}}}`)
+	s, err := mustService(t, topo, "auth").ForSlot(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Publications(); len(got) != 1 || got[0].String() != "8281 published on 127.0.0.1:18200-18210" {
+		t.Errorf("got %+v", got)
+	}
+	if !s.Unfixed(8281) || !s.Unfixed(8280) {
+		t.Error("both are still published without an address")
+	}
+	if _, err := mustService(t, mustParse(t, `{"services":{"a":{"ports":[{"target":80,"published":"65000-65535"}]}}}`), "a").ForSlot(2); err == nil {
+		t.Error("the end of the range is out of port range in slot 2: want an error")
+	}
+}
+
+// Slot 1 is the service as compose declares it, whatever it publishes.
+func TestSlotOneIsTheBaseService(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"nothing published": `{"services":{"a":{"environment":{"PORT":"8080"}}}}`,
+		"published":         `{"services":{"a":{"ports":[{"target":8081,"host_ip":"127.0.0.1","published":"18081"},{"target":80,"published":"9000-9001"},{"target":81}]}}}`,
+		"host network":      `{"services":{"a":{"network_mode":"host"}}}`,
+	} {
+		base := mustService(t, mustParse(t, cfg), "a")
+		one, err := base.ForSlot(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(base, one) {
+			t.Errorf("%s: slot 1 differs from the base:\n%+v\n%+v", name, base, one)
+		}
+	}
+}
+
+// Real `docker compose config --format json` output (Compose v5.5.1) for
+// the shapes a deployment can have, so the parser is checked against what
+// Compose writes and not only against what these tests assume it writes.
+// compose-local.json came from: short and long `ports:` syntax, a loopback
+// and an IPv6 host_ip, a host-port range, a port Compose picks, a udp port,
+// an empty APORT, a numeric PORT.
+func TestRealComposeOutput(t *testing.T) {
+	read := func(name string) Topology {
+		t.Helper()
+		b, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustParse(t, string(b))
+	}
+	local := read("compose-local.json")
+
+	auth := mustService(t, local, "auth")
+	if got := auth.ProbeAddr(8081); got != "127.0.0.1:18081" {
+		t.Errorf("auth diagnostics: %s", got)
+	}
+	var pubs []string
+	for _, p := range auth.Publications() {
+		pubs = append(pubs, p.String())
+	}
+	if want := []string{"8081 published on 127.0.0.1:18081", "8083 published on 18000-18010"}; !reflect.DeepEqual(pubs, want) {
+		t.Errorf("auth publications: %v, want %v", pubs, want)
+	}
+	if !auth.Unfixed(8083) || !auth.Unfixed(8082) || auth.Unfixed(8081) {
+		t.Error("a range and a port Compose picks are published without an address; a plain one is not")
+	}
+	if auth.CheckAdditional("auth") != nil || auth.AdditionalPort != 8082 {
+		t.Errorf("auth APORT: %d, %v", auth.AdditionalPort, auth.CheckAdditional("auth"))
+	}
+
+	// The empty APORT of central is nothing: central does not bind it.
+	central := mustService(t, local, "central")
+	if central.Port != 8090 || central.DiagnosticsPort != 8091 || central.CheckAdditional("central") == nil {
+		t.Errorf("central: %+v", central)
+	}
+
+	edge := mustService(t, local, "edge")
+	if edge.Port != 8095 || edge.ProbeAddr(8096) != "[::1]:18096" || !edge.Unfixed(8095) {
+		t.Errorf("edge: port %d, probe %s", edge.Port, edge.ProbeAddr(8096))
+	}
+
+	if _, err := local.Service("postgres"); err != nil {
+		t.Errorf("a service with no environment or ports: %v", err)
+	}
+	if got := local.PublicationsExcept("central", "auth", "edge"); len(got) != 0 {
+		t.Errorf("postgres publishes nothing: %v", got)
+	}
+
+	vps := read("compose-vps.json")
+	for _, name := range []string{"central", "auth", "edge"} {
+		s := mustService(t, vps, name)
+		if !s.HostNetwork() || len(s.Publications()) != 0 || !s.Reachable(s.DiagnosticsPort) {
+			t.Errorf("%s on vps: %+v", name, s)
+		}
+	}
+	if got := mustService(t, vps, "auth").ProbeAddr(8081); got != "localhost:8081" {
+		t.Errorf("vps auth diagnostics: %s", got)
+	}
+}
+
+func TestForSlotUnfixedOverflow(t *testing.T) {
+	topo := mustParse(t, `{"services":{"a":{"ports":[{"target":65500}]}}}`)
+	if _, err := mustService(t, topo, "a").ForSlot(2); err == nil {
+		t.Error("an unfixed port that does not fit in slot 2: want an error")
+	}
+}
+
+func TestDisabledServicesPublishNothing(t *testing.T) {
+	topo := mustParse(t, `{"services":{
+	  "a":{"scale":0,"ports":[{"target":80,"published":"1000"}]},
+	  "b":{"deploy":{"replicas":0},"ports":[{"target":80,"published":"1001"}]},
+	  "c":{"scale":2,"deploy":{"replicas":3},"ports":[{"target":80,"published":"1002"}]},
+	  "d":{"environment":{"PORT":"nope"},"ports":[{"target":80,"published":"1003"}]}}}`)
+	got := topo.PublicationsExcept()
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Service+":"+p.Binding.String())
+	}
+	if want := []string{"c:1002", "d:1003"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("got %v, want %v", names, want)
 	}
 }

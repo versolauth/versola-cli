@@ -2,6 +2,10 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -65,5 +69,68 @@ func TestSlotsJSONCompatibility(t *testing.T) {
 	}
 	if !reflect.DeepEqual(back.Slots, withSlots.Slots) {
 		t.Errorf("round trip: got %v, want %v", back.Slots, withSlots.Slots)
+	}
+}
+
+// A state.json from a newer versola may hold what this one would drop on
+// its next Save.
+func TestLoadRefusesNewerSchema(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(v int) {
+		t.Helper()
+		b := fmt.Sprintf(`{"schemaVersion":%d,"target":"vps","version":"0.6.2"}`, v)
+		if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte(b), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(SchemaVersion)
+	if _, err := Load(); err != nil {
+		t.Errorf("the current layout: %v", err)
+	}
+	write(SchemaVersion + 1)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "newer versola") {
+		t.Errorf("a newer layout: got %v", err)
+	}
+}
+
+// configure must not overwrite what a newer versola wrote, nor prune the
+// bundles it names.
+func TestFinalizeRefusesNewerSchema(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "bundle-old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "bundle-new"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	written := fmt.Sprintf(`{"schemaVersion":%d,"target":"vps","version":"0.6.2","bundleDir":"bundle-old"}`, SchemaVersion+1)
+	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte(written), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = Finalize("vps", "0.6.3", filepath.Join(dir, "bundle-new"), "https://id.example.com", "external")
+	if !errors.Is(err, ErrNewerSchema) {
+		t.Fatalf("got %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, stateFileName))
+	if err != nil || string(b) != written {
+		t.Errorf("state.json was rewritten: %s, %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bundle-old")); err != nil {
+		t.Errorf("a bundle of the newer state was pruned: %v", err)
 	}
 }

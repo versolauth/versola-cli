@@ -73,7 +73,11 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	if err := checkNoPortClash(isVps, deployedProxyReservations(st), centralReplicas, authReplicas, edgeReplicas); err != nil {
+	// Ports and readiness URLs up front: a clash, or a diagnostics port
+	// that cannot be asked, is found before anything is started, not after
+	// central's migrations.
+	readyURLs, err := checkTopology(topo, isVps, deployedProxyReservations(st), centralReplicas, authReplicas, edgeReplicas)
+	if err != nil {
 		return err
 	}
 	appServices := serviceNames(authReplicas, edgeReplicas)
@@ -145,7 +149,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// Versola's topology, so that one build of it can deploy any release
 	// (design doc §3.5). The service names are what is still assumed.
 	fmt.Println("Waiting for central to be ready...")
-	if err := wait.ForReady(readinessURL(centralReplicas[0].Ports), 60*time.Second); err != nil {
+	if err := wait.ForReady(readyURLs[centralReplicas[0].Service], 60*time.Second); err != nil {
 		return fmt.Errorf("central never became ready: %w", err)
 	}
 
@@ -175,7 +179,7 @@ func Up(opts UpOptions, st *state.State) error {
 
 	fmt.Println("Waiting for auth and edge to be ready...")
 	for _, r := range append(append([]replica{}, authReplicas...), edgeReplicas...) {
-		if err := wait.ForReady(readinessURL(r.Ports), 60*time.Second); err != nil {
+		if err := wait.ForReady(readyURLs[r.Service], 60*time.Second); err != nil {
 			return fmt.Errorf("%s never became ready: %w", r.Service, err)
 		}
 	}

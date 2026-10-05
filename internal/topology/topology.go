@@ -131,6 +131,19 @@ func (b Binding) local() bool {
 	return ok && (a.IsUnspecified() || a == loopback4 || a == loopback6)
 }
 
+// probeHost is the host to dial to reach a local binding. A binding to one
+// loopback address is dialled by that address: "localhost" can be either
+// 127.0.0.1 or ::1, and two services published on 127.0.0.1:P and [::1]:P
+// are different services. A binding to every interface (or to the name
+// localhost) is reachable through either, so "localhost" does.
+func (b Binding) probeHost() string {
+	a, ok := b.addr()
+	if !ok || a.IsUnspecified() {
+		return "localhost"
+	}
+	return a.WithZone("").String()
+}
+
 // Overlaps reports whether two bindings would compete for the same socket:
 // the same port, and addresses that are equal or one of which covers the
 // other (a wildcard of the same IP family, or an empty one, which covers
@@ -163,9 +176,10 @@ func (b Binding) Overlaps(o Binding) bool {
 }
 
 // ProbeAddr is the host:port at which the host this CLI runs on reaches
-// this container port: localhost and the first published port that
-// localhost can reach (loopback or every interface; local, Docker
-// Desktop), else the address of a binding to some other host IP, else
+// this container port: the first published port that is reachable from
+// this host (loopback or every interface; local, Docker Desktop) -- at
+// the loopback address it is bound to, or at localhost for every
+// interface --, else the address of a binding to some other host IP, else
 // localhost and the port itself (a host-network service on vps, or a
 // container port that is not published). A container port published only
 // on a LAN IP is therefore probed there, not at a port that is not on the
@@ -178,7 +192,7 @@ func (s Service) ProbeAddr(containerPort int) string {
 			continue
 		}
 		if p.local() {
-			return net.JoinHostPort("localhost", strconv.Itoa(p.Port))
+			return net.JoinHostPort(p.probeHost(), strconv.Itoa(p.Port))
 		}
 		if !found {
 			other, found = p.Binding, true

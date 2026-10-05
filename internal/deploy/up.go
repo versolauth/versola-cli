@@ -80,7 +80,13 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	appServices := serviceNames(authReplicas, edgeReplicas)
+	// Replicas past slot 1 are defined in replicas.yml next to the compose
+	// file (see replicasYAML); written before anything is started so the
+	// compose commands below see them.
+	if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
+		return err
+	}
+	steps := appStartSteps(authReplicas, edgeReplicas, !(isVps || st.ProxyMode != ""))
 
 	// A warning, not a hard failure: the services themselves are the real
 	// check (they validate their schema at startup now rather than silently
@@ -163,24 +169,19 @@ func Up(opts UpOptions, st *state.State) error {
 	// container_name, which Docker refuses. The reverse proxy isn't in
 	// versola-tools' compose file at all -- versola-cli generates it
 	// (proxy.yml, see package proxy) and startProxy below starts it last.
-	if isVps || st.ProxyMode != "" {
-		fmt.Println("Starting auth and edge...")
-		if err := docker.Run(state.ComposeArgs(composePath, appUpArgs(appServices, false)...)...); err != nil {
-			return fmt.Errorf("couldn't start auth/edge: %w", err)
+	// One step per batch: slot 1 of each service together, as before
+	// (with its depends_on), then every further replica on its own and
+	// waited for before the next -- a replica that does not come up stops
+	// the rollout at that replica instead of after all of them.
+	for _, step := range steps {
+		fmt.Println(step.Message)
+		if err := docker.Run(state.ComposeArgs(composePath, step.Args...)...); err != nil {
+			return fmt.Errorf("couldn't start %s: %w", step.Name, err)
 		}
-	} else {
-		// local, configured by a versola-cli from before it generated
-		// local's proxy too: still on versola-tools' own gateway.
-		fmt.Println("Starting auth, edge, and the gateway...")
-		if err := docker.Run(state.ComposeArgs(composePath, appUpArgs(appServices, true)...)...); err != nil {
-			return fmt.Errorf("couldn't start the rest of the stack: %w", err)
-		}
-	}
-
-	fmt.Println("Waiting for auth and edge to be ready...")
-	for _, r := range append(append([]replica{}, authReplicas...), edgeReplicas...) {
-		if err := wait.ForReady(readyURLs[r.Service], 60*time.Second); err != nil {
-			return fmt.Errorf("%s never became ready: %w", r.Service, err)
+		for _, svc := range step.Ready {
+			if err := wait.ForReady(readyURLs[svc], 60*time.Second); err != nil {
+				return fmt.Errorf("%s never became ready: %w", svc, err)
+			}
 		}
 	}
 

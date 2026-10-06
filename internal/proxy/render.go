@@ -3,12 +3,17 @@ package proxy
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"text/template"
+
+	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/fsutil"
 )
 
 //go:embed templates/*
@@ -85,6 +90,10 @@ func checkBackends(name, mode string, backends []Backend) error {
 	}
 	return nil
 }
+
+// UpstreamsFile is the file with the auth/edge upstreams, relative to the
+// deployment bundle. Reload rewrites it alone.
+const UpstreamsFile = "proxy/conf.d/upstreams.conf"
 
 // Files renders the proxy's files, keyed by their path relative to the
 // deployment bundle.
@@ -164,6 +173,7 @@ func (c Config) Files() (map[string][]byte, error) {
 	for out, tmpl := range map[string]string{
 		ComposeFile:                 "templates/proxy.yml.tmpl",
 		"proxy/conf.d/versola.conf": "templates/versola.conf.tmpl",
+		UpstreamsFile:               "templates/upstreams.conf.tmpl",
 	} {
 		b, err := render(tmpl, data)
 		if err != nil {
@@ -219,6 +229,42 @@ func Write(bundleDir string, c Config) error {
 		if err := os.WriteFile(path, content, 0o644); err != nil {
 			return fmt.Errorf("couldn't write %s: %w", path, err)
 		}
+	}
+	return nil
+}
+
+// Reload makes the running proxy route to the replicas in c: rewrites the
+// upstreams file in the bundle, has nginx check the result, and reloads it
+// (no restart: connections in flight finish on the old workers, see
+// worker_shutdown_timeout in nginx.conf). If nginx rejects the new file the
+// old one is put back, so the bundle never holds a config the next start of
+// the proxy would fail on, and the running proxy is untouched.
+func Reload(bundleDir string, c Config) error {
+	files, err := c.Files()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(bundleDir, UpstreamsFile)
+	old, readErr := os.ReadFile(path)
+	if err := fsutil.WriteFileAtomic(path, files[UpstreamsFile], 0o644); err != nil {
+		return fmt.Errorf("couldn't write %s: %w", path, err)
+	}
+	name := ContainerFor(c.Mode)
+	if _, err := docker.Output("exec", name, "nginx", "-t"); err != nil {
+		if readErr == nil {
+			_ = fsutil.WriteFileAtomic(path, old, 0o644)
+		} else if os.IsNotExist(readErr) {
+			_ = os.Remove(path)
+		}
+		// nginx's own words (stderr): which line it did not like.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+			return fmt.Errorf("nginx rejected the new upstreams (the proxy keeps its old ones): %s", bytes.TrimSpace(ee.Stderr))
+		}
+		return fmt.Errorf("nginx rejected the new upstreams (the proxy keeps its old ones): %w", err)
+	}
+	if err := docker.Run("exec", name, "nginx", "-s", "reload"); err != nil {
+		return fmt.Errorf("nginx accepted the new upstreams but the reload failed (the proxy keeps routing to the old ones; the bundle has the new): %w", err)
 	}
 	return nil
 }

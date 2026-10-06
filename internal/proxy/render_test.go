@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -83,7 +85,7 @@ func renderCases() []renderCase {
 			want: []string{"listen 443 ssl;", "listen 80;", "server_name id.example.com;", "acme_certificate letsencrypt;",
 				"state_path /var/cache/nginx/acme-letsencrypt/production;",
 				"ssl_certificate $acme_certificate;", "resolver 127.0.0.53 ipv6=off;",
-				"uri " + ACMEProduction + ";", "return 301 https://$host$request_uri;", "server 127.0.0.1:8080;", "server 127.0.0.1:8095;"},
+				"uri " + ACMEProduction + ";", "return 301 https://$host$request_uri;", "server 127.0.0.1:8080 max_fails=3 fail_timeout=10s;", "server 127.0.0.1:8095 max_fails=3 fail_timeout=10s;"},
 			wantNot: []string{"[::]", "set_real_ip_from", "2821"},
 			compose: []string{"image: " + Image, "container_name: " + ContainerName, "network_mode: host", ACMEVolume + ":/var/cache/nginx/acme-letsencrypt", "external: true", "./central-ui:/usr/share/nginx/html/central/admin:ro"},
 		},
@@ -123,7 +125,7 @@ func renderCases() []renderCase {
 				return Config{Mode: ModeLocal, AuthURL: mustURL(t, "http://localhost:2821", ModeLocal), IPv6: true}
 			},
 			want: []string{"listen 2821;", "server_name localhost;", "resolver 127.0.0.11 valid=10s ipv6=off;",
-				"zone auth_backend 64k;", "server auth:8080 resolve;", "zone edge_backend 64k;", "server edge:8095 resolve;"},
+				"zone auth_backend 64k;", "server auth:8080 resolve max_fails=3 fail_timeout=10s;", "zone edge_backend 64k;", "server edge:8095 resolve max_fails=3 fail_timeout=10s;"},
 			wantNot:   []string{"ssl", "acme", "[::]", "set_real_ip_from", "127.0.0.1:"},
 			compose:   []string{"container_name: " + LocalContainerName, `- "127.0.0.1:2821:2821"`, "./central-ui:/usr/share/nginx/html/central/admin:ro"},
 			noCompose: []string{"network_mode: host", ACMEVolume},
@@ -137,8 +139,8 @@ func renderCases() []renderCase {
 					Auth: []Backend{{Service: "auth", Port: 8080}, {Service: "auth-2", Port: 8180}},
 					Edge: []Backend{{Service: "edge", Port: 8095}, {Service: "edge-2", Port: 8195}}}
 			},
-			want: []string{"zone auth_backend 64k;", "server auth:8080 resolve;", "server auth-2:8180 resolve;",
-				"zone edge_backend 64k;", "server edge:8095 resolve;", "server edge-2:8195 resolve;"},
+			want: []string{"zone auth_backend 64k;", "server auth:8080 resolve max_fails=3 fail_timeout=10s;", "server auth-2:8180 resolve max_fails=3 fail_timeout=10s;",
+				"zone edge_backend 64k;", "server edge:8095 resolve max_fails=3 fail_timeout=10s;", "server edge-2:8195 resolve max_fails=3 fail_timeout=10s;"},
 			wantNot: []string{"ssl", "acme", "127.0.0.1:"},
 		},
 	}
@@ -156,7 +158,7 @@ func TestFiles(t *testing.T) {
 					t.Fatalf("missing %s", name)
 				}
 			}
-			conf := directives(files["proxy/conf.d/versola.conf"])
+			conf := directives(bytes.Join([][]byte{files["proxy/conf.d/versola.conf"], files[UpstreamsFile]}, []byte("\n")))
 			for _, w := range c.want {
 				if !has(conf, w) {
 					t.Errorf("versola.conf lacks %q", w)
@@ -284,8 +286,8 @@ func TestFilesRendersEveryReplica(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conf := directives(files["proxy/conf.d/versola.conf"])
-	for _, w := range []string{"server 127.0.0.1:8080;", "server 127.0.0.1:8180;", "server 127.0.0.1:8280;", "server 127.0.0.1:8095;", "server 127.0.0.1:8195;"} {
+	conf := directives(bytes.Join([][]byte{files["proxy/conf.d/versola.conf"], files[UpstreamsFile]}, []byte("\n")))
+	for _, w := range []string{"server 127.0.0.1:8080 max_fails=3 fail_timeout=10s;", "server 127.0.0.1:8180 max_fails=3 fail_timeout=10s;", "server 127.0.0.1:8280 max_fails=3 fail_timeout=10s;", "server 127.0.0.1:8095 max_fails=3 fail_timeout=10s;", "server 127.0.0.1:8195 max_fails=3 fail_timeout=10s;"} {
 		if !has(conf, w) {
 			t.Errorf("vps: versola.conf lacks %q", w)
 		}
@@ -295,8 +297,8 @@ func TestFilesRendersEveryReplica(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conf = directives(files["proxy/conf.d/versola.conf"])
-	for _, w := range []string{"server auth:8080 resolve;", "server auth-2:8180 resolve;", "server auth-3:8280 resolve;", "server edge:8095 resolve;", "server edge-2:8195 resolve;"} {
+	conf = directives(bytes.Join([][]byte{files["proxy/conf.d/versola.conf"], files[UpstreamsFile]}, []byte("\n")))
+	for _, w := range []string{"server auth:8080 resolve max_fails=3 fail_timeout=10s;", "server auth-2:8180 resolve max_fails=3 fail_timeout=10s;", "server auth-3:8280 resolve max_fails=3 fail_timeout=10s;", "server edge:8095 resolve max_fails=3 fail_timeout=10s;", "server edge-2:8195 resolve max_fails=3 fail_timeout=10s;"} {
 		if !has(conf, w) {
 			t.Errorf("local: versola.conf lacks %q", w)
 		}
@@ -353,6 +355,57 @@ func TestNginxAcceptsConfig(t *testing.T) {
 			out, err := exec.Command("docker", args...).CombinedOutput()
 			if err != nil {
 				t.Fatalf("nginx -t failed: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+// The upstreams live in their own file (Reload rewrites that file alone),
+// balanced by least_conn, and versola.conf holds none.
+func TestUpstreamsFile(t *testing.T) {
+	for _, c := range renderCases() {
+		t.Run(c.name, func(t *testing.T) {
+			files, err := c.config(t).Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if regexp.MustCompile(`(?m)^\s*upstream\s+\w+\s*\{`).Match(files["proxy/conf.d/versola.conf"]) {
+				t.Error("versola.conf still defines upstreams")
+			}
+			up := directives(files[UpstreamsFile])
+			for _, w := range []string{"upstream auth_backend {", "upstream edge_backend {", "least_conn;", "keepalive 32;"} {
+				if !has(up, w) {
+					t.Errorf("upstreams.conf lacks %q", w)
+				}
+			}
+			if !strings.Contains(string(files["proxy/nginx.conf"]), "worker_shutdown_timeout 30s;") {
+				t.Error("nginx.conf lacks worker_shutdown_timeout")
+			}
+		})
+	}
+}
+
+// Inside each upstream block, not just somewhere in the file: the balancing
+// method comes before keepalive (nginx requires it), and both blocks have it.
+func TestUpstreamBlocksOrder(t *testing.T) {
+	for _, c := range renderCases() {
+		t.Run(c.name, func(t *testing.T) {
+			files, err := c.config(t).Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocks := regexp.MustCompile(`(?s)upstream\s+(\w+)\s*\{(.*?)\n\}`).FindAllStringSubmatch(string(files[UpstreamsFile]), -1)
+			if len(blocks) != 2 {
+				t.Fatalf("want 2 upstream blocks, got %d", len(blocks))
+			}
+			for _, b := range blocks {
+				lc, ka := strings.Index(b[2], "least_conn;"), strings.Index(b[2], "keepalive 32;")
+				if lc < 0 || ka < 0 || lc > ka {
+					t.Errorf("%s: least_conn (at %d) must be present and come before keepalive (at %d)", b[1], lc, ka)
+				}
+				if !strings.Contains(b[2], "max_fails=3 fail_timeout=10s;") {
+					t.Errorf("%s: servers lack max_fails", b[1])
+				}
 			}
 		})
 	}

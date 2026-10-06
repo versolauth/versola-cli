@@ -32,3 +32,29 @@ func TestComposeArgs(t *testing.T) {
 		t.Errorf("with proxy.yml: got %v, want %v", got, want)
 	}
 }
+
+// replicas.yml goes between compose.yml and proxy.yml, and only when it exists.
+func TestComposeArgsWithReplicas(t *testing.T) {
+	dir := t.TempDir()
+	compose := filepath.Join(dir, "compose.yml")
+	replicas := filepath.Join(dir, ReplicasFile)
+	proxyFile := filepath.Join(dir, proxy.ComposeFile)
+	for _, f := range []string{replicas, proxyFile} {
+		if err := os.WriteFile(f, []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := ComposeArgs(compose, "up")
+	want := []string{"compose", "-f", compose, "-f", replicas, "-f", proxyFile, "up"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if err := os.Remove(proxyFile); err != nil {
+		t.Fatal(err)
+	}
+	got = ComposeArgs(compose, "up")
+	want = []string{"compose", "-f", compose, "-f", replicas, "up"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("without proxy.yml: got %v, want %v", got, want)
+	}
+}

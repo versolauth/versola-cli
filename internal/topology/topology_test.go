@@ -312,11 +312,12 @@ func TestForSlotRejects(t *testing.T) {
 		t.Error("want an error when a slot's port would exceed 65535")
 	}
 	// Either side of a publication can be what runs out; the message names it.
+	port := map[string]string{"host": "8080", "container": "64900"}
 	for name, ports := range map[string]string{
 		"host":      `[{"target":8081,"published":"64900"}]`,
 		"container": `[{"target":64900,"published":"8081"}]`,
 	} {
-		svc := mustService(t, mustParse(t, `{"services":{"auth":{"environment":{"DPORT":"8081"},"ports":`+ports+`}}}`), "auth")
+		svc := mustService(t, mustParse(t, `{"services":{"auth":{"environment":{"DPORT":"8081","PORT":"`+port[name]+`"},"ports":`+ports+`}}}`), "auth")
 		_, err := svc.ForSlot(2)
 		if err != nil {
 			t.Errorf("%s: slot 2 fits: %v", name, err)
@@ -884,8 +885,31 @@ func TestRealComposeOutput(t *testing.T) {
 	}
 }
 
+// Only a port a process listens on moves with the slot; any other keeps its
+// container port and only its host port moves.
+func TestForSlotKeepsOtherContainerPorts(t *testing.T) {
+	topo := mustParse(t, `{"services":{"auth":{"ports":[
+		{"target":8080,"published":"8080"},
+		{"target":9100,"published":"9100","host_ip":"127.0.0.1"},
+		{"target":9200,"host_ip":"127.0.0.1"}]}}}`)
+	s2, err := mustService(t, topo, "auth").ForSlot(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range s2.Publications() {
+		got = append(got, p.String())
+	}
+	if len(got) != 2 || !strings.Contains(got[0], "8180") || !strings.Contains(got[1], "9100") || !strings.Contains(got[1], "9200") {
+		t.Errorf("publications: %v", got)
+	}
+	if u := s2.UnfixedPorts(); len(u) != 1 || u[0] != 9200 || s2.UnfixedHostIP(0) != "127.0.0.1" {
+		t.Errorf("unfixed: %v %q", u, s2.UnfixedHostIP(0))
+	}
+}
+
 func TestForSlotUnfixedOverflow(t *testing.T) {
-	topo := mustParse(t, `{"services":{"a":{"ports":[{"target":65500}]}}}`)
+	topo := mustParse(t, `{"services":{"a":{"environment":{"PORT":"65500"},"ports":[{"target":65500}]}}}`)
 	if _, err := mustService(t, topo, "a").ForSlot(2); err == nil {
 		t.Error("an unfixed port that does not fit in slot 2: want an error")
 	}

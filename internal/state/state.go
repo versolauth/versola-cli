@@ -461,6 +461,11 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 	return path, true, nil
 }
 
+// ReplicasFile is written into the deployment bundle next to compose.yml
+// by `up` when auth or edge have replicas beyond slot 1, and passed with it
+// from then on (ComposeArgs).
+const ReplicasFile = "replicas.yml"
+
 // ComposeArgs builds the arguments for a `docker compose` call against the
 // deployment whose compose.yml is at composePath: "compose -f
 // compose.yml", plus "-f proxy.yml" when versola-cli generated a reverse
@@ -472,6 +477,13 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 // 80/443, `status` lists it, `down --volumes` treats it like the rest.
 func ComposeArgs(composePath string, rest ...string) []string {
 	args := []string{"compose", "-f", composePath}
+	// The replicas of auth and edge beyond the first, when there are any
+	// (see ReplicasFile): before the proxy's file, which names no service
+	// of theirs.
+	replicasFile := filepath.Join(filepath.Dir(composePath), ReplicasFile)
+	if _, err := os.Stat(replicasFile); err == nil {
+		args = append(args, "-f", replicasFile)
+	}
 	proxyFile := filepath.Join(filepath.Dir(composePath), proxy.ComposeFile)
 	if _, err := os.Stat(proxyFile); err == nil {
 		args = append(args, "-f", proxyFile)

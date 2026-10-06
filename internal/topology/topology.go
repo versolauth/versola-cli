@@ -72,6 +72,9 @@ type Service struct {
 	// unfixed are the container ports published with no host port to name:
 	// Compose picks one (`ports: ["8081"]`). Their address is not known.
 	unfixed []int
+	// unfixedIP[i] is the host address unfixed[i] is published on ("" for
+	// all of them).
+	unfixedIP []string
 
 	// additionalBad: APORT is set to something that is not a port. Only
 	// auth binds APORT, so it is an error for auth alone (CheckAdditional);
@@ -84,7 +87,22 @@ type Service struct {
 	additionalSlot int
 
 	hostNetwork bool
+
+	// containerName is the compose service's `container_name`, or "".
+	containerName string
 }
+
+// ContainerName is the service's fixed container name, or "" when compose
+// names it. A replica in slot n is "<name>-n" (see SlotContainerName).
+func (s Service) ContainerName() string { return s.containerName }
+
+// UnfixedPorts are the container ports published with no host port to name
+// (Compose picks one), in compose's order.
+func (s Service) UnfixedPorts() []int { return append([]int(nil), s.unfixed...) }
+
+// UnfixedHostIP is the host address the i-th of UnfixedPorts is published
+// on, "" for every address.
+func (s Service) UnfixedHostIP(i int) string { return s.unfixedIP[i] }
 
 // CheckAdditional is an error when APORT is set to something that is not a
 // port. Callers ask it for the services that actually bind APORT; for any
@@ -144,14 +162,20 @@ func (p Publication) String() string {
 
 // String is the binding as it would be written in `ports:`.
 func (b Binding) String() string {
-	port := strconv.Itoa(b.Port)
-	if b.IsRange() {
-		port += "-" + strconv.Itoa(b.last())
-	}
+	port := b.PortString()
 	if b.HostIP == "" {
 		return port
 	}
 	return net.JoinHostPort(strings.Trim(b.HostIP, "[]"), port)
+}
+
+// PortString is the host port, or first-last for a range, as compose
+// writes `published`.
+func (b Binding) PortString() string {
+	if b.IsRange() {
+		return strconv.Itoa(b.Port) + "-" + strconv.Itoa(b.last())
+	}
+	return strconv.Itoa(b.Port)
 }
 
 // addr parses HostIP. ok is false for empty (every interface, both
@@ -311,9 +335,20 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		AdditionalPort:  s.AdditionalPort + off,
 		additionalBad:   s.additionalBad,
 		hostNetwork:     s.hostNetwork,
+		containerName:   s.containerName,
+	}
+	// Only a port some process listens on moves with the slot: the replica
+	// is told its own PORT/DPORT/APORT, but whatever else the base
+	// publishes (a port only the image knows) still listens where it did,
+	// and only its host port moves out of the way.
+	shift := func(target int) int {
+		if target == s.Port || target == s.DiagnosticsPort || (s.AdditionalPort > 0 && target == s.AdditionalPort) {
+			return target + off
+		}
+		return target
 	}
 	for _, p := range s.published {
-		target, host := p.Target+off, p.Port+off
+		target, host := shift(p.Target), p.Port+off
 		var last int
 		if p.IsRange() {
 			last = p.last() + off
@@ -326,11 +361,12 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		}
 		out.published = append(out.published, Publication{Target: target, Binding: Binding{HostIP: p.HostIP, Port: host, Last: last}})
 	}
-	for _, t := range s.unfixed {
-		if t+off > 65535 {
-			return Service{}, fmt.Errorf("slot %d would need container port %d, which is out of range", slot, t+off)
+	for i, t := range s.unfixed {
+		if shift(t) > 65535 {
+			return Service{}, fmt.Errorf("slot %d would need container port %d, which is out of range", slot, shift(t))
 		}
-		out.unfixed = append(out.unfixed, t+off)
+		out.unfixed = append(out.unfixed, shift(t))
+		out.unfixedIP = append(out.unfixedIP, s.unfixedIP[i])
 	}
 	for _, p := range []int{out.Port, out.DiagnosticsPort} {
 		if p > 65535 {
@@ -353,6 +389,16 @@ func ValidSlot(n int) error {
 
 // SlotOffset is how far slot n's ports are from slot 1's.
 func SlotOffset(n int) int { return (n - 1) * slotStride }
+
+// SlotContainerName is the container name of base's replica in slot n:
+// base itself for slot 1, "base-n" for the others ("" stays "": compose
+// names the container).
+func SlotContainerName(base string, n int) string {
+	if base == "" || n == 1 {
+		return base
+	}
+	return fmt.Sprintf("%s-%d", base, n)
+}
 
 // SlotService is the compose service name of base's replica in slot n:
 // base itself for slot 1 (so a deployment made before replicas existed
@@ -435,10 +481,11 @@ type rawService struct {
 	// ports and Docker ignores any `ports:` on it, so they are not read.
 	hostNetwork bool
 	// disabled: scale or deploy.replicas is 0, so nothing publishes its ports.
-	disabled  bool
-	count     int      // containers `up` starts: scale or deploy.replicas, else 1
-	dependsOn []string // the services it needs started first
-	ports     []rawPort
+	containerName string
+	disabled      bool
+	count         int      // containers `up` starts: scale or deploy.replicas, else 1
+	dependsOn     []string // the services it needs started first
+	ports         []rawPort
 }
 
 // portVar is one of PORT, DPORT and APORT as the environment has it: a
@@ -495,6 +542,7 @@ type serviceJSON struct {
 	NetworkMode json.RawMessage `json:"network_mode"`
 	Ports       json.RawMessage `json:"ports"`
 	Scale       json.RawMessage `json:"scale"`
+	Container   json.RawMessage `json:"container_name"`
 	DependsOn   json.RawMessage `json:"depends_on"`
 	Deploy      struct {
 		Replicas json.RawMessage `json:"replicas"`
@@ -577,9 +625,10 @@ func Parse(data []byte) (Topology, error) {
 			env:         s.Environment,
 			hostNetwork: jsonString(s.NetworkMode) == "host",
 			// `up` starts no container of a service scaled to 0.
-			disabled:  zero(s.Scale) || zero(s.Deploy.Replicas),
-			count:     containers(s.Scale, s.Deploy.Replicas),
-			dependsOn: dependencies(s.DependsOn),
+			disabled:      zero(s.Scale) || zero(s.Deploy.Replicas),
+			count:         containers(s.Scale, s.Deploy.Replicas),
+			containerName: jsonString(s.Container),
+			dependsOn:     dependencies(s.DependsOn),
 		}
 		var entries []json.RawMessage
 		if json.Unmarshal(s.Ports, &entries) != nil {
@@ -627,7 +676,7 @@ func (t Topology) Service(name string) (Service, error) {
 // still at their defaults. It reads nothing from the environment, so one
 // service's bad PORT cannot hide what it publishes.
 func (raw rawService) service() Service {
-	svc := Service{hostNetwork: raw.hostNetwork}
+	svc := Service{hostNetwork: raw.hostNetwork, containerName: raw.containerName}
 	for _, p := range raw.ports {
 		if raw.hostNetwork || (p.protocol != "" && !strings.EqualFold(p.protocol, "tcp")) {
 			continue
@@ -641,6 +690,7 @@ func (raw rawService) service() Service {
 			svc.published = append(svc.published, Publication{Target: target, Binding: Binding{HostIP: p.hostIP, Port: first, Last: last}})
 		case noHostPort:
 			svc.unfixed = append(svc.unfixed, target)
+			svc.unfixedIP = append(svc.unfixedIP, p.hostIP)
 		}
 	}
 	return svc

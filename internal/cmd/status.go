@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -49,6 +50,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Migrations applied: never (run `versola migrate`)")
 		}
+		fmt.Println(deploy.ReplicaSummary(st))
 		fmt.Println()
 	}
 

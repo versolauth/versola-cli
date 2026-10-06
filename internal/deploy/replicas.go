@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/versolauth/versola-cli/internal/fsutil"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -70,6 +71,9 @@ func writeReplica(buf *bytes.Buffer, composeFile string, r replica) error {
 	if r.Ports.HostNetwork() {
 		return nil // the host's own ports; `network_mode: host` comes from the base
 	}
+	if err := checkReplicable(r); err != nil {
+		return err
+	}
 	pubs, unfixed := r.Ports.Publications(), r.Ports.UnfixedPorts()
 	if len(pubs) == 0 && len(unfixed) == 0 {
 		buf.WriteString("    ports: !override []\n")
@@ -89,6 +93,16 @@ func writeReplica(buf *bytes.Buffer, composeFile string, r replica) error {
 			fmt.Fprintf(buf, "        host_ip: %s\n", quote(ip))
 		}
 		buf.WriteString("        protocol: tcp\n")
+	}
+	return nil
+}
+
+// checkReplicable refuses a replica whose base service publishes something
+// replicas.yml cannot carry over (UDP, a port range as the container port):
+// the replica would start without it, silently.
+func checkReplicable(r replica) error {
+	if sk := r.Ports.Skipped(); len(sk) > 0 {
+		return fmt.Errorf("%s publishes %s, which a replica cannot copy (only single TCP ports) -- remove it from the compose file's `ports:`, or do not run more than one %s", r.Base, strings.Join(sk, ", "), r.Base)
 	}
 	return nil
 }

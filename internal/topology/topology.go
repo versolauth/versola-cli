@@ -76,6 +76,11 @@ type Service struct {
 	// all of them).
 	unfixedIP []string
 
+	// skipped are the publications this does not model -- another protocol
+	// than TCP, a range as the container port -- described for a message.
+	// A replica cannot copy them (see Skipped).
+	skipped []string
+
 	// additionalBad: APORT is set to something that is not a port. Only
 	// auth binds APORT, so it is an error for auth alone (CheckAdditional);
 	// for the others the variable means nothing.
@@ -99,6 +104,12 @@ func (s Service) ContainerName() string { return s.containerName }
 // UnfixedPorts are the container ports published with no host port to name
 // (Compose picks one), in compose's order.
 func (s Service) UnfixedPorts() []int { return append([]int(nil), s.unfixed...) }
+
+// Skipped lists the base service's publications that are neither a TCP
+// port nor a range of host ports, so a replica generated from it would
+// silently lack them. Empty for a host-network service (`ports:` is ignored
+// there).
+func (s Service) Skipped() []string { return append([]string(nil), s.skipped...) }
 
 // UnfixedHostIP is the host address the i-th of UnfixedPorts is published
 // on, "" for every address.
@@ -368,6 +379,7 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		out.unfixed = append(out.unfixed, shift(t))
 		out.unfixedIP = append(out.unfixedIP, s.unfixedIP[i])
 	}
+	out.skipped = append(out.skipped, s.skipped...)
 	for _, p := range []int{out.Port, out.DiagnosticsPort} {
 		if p > 65535 {
 			return Service{}, fmt.Errorf("slot %d would need port %d, which is out of range", slot, p)
@@ -678,11 +690,16 @@ func (t Topology) Service(name string) (Service, error) {
 func (raw rawService) service() Service {
 	svc := Service{hostNetwork: raw.hostNetwork, containerName: raw.containerName}
 	for _, p := range raw.ports {
-		if raw.hostNetwork || (p.protocol != "" && !strings.EqualFold(p.protocol, "tcp")) {
+		if raw.hostNetwork {
+			continue
+		}
+		if p.protocol != "" && !strings.EqualFold(p.protocol, "tcp") {
+			svc.skipped = append(svc.skipped, fmt.Sprintf("%s/%s", string(p.target), strings.ToLower(p.protocol)))
 			continue
 		}
 		target, ok := plainPort(p.target)
 		if !ok {
+			svc.skipped = append(svc.skipped, fmt.Sprintf("%s (not a single port)", string(p.target)))
 			continue
 		}
 		switch first, last, kind := hostPorts(p.published); kind {

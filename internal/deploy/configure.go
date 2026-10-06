@@ -69,6 +69,10 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
 	}
 
+	if err := refuseWithReplicas(); err != nil {
+		return ConfigureResult{}, err
+	}
+
 	// vps: the reverse proxy's mode, and --auth-url validated and
 	// normalized against it (see proxy.ParseAuthURL) -- the normalized form
 	// is what versola-tools and the state record get from here on.

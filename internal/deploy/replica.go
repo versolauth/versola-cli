@@ -128,7 +128,10 @@ func hostPortsOf(r replica, hostNetwork bool) []int {
 		return ports
 	}
 	for _, p := range r.Ports.Publications() {
-		if !p.Binding.IsRange() {
+		// PortFree asks the loopback; a port on another address (127.0.0.2,
+		// a LAN address) says nothing about it.
+		onLoopback := p.HostIP == "" || p.HostIP == "127.0.0.1" || p.HostIP == "0.0.0.0"
+		if onLoopback && !p.Binding.IsRange() {
 			ports = append(ports, p.Binding.Port)
 		}
 	}
@@ -278,22 +281,25 @@ func (s *replicaScaler) add(service string, count int) error {
 // recorded slots back. It returns cause, with what could not be undone
 // appended.
 func (s *replicaScaler) undo(service, svc string, previous []state.Slot, cause error) error {
-	var left []string
 	// Before the file is rewritten: compose only knows the service while it
 	// is still in replicas.yml.
 	if err := s.ops.compose("stop", "-t", stopTimeoutSeconds, svc); err != nil {
-		left = append(left, fmt.Sprintf("couldn't stop %s: %v", svc, err))
+		return s.stuck(svc, cause, fmt.Sprintf("couldn't stop it: %v", err))
 	}
 	if err := s.ops.compose("rm", "-f", svc); err != nil {
-		left = append(left, fmt.Sprintf("couldn't remove %s: %v", svc, err))
+		return s.stuck(svc, cause, fmt.Sprintf("couldn't remove it: %v", err))
 	}
 	if err := s.record(service, previous); err != nil {
-		left = append(left, fmt.Sprintf("couldn't restore the recorded replicas: %v", err))
-	}
-	if len(left) > 0 {
-		return fmt.Errorf("%w (and cleaning up: %s)", cause, strings.Join(left, "; "))
+		return fmt.Errorf("%w (and couldn't restore the recorded replicas: %v)", cause, err)
 	}
 	return cause
+}
+
+// stuck is a replica that could not be taken down: it stays recorded, so
+// `versola replica remove` (or `versola down`) can still address it, and
+// its ports are not mistaken for free ones.
+func (s *replicaScaler) stuck(svc string, cause error, what string) error {
+	return fmt.Errorf("%w (and cleaning up %s: %s -- it stays recorded; stop it with `versola replica remove`)", cause, svc, what)
 }
 
 func (s *replicaScaler) partial(service string, added int, err error) error {
@@ -424,6 +430,11 @@ func CheckReplicaRequest(st *state.State, service string, count int, adding bool
 	}
 	if st.ProxyMode == "" || !proxy.HasUpstreamsFile(filepath.Dir(composePath)) {
 		return fmt.Errorf("this deployment's reverse proxy config predates replicas -- run `versola configure` again")
+	}
+	if !st.RunsFromCurrentBundle() {
+		// The containers still run from an earlier bundle: files written
+		// into this one would not reach them.
+		return fmt.Errorf("the running stack is not from this configuration yet -- run `versola up` first")
 	}
 	have := st.ActiveSlots(service)
 	if adding {

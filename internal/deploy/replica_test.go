@@ -9,6 +9,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
+	"github.com/versolauth/versola-cli/internal/topology"
 )
 
 // fakeOps records what a run does, in order, and fails the calls it is told
@@ -369,5 +370,45 @@ func TestCheckReplicaRequestRefusals(t *testing.T) {
 	}
 	if err := CheckReplicaRequest(st, AuthService, 0, true); err == nil {
 		t.Error("count 0")
+	}
+}
+
+// A replica that cannot be stopped is not forgotten: it stays recorded so
+// `replica remove` can still reach it, and nothing is rewritten.
+func TestAddKeepsTheRecordWhenCleanupCannotStop(t *testing.T) {
+	ops := newFakeOps()
+	ops.failOn["compose up -d --no-deps auth-2"] = errors.New("boom")
+	ops.failOn["compose stop -t 20 auth-2"] = errors.New("cannot stop")
+	s := testScaler(t, ops, nil)
+	err := s.add(AuthService, 1)
+	if err == nil || !strings.Contains(err.Error(), "stays recorded") {
+		t.Fatalf("error: %v", err)
+	}
+	if n := slotNumbers(s.slots[AuthService]); !reflect.DeepEqual(n, []int{1, 2}) {
+		t.Errorf("slot 2 must stay recorded: %v", n)
+	}
+	for _, e := range ops.events {
+		if strings.HasPrefix(e, "compose rm") {
+			t.Errorf("removed a container that did not stop: %s", e)
+		}
+	}
+	if !reflect.DeepEqual(ops.files, []string{"auth-2"}) {
+		t.Errorf("replicas.yml lists %v", ops.files)
+	}
+}
+
+func TestHostPortsOfSkipsOtherAddresses(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[
+		{"target":8081,"published":"8081","host_ip":"127.0.0.2"},
+		{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hostPortsOf(auth[0], false); !reflect.DeepEqual(got, []int{8180}) {
+		t.Errorf("only the loopback publication can be probed: %v", got)
 	}
 }

@@ -18,8 +18,9 @@ const (
 	// workers are not marked as shutting down until it has acted on it.
 	drainSettle = time.Second
 	// drainFallback is how long to wait when the proxy cannot be asked
-	// which workers are still finishing (no `ps` in the image).
-	drainFallback = 10 * time.Second
+	// which workers are still finishing (no `ps` in the image): the whole
+	// bound, since nothing says sooner is safe.
+	drainFallback = DrainTimeout
 )
 
 // WaitDrained waits until the workers a reload retired have finished the

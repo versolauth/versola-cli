@@ -193,3 +193,20 @@ func TestSaveSlotsKeepsTheRestOfTheRecord(t *testing.T) {
 		t.Errorf("slots after going back to one: %v", got.Slots)
 	}
 }
+
+func TestRunsFromCurrentBundle(t *testing.T) {
+	for name, c := range map[string]struct {
+		st   State
+		want bool
+	}{
+		"legacy layout":            {State{}, true},
+		"after a finished up":      {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-2"}}, true},
+		"configured, not yet up":   {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-1"}}, false},
+		"up started, not finished": {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-1", "bundle-2"}}, false},
+		"record before the field":  {State{BundleDir: "bundle-2"}, false},
+	} {
+		if got := c.st.RunsFromCurrentBundle(); got != c.want {
+			t.Errorf("%s: got %v, want %v", name, got, c.want)
+		}
+	}
+}

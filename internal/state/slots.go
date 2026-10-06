@@ -34,3 +34,16 @@ func SaveSlots(service string, slots []Slot) error {
 	s.SetSlots(service, slots)
 	return s.Save()
 }
+
+// RunsFromCurrentBundle reports whether the containers are known to run from
+// this record's own bundle: the last `up` finished (MarkRunning leaves just
+// that bundle). Between a configure and the next `up` the old bundle's
+// containers are still the ones serving, and files written into the new
+// bundle would not reach them. A legacy layout (no bundle directory) has
+// only one place files can be.
+func (s *State) RunsFromCurrentBundle() bool {
+	if s.BundleDir == "" {
+		return true
+	}
+	return len(s.MountedBundleDirs) == 1 && s.MountedBundleDirs[0] == s.BundleDir
+}

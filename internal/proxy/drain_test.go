@@ -22,7 +22,7 @@ func TestWaitDrained(t *testing.T) {
 			}
 			return outs[min(calls-1, len(outs)-1)], nil
 		}
-		waitDrained(ps, 30*time.Second, 500*time.Millisecond, 10*time.Second, func(d time.Duration) { slept += d })
+		waitDrained(ps, 30*time.Second, 500*time.Millisecond, 30*time.Second, func(d time.Duration) { slept += d })
 		return
 	}
 
@@ -37,7 +37,7 @@ func TestWaitDrained(t *testing.T) {
 		t.Errorf("never drains: %d calls, slept %v", calls, slept)
 	}
 	// ps unavailable: the fixed wait, once.
-	if calls, slept := run([]string{idle}, 1); calls != 1 || slept != drainSettle+10*time.Second {
+	if calls, slept := run([]string{idle}, 1); calls != 1 || slept != drainSettle+30*time.Second {
 		t.Errorf("no ps: %d calls, slept %v", calls, slept)
 	}
 }

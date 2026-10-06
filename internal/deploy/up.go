@@ -206,7 +206,14 @@ func Up(opts UpOptions, st *state.State) error {
 		// The upstreams follow the replicas recorded in state, whatever
 		// configure or the last `replica add|remove` wrote.
 		if proxy.HasUpstreamsFile(dir) {
-			if err := proxy.WriteUpstreams(dir, proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}); err != nil {
+			cfg := proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
+			// A migration of an older bundle that was cut off between its two
+			// writes left the upstreams defined twice: finish it, or the
+			// proxy cannot start.
+			if _, err := proxy.MigrateLegacyUpstreams(dir, cfg, nil); err != nil {
+				return fmt.Errorf("couldn't repair the reverse proxy's config: %w", err)
+			}
+			if err := proxy.WriteUpstreams(dir, cfg); err != nil {
 				return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
 			}
 		} else if len(authReplicas) > 1 || len(edgeReplicas) > 1 {

@@ -21,6 +21,7 @@ type fakeOps struct {
 	saved        map[string][]state.Slot
 	files        []string // services in the last replicas.yml
 	busy         map[int]error
+	legacy       bool // the proxy config is the old layout, migrated on first use
 }
 
 func newFakeOps() *fakeOps {
@@ -42,6 +43,16 @@ func (f *fakeOps) portFree(port int) error {
 func (f *fakeOps) waitDrained() { f.events = append(f.events, "drained") }
 func (f *fakeOps) reload(c proxy.Config) error {
 	return f.do("reload " + backends(c))
+}
+func (f *fakeOps) migrateProxy(c proxy.Config) (bool, error) {
+	if !f.legacy {
+		return false, nil
+	}
+	if err := f.do("migrate " + backends(c)); err != nil {
+		return false, err
+	}
+	f.legacy = false
+	return true, nil
 }
 func (f *fakeOps) writeUpstreams(c proxy.Config) error {
 	return f.do("upstreams " + backends(c))
@@ -410,5 +421,66 @@ func TestHostPortsOfSkipsOtherAddresses(t *testing.T) {
 	}
 	if got := hostPortsOf(auth[0], false); !reflect.DeepEqual(got, []int{8180}) {
 		t.Errorf("only the loopback publication can be probed: %v", got)
+	}
+}
+
+// A bundle from before upstreams.conf is moved to the new layout once the
+// request is known to be possible, and before the first replica is
+// recorded: from then on everything routes through the file.
+func TestAddMigratesALegacyProxyConfigFirst(t *testing.T) {
+	ops := newFakeOps()
+	ops.legacy = true
+	if err := testScaler(t, ops, nil).add(AuthService, 1); err != nil {
+		t.Fatal(err)
+	}
+	var first, migrate = -1, -1
+	for i, e := range ops.events {
+		if strings.HasPrefix(e, "migrate") {
+			migrate = i
+		}
+		if first < 0 && (strings.HasPrefix(e, "save") || strings.HasPrefix(e, "compose")) {
+			first = i
+		}
+	}
+	if migrate < 0 || first < 0 || migrate > first {
+		t.Fatalf("migrate at %d, first change at %d: %v", migrate, first, ops.events)
+	}
+	// It was given the layout as it is now: one replica each.
+	if ops.events[migrate] != "migrate auth=auth edge=edge" {
+		t.Errorf("migrated with %q", ops.events[migrate])
+	}
+	if ops.legacy {
+		t.Error("still legacy")
+	}
+}
+
+func TestAddStartsNothingWhenTheMigrationFails(t *testing.T) {
+	ops := newFakeOps()
+	ops.legacy = true
+	ops.failOn["migrate auth=auth edge=edge"] = errors.New("nginx rejected it")
+	err := testScaler(t, ops, nil).add(AuthService, 1)
+	if err == nil || !strings.Contains(err.Error(), "nginx rejected it") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, e := range ops.events {
+		if strings.HasPrefix(e, "save") || strings.HasPrefix(e, "compose") || strings.HasPrefix(e, "file") {
+			t.Errorf("changed something: %v", ops.events)
+		}
+	}
+}
+
+// Nothing is moved for a request that was going to be refused anyway.
+func TestAddDoesNotMigrateWhenThePreflightFails(t *testing.T) {
+	ops := newFakeOps()
+	ops.legacy = true
+	ops.busy[8180] = errors.New("in use")
+	ops.busy[8082+100] = errors.New("in use")
+	if err := testScaler(t, ops, nil).add(AuthService, 1); err == nil {
+		t.Fatal("the busy port should have refused it")
+	}
+	for _, e := range ops.events {
+		if strings.HasPrefix(e, "migrate") {
+			t.Fatalf("migrated before the preflight passed: %v", ops.events)
+		}
 	}
 }

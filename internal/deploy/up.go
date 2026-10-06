@@ -80,6 +80,11 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
+	if len(authReplicas) > 1 || len(edgeReplicas) > 1 {
+		if err := requireOverrideSupport(); err != nil {
+			return err
+		}
+	}
 	// Replicas past slot 1 are defined in replicas.yml next to the compose
 	// file (see replicasYAML); written before anything is started so the
 	// compose commands below see them.
@@ -197,6 +202,17 @@ func Up(opts UpOptions, st *state.State) error {
 			if err := removeLegacyGateway(); err != nil {
 				return err
 			}
+		}
+		// The upstreams follow the replicas recorded in state, whatever
+		// configure or the last `replica add|remove` wrote.
+		if proxy.HasUpstreamsFile(dir) {
+			if err := proxy.WriteUpstreams(dir, proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}); err != nil {
+				return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
+			}
+		} else if len(authReplicas) > 1 || len(edgeReplicas) > 1 {
+			// Configured by an older versola-cli: upstreams inline in
+			// versola.conf, for one replica each.
+			return fmt.Errorf("this deployment's reverse proxy config predates replicas -- run `versola configure` again")
 		}
 		if err := startProxy(composePath, st); err != nil {
 			return err

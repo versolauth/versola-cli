@@ -134,3 +134,62 @@ func TestFinalizeRefusesNewerSchema(t *testing.T) {
 		t.Errorf("a bundle of the newer state was pruned: %v", err)
 	}
 }
+
+func TestSetSlots(t *testing.T) {
+	st := &State{Version: "0.6.2"}
+	st.SetSlots("auth", []Slot{{N: 3, Version: "0.6.2"}, {N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}})
+	want := []Slot{{N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}, {N: 3, Version: "0.6.2"}}
+	if got := st.ActiveSlots("auth"); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// Back to the implicit single replica: nothing recorded.
+	st.SetSlots("auth", []Slot{{N: 1, Version: "0.6.2"}})
+	if st.Slots != nil {
+		t.Errorf("slots still recorded: %v", st.Slots)
+	}
+	// Another service's record survives.
+	st.SetSlots("edge", []Slot{{N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}})
+	st.SetSlots("auth", []Slot{{N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}})
+	st.SetSlots("auth", []Slot{{N: 1, Version: "0.6.2"}})
+	if len(st.Slots["edge"]) != 2 || st.Slots["auth"] != nil {
+		t.Errorf("slots: %v", st.Slots)
+	}
+	// One replica at another version is not the implicit state.
+	st.SetSlots("auth", []Slot{{N: 2, Version: "0.6.2"}})
+	if len(st.Slots["auth"]) != 1 {
+		t.Errorf("slot 2 alone must be recorded: %v", st.Slots)
+	}
+}
+
+func TestSaveSlotsKeepsTheRestOfTheRecord(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{SchemaVersion: SchemaVersion, Target: "vps", Version: "0.6.2", AuthURL: "https://id.example.com", ProxyMode: "nginx"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSlots("auth", []Slot{{N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AuthURL != "https://id.example.com" || got.ProxyMode != "nginx" || len(got.ActiveSlots("auth")) != 2 {
+		t.Errorf("state: %+v", got)
+	}
+	if err := SaveSlots("auth", []Slot{{N: 1, Version: "0.6.2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = Load(); got.Slots != nil {
+		t.Errorf("slots after going back to one: %v", got.Slots)
+	}
+}

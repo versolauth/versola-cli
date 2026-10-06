@@ -95,17 +95,13 @@ func checkBackends(name, mode string, backends []Backend) error {
 // deployment bundle. Reload rewrites it alone.
 const UpstreamsFile = "proxy/conf.d/upstreams.conf"
 
-// Files renders the proxy's files, keyed by their path relative to the
-// deployment bundle.
-func (c Config) Files() (map[string][]byte, error) {
-	if err := validMode(c.Mode); err != nil {
-		return nil, err
-	}
+// checkUpstreams: both upstreams are valid nginx blocks and share no address.
+func (c Config) checkUpstreams() error {
 	if err := checkBackends("auth", c.Mode, c.Auth); err != nil {
-		return nil, err
+		return err
 	}
 	if err := checkBackends("edge", c.Mode, c.Edge); err != nil {
-		return nil, err
+		return err
 	}
 	// The same address in both would send auth traffic to edge (or back).
 	edgeAddrs := map[string]bool{}
@@ -114,8 +110,59 @@ func (c Config) Files() (map[string][]byte, error) {
 	}
 	for _, a := range upstreamAddrs(c.Mode, c.Auth) {
 		if edgeAddrs[a] {
-			return nil, fmt.Errorf("the auth and edge upstreams both route to %s", a)
+			return fmt.Errorf("the auth and edge upstreams both route to %s", a)
 		}
+	}
+	return nil
+}
+
+// Upstreams renders the upstreams file alone (UpstreamsFile): what Reload
+// and `up` rewrite when the replicas change. It needs only the mode and the
+// backends, not the rest of the proxy's configuration.
+func (c Config) Upstreams() ([]byte, error) {
+	if err := validMode(c.Mode); err != nil {
+		return nil, err
+	}
+	if err := c.checkUpstreams(); err != nil {
+		return nil, err
+	}
+	return render("templates/upstreams.conf.tmpl", map[string]any{
+		"Resolve":       c.Mode == ModeLocal,
+		"AuthUpstreams": upstreamAddrs(c.Mode, c.Auth),
+		"EdgeUpstreams": upstreamAddrs(c.Mode, c.Edge),
+	})
+}
+
+// HasUpstreamsFile reports whether the bundle keeps its upstreams in
+// UpstreamsFile. A bundle configured by an older versola-cli has them inline
+// in versola.conf instead, and a second definition next to it would make
+// nginx refuse the config.
+func HasUpstreamsFile(bundleDir string) bool {
+	_, err := os.Stat(filepath.Join(bundleDir, UpstreamsFile))
+	return err == nil
+}
+
+// WriteUpstreams rewrites the upstreams file in the bundle, atomically.
+func WriteUpstreams(bundleDir string, c Config) error {
+	b, err := c.Upstreams()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(bundleDir, UpstreamsFile)
+	if err := fsutil.WriteFileAtomic(path, b, 0o644); err != nil {
+		return fmt.Errorf("couldn't write %s: %w", path, err)
+	}
+	return nil
+}
+
+// Files renders the proxy's files, keyed by their path relative to the
+// deployment bundle.
+func (c Config) Files() (map[string][]byte, error) {
+	if err := validMode(c.Mode); err != nil {
+		return nil, err
+	}
+	if err := c.checkUpstreams(); err != nil {
+		return nil, err
 	}
 	tls := c.AuthURL.TLS(c.Mode)
 	if tls && c.Resolvers == "" {
@@ -239,18 +286,24 @@ func Write(bundleDir string, c Config) error {
 // worker_shutdown_timeout in nginx.conf). If nginx rejects the new file the
 // old one is put back, so the bundle never holds a config the next start of
 // the proxy would fail on, and the running proxy is untouched.
+// The docker calls Reload makes, replaceable in tests.
+var (
+	dockerOutput = docker.Output
+	dockerRun    = docker.Run
+)
+
 func Reload(bundleDir string, c Config) error {
-	files, err := c.Files()
+	content, err := c.Upstreams()
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(bundleDir, UpstreamsFile)
 	old, readErr := os.ReadFile(path)
-	if err := fsutil.WriteFileAtomic(path, files[UpstreamsFile], 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(path, content, 0o644); err != nil {
 		return fmt.Errorf("couldn't write %s: %w", path, err)
 	}
 	name := ContainerFor(c.Mode)
-	if _, err := docker.Output("exec", name, "nginx", "-t"); err != nil {
+	if _, err := dockerOutput("exec", name, "nginx", "-t"); err != nil {
 		if readErr == nil {
 			_ = fsutil.WriteFileAtomic(path, old, 0o644)
 		} else if os.IsNotExist(readErr) {
@@ -263,7 +316,7 @@ func Reload(bundleDir string, c Config) error {
 		}
 		return fmt.Errorf("nginx rejected the new upstreams (the proxy keeps its old ones): %w", err)
 	}
-	if err := docker.Run("exec", name, "nginx", "-s", "reload"); err != nil {
+	if err := dockerRun("exec", name, "nginx", "-s", "reload"); err != nil {
 		return fmt.Errorf("nginx accepted the new upstreams but the reload failed (the proxy keeps routing to the old ones; the bundle has the new): %w", err)
 	}
 	return nil

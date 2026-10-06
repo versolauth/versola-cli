@@ -15,9 +15,14 @@ import (
 const versolaConfFile = "proxy/conf.d/versola.conf"
 
 var (
-	legacyUpstreamBlock = regexp.MustCompile(`(?ms)^upstream[ \t]+(?:auth_backend|edge_backend)[ \t]*\{.*?^\}[ \t]*\r?\n`)
-	legacyResolverLine  = regexp.MustCompile(`(?m)^[ \t]*resolver[ \t]+127\.0\.0\.11\b[^;\r\n]*;[ \t]*\r?\n`)
-	anyUpstreamBlock    = regexp.MustCompile(`(?m)^\s*upstream\s+\w+\s*\{`)
+	// An upstream block holds no nested braces, so it ends at the first `}`
+	// whatever its indentation or a trailing comment: the match can never
+	// run on into the map/server blocks that follow.
+	legacyUpstreamBlock = regexp.MustCompile(`(?m)^[ \t]*upstream[ \t]+(?:auth_backend|edge_backend)[ \t]*\{[^{}]*\}[ \t]*(?:#[^\r\n]*)?\r?\n`)
+	// Exactly the line local's old template wrote: a TLS resolver (vps, the
+	// host's own list) is a different directive and stays.
+	legacyResolverLine = regexp.MustCompile(`(?m)^[ \t]*resolver[ \t]+127\.0\.0\.11[ \t]+valid=10s[ \t]+ipv6=off;[ \t]*\r?\n`)
+	anyUpstreamBlock   = regexp.MustCompile(`(?m)^\s*upstream\s+\w+\s*\{`)
 )
 
 // MigrateLegacyUpstreams moves a bundle written by a versola-cli from before
@@ -50,7 +55,11 @@ func MigrateLegacyUpstreams(bundleDir string, c Config, check func() error) (boo
 	if len(migrated) == len(old) {
 		return false, errors.New("the reverse proxy's versola.conf has no upstream blocks this versola-cli recognizes -- run `versola configure` again")
 	}
-	migrated = legacyResolverLine.ReplaceAll(migrated, nil)
+	if c.Mode == ModeLocal {
+		// Only local's upstreams.conf carries a resolver (the one these
+		// lines moved to); in nginx mode the line, if any, is the ACME one.
+		migrated = legacyResolverLine.ReplaceAll(migrated, nil)
+	}
 	if anyUpstreamBlock.Match(migrated) {
 		return false, errors.New("the reverse proxy's versola.conf has upstream blocks this versola-cli doesn't recognize -- run `versola configure` again")
 	}

@@ -135,19 +135,76 @@ func TestMigrateLegacyUpstreamsFinishesAnInterruptedOne(t *testing.T) {
 	}
 }
 
-// The resolver line is found however it was indented or what addresses
-// and options it lists after 127.0.0.11.
+// The resolver line is the one local's old template wrote, however it was
+// indented; anything else naming 127.0.0.11 is not ours to remove.
 func TestLegacyResolverLineVariants(t *testing.T) {
 	for _, line := range []string{
 		"resolver 127.0.0.11 valid=10s ipv6=off;\r\n",
-		"  resolver 127.0.0.11  valid=10s;\n",
-		"resolver 127.0.0.11;\n",
+		"  resolver 127.0.0.11  valid=10s ipv6=off;\n",
 	} {
 		if !legacyResolverLine.MatchString(line) {
 			t.Errorf("not matched: %q", line)
 		}
 	}
-	if legacyResolverLine.MatchString("resolver 8.8.8.8 1.1.1.1 ipv6=off;\n") {
-		t.Error("a vps TLS resolver must stay")
+	for _, line := range []string{
+		"resolver 8.8.8.8 1.1.1.1 ipv6=off;\n",
+		"resolver 127.0.0.11 8.8.8.8 ipv6=off;\n",
+		"resolver 127.0.0.11;\n",
+	} {
+		if legacyResolverLine.MatchString(line) {
+			t.Errorf("matched: %q", line)
+		}
+	}
+}
+
+// nginx mode: the TLS resolver stays even when the host's list starts with
+// 127.0.0.11 -- only local's upstreams.conf has a resolver of its own.
+func TestMigrateKeepsATlsResolverThatNamesDockerDns(t *testing.T) {
+	dir := legacyBundle(t, false)
+	confPath := filepath.Join(dir, versolaConfFile)
+	b, _ := os.ReadFile(confPath)
+	tls := "resolver 127.0.0.11 valid=10s ipv6=off;\r\n"
+	if err := os.WriteFile(confPath, append([]byte(tls), b...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Mode: ModeNginx, Auth: []Backend{{Service: "auth", Port: 8080}}, Edge: []Backend{{Service: "edge", Port: 8095}}}
+	if _, err := MigrateLegacyUpstreams(dir, c, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(confPath)
+	if !strings.Contains(string(got), "resolver 127.0.0.11") {
+		t.Errorf("the resolver was removed:\n%s", got)
+	}
+}
+
+// A closing brace that is indented or followed by a comment still ends the
+// block: what follows it (the map, the servers) is never cut out with it.
+func TestMigrateStopsAtTheBlocksOwnBrace(t *testing.T) {
+	for name, closing := range map[string]string{"indented": "    }\r\n", "comment": "} # edge\r\n"} {
+		t.Run(name, func(t *testing.T) {
+			dir := legacyBundle(t, false)
+			confPath := filepath.Join(dir, versolaConfFile)
+			b, _ := os.ReadFile(confPath)
+			edited := strings.Replace(string(b), "server 127.0.0.1:8095;\r\n    keepalive 32;\r\n}\r\n", "server 127.0.0.1:8095;\r\n    keepalive 32;\r\n"+closing, 1)
+			if edited == string(b) {
+				t.Fatal("fixture not edited")
+			}
+			if err := os.WriteFile(confPath, []byte(edited), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c := Config{Mode: ModeNginx, Auth: []Backend{{Service: "auth", Port: 8080}}, Edge: []Backend{{Service: "edge", Port: 8095}}}
+			if _, err := MigrateLegacyUpstreams(dir, c, nil); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := os.ReadFile(confPath)
+			for _, want := range []string{"map $http_host $versola_host", "proxy_pass http://auth_backend"} {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("%q was cut out:\n%s", want, got)
+				}
+			}
+			if anyUpstreamBlock.Match(got) {
+				t.Errorf("upstream left:\n%s", got)
+			}
+		})
 	}
 }

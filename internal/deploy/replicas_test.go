@@ -276,3 +276,17 @@ func TestReplicasYAMLKeepsHostIPOfUnfixedPort(t *testing.T) {
 		t.Errorf("missing %q in\n%s", want, b)
 	}
 }
+
+func TestReplicasYAMLRefusesUnreplicablePorts(t *testing.T) {
+	topo, err := topology.Parse([]byte(`{"services":{"auth":{"ports":[{"target":8081,"published":"8081"},{"target":5353,"published":"5353","protocol":"udp"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := replicasYAML("compose.yml", auth); err == nil || !strings.Contains(err.Error(), "5353/udp") {
+		t.Errorf("want an error naming the udp port, got %v", err)
+	}
+}

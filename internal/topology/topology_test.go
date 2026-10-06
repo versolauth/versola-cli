@@ -946,3 +946,23 @@ func TestPublicationsReachedFrom(t *testing.T) {
 		t.Errorf("got %v, want %v: edge's dependencies, transitively, and neither the helpers nor edge itself", names, want)
 	}
 }
+
+// Publications a replica cannot carry over are reported, not dropped.
+func TestSkippedPublications(t *testing.T) {
+	topo := mustParse(t, `{"services":{"auth":{"ports":[
+		{"target":8081,"published":"8081","protocol":"tcp"},
+		{"target":5353,"published":"5353","protocol":"udp"},
+		{"target":"9000-9002","published":"9000-9002"}]},
+	"host":{"network_mode":"host","ports":[{"target":5353,"published":"5353","protocol":"udp"}]}}}`)
+	got := mustService(t, topo, "auth").Skipped()
+	if len(got) != 2 || !strings.Contains(got[0], "5353/udp") || !strings.Contains(got[1], "9000-9002") {
+		t.Errorf("skipped: %v", got)
+	}
+	if got := mustService(t, topo, "host").Skipped(); len(got) != 0 {
+		t.Errorf("host network ignores ports: %v", got)
+	}
+	s2, err := mustService(t, topo, "auth").ForSlot(2)
+	if err != nil || len(s2.Skipped()) != 2 {
+		t.Errorf("a slot keeps the list: %v %v", s2.Skipped(), err)
+	}
+}

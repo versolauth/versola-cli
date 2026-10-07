@@ -113,6 +113,12 @@ func resolveSecrets(dir, target string) (newPostgresPassword string, err error) 
 		}
 		candidates[service], existing[service] = c, e
 	}
+	// The `utils` key pair is settled before any service's secrets are merged, because it
+	// decides which public half central is offered. Its private half is stored apart from the
+	// service paths (see utilsService) and left in the bundle directory for the operator.
+	if err := resolveUtilsKey(ctx, client, dir, target, existing["central"], candidates["central"]); err != nil {
+		return "", err
+	}
 	if services := conflictingPostgresPasswords(existing); services != nil {
 		return "", fmt.Errorf("OpenBao holds different Postgres passwords for %s, but they all log in as the same Postgres role, so at least one of them can't connect. "+
 			"This CLI can't tell which one the role actually has, so it won't pick one: set the same, correct %s under secret/versola/%s/<service> for each of them, then re-run configure",

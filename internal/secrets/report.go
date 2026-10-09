@@ -142,7 +142,7 @@ func explain(target string, p Problem) string {
 			"Set the same, correct value under secret/versola/%s/<service> for each of them.", name, services, clean(target))
 	case ProblemUnknownState:
 		return fmt.Sprintf("%s (%s) is not in OpenBao, and this machine has no record of a deployment, so it cannot be told whether the secret is new or lost. "+
-			"It is not generated. Restore it from a backup; if nothing depends on it, it can be generated after an explicit confirmation.", name, services)
+			"It is not generated. Restore it from a backup.", name, services)
 	case ProblemVaultEmpty:
 		return fmt.Sprintf("this machine has a deployment record for %s, but OpenBao holds no secrets at all: it looks wiped, or is not the OpenBao that deployment used. "+
 			"%s (%s) is not generated. Restore OpenBao from a backup.", clean(target), name, services)

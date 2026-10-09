@@ -16,6 +16,8 @@ var postgresHost string
 var setupOpenBao bool
 var bootstrapProxy string
 var bootstrapACMEStaging bool
+var bootstrapGenerateMissing []string
+var bootstrapAllowLegacy bool
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -51,6 +53,11 @@ config schema) — that lives entirely in the versioned "versola-tools"
 image, which this command pulls and runs to generate everything the
 compose stack needs. See the project design doc, section 3.5.
 
+Before it writes any secret, configure (the first of those steps) works
+out what it may do about each one and stops, with nothing written, if a
+secret looks lost or a key pair is only half stored -- see "versola
+configure --help" for --generate-missing and --allow-legacy-secrets.
+
 Internally this runs "configure", "migrate", and "up" in order, asking
 for confirmation only once up front on vps rather than once per step.
 Run those separately instead of bootstrap when a deployment (e.g. onto
@@ -66,6 +73,8 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
+	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
+	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
@@ -143,7 +152,8 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 
 	res, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging})
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging},
+		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {
 		return err
 	}

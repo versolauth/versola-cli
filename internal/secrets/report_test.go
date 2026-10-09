@@ -184,15 +184,6 @@ func TestRenderText(t *testing.T) {
 			}
 		}
 	})
-	t.Run("the report says it is a preview", func(t *testing.T) {
-		var buf bytes.Buffer
-		if err := RenderText(&buf, "1", scs["upgrade"]); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(buf.String(), "does not apply this plan yet") {
-			t.Errorf("%s", buf.String())
-		}
-	})
 	t.Run("a stopped plan says why and that nothing is applied", func(t *testing.T) {
 		var buf bytes.Buffer
 		if err := RenderText(&buf, "0.6.3", scs["lost"]); err != nil {
@@ -246,7 +237,7 @@ func TestRenderText(t *testing.T) {
 		for _, r := range scs {
 			for _, p := range r.Problems {
 				seen[p.Kind] = true
-				if msg := explain(r.Target, p); msg == string(p.Kind) || len(msg) < 30 {
+				if msg := explain(r, p); msg == string(p.Kind) || len(msg) < 30 {
 					t.Errorf("%s has no explanation: %q", p.Kind, msg)
 				}
 			}

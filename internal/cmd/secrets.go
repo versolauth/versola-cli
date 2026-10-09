@@ -180,6 +180,7 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 }
 
 var secretsPlanJSON bool
+var secretsPlanGenerateMissing []string
 
 var secretsPlanCmd = &cobra.Command{
 	Use:   "plan <target> <version>",
@@ -195,9 +196,8 @@ generating a new one would make that data unreadable.
   versola secrets plan vps 0.6.3 --json
 
 It only reads: nothing is written to OpenBao or to this machine's
-deployment. This is a preview: configure does not follow the plan yet
-(it still keeps a stored value and takes a generated one for anything
-missing). It exits
+deployment. It is the plan "versola configure" works out and follows
+before it writes a secret (see "versola configure --help"). It exits
 with a non-zero status when the plan has problems.
 
 Secret values are never printed or logged, in either format: the output
@@ -216,7 +216,7 @@ func runSecretsPlan(cmd *cobra.Command, args []string) error {
 
 	// Progress (and the tools container's own output) goes to stderr, so
 	// that stdout is the report and nothing else -- parseable with --json.
-	res, err := deploy.PlanSecrets(context.Background(), target, version, os.Stderr)
+	res, err := deploy.PlanSecrets(context.Background(), target, version, secretsPlanGenerateMissing, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -238,5 +238,12 @@ func init() {
 	secretsCmd.AddCommand(secretsLoginCmd)
 	secretsCmd.AddCommand(secretsTestCmd)
 	secretsCmd.AddCommand(secretsPlanCmd)
+	secretsPlanCmd.Flags().StringSliceVar(&secretsPlanGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	secretsPlanCmd.Flags().BoolVar(&secretsPlanJSON, "json", false, "print the report as JSON (same content, no secret values)")
 }
+
+// The flag texts shared by configure, bootstrap and secrets plan.
+const (
+	generateMissingUsage = "NAME[,NAME...]: secrets that may be generated although the plan would stop for them (one that looks lost, or an install of unknown origin); a key group is generated only if every member is named"
+	allowLegacyUsage     = "configure a release that has no secret schema by the old rule (anything missing from OpenBao is generated, lost or not) although OpenBao already holds secrets"
+)

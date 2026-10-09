@@ -34,7 +34,11 @@ import (
 //
 // Version 0 is reserved for deployments made before state.json existed at
 // all, which recorded only a bare "version" file — see Load.
-const SchemaVersion = 1
+//
+// Version 2 added SecretsRevision. A CLI that reads only version 1 refuses a
+// version 2 file (see Load) rather than load it and drop the field on its next
+// Save.
+const SchemaVersion = 2
 
 const stateFileName = "state.json"
 
@@ -164,12 +168,9 @@ type State struct {
 	// existed, and the schema's own baseline; read it through
 	// EffectiveSecretsRevision, never directly.
 	//
-	// Only READ so far. Nothing writes it yet: the step that applies a plan
-	// will, and Finalize -- which builds a fresh State and carries over only
-	// MountedBundleDirs -- must then carry it over too (or set it), or every
-	// `configure` would reset it to 1. That step should also raise SchemaVersion:
-	// a CLI that predates this field loads and re-saves state (MarkStarting,
-	// MarkRunning) and would silently drop it.
+	// Written by Finalize (see there): the revision of the schema the deployment
+	// was configured with, never lowered by deploying an older release, and
+	// kept when a release has no schema at all.
 	SecretsRevision int `json:"secretsRevision,omitempty"`
 }
 
@@ -295,12 +296,25 @@ func Prepare() (string, error) {
 // existed a moment ago -- never at a bundle directory that's only
 // half-written, and never at nothing.
 //
+// secretsRevision (FinalizeWithRevision) is the revision of the secrets schema this configure settled
+// secrets against, 0 when the release has none. It is recorded as the larger of
+// that and the previous record's for the same target: deploying an older
+// release must not make secrets that a newer one added look "new" again, and a
+// release without a schema says nothing, so the record keeps what it had.
+//
 // bundleDir is the full path Prepare returned; only its base name ends up
 // stored (see State.BundleDir's own comment on why). keep names further
 // bundles to leave in place: containers this record doesn't track, like
 // OpenBao, which outlives the deployments and keeps mounting its
 // openbao.hcl from the bundle it was started from.
 func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...string) error {
+	return FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode, 0, keep...)
+}
+
+// FinalizeWithRevision is Finalize for a configure that settled secrets
+// against a schema: secretsRevision is that schema's revision, 0 when the
+// release has none (then the previous record's is kept). Finalize is this with 0.
+func FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode string, secretsRevision int, keep ...string) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -332,6 +346,10 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...str
 	// without MountedBundleDirs (written before that field existed) can't
 	// tell whether its bundle is in use, so it's assumed to be -- keeping
 	// one extra directory is harmless, deleting a mounted one isn't.
+	s.SecretsRevision = secretsRevision
+	if prevErr == nil && prev.Target == target && prev.SecretsRevision > s.SecretsRevision {
+		s.SecretsRevision = prev.SecretsRevision
+	}
 	if prevErr == nil {
 		s.MountedBundleDirs = prev.MountedBundleDirs
 		if prev.MountedBundleDirs == nil && prev.BundleDir != "" {
@@ -340,6 +358,15 @@ func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...str
 	}
 	if err := s.Save(); err != nil {
 		return err
+	}
+	// The deployment is recorded: the install is no longer unfinished. A failure
+	// to remove the note is harmless -- a record for this target outranks it --
+	// but is reported, not swallowed.
+	// Only this target's: a note for another target is about another install.
+	if note, err := LoadPending(); err == nil && note != nil && note.Target == target {
+		if err := ClearPending(); err != nil {
+			fmt.Printf("(%v -- safe to delete by hand)\n", err)
+		}
 	}
 
 	// Everything else goes: the previous configure's bundle if it was never

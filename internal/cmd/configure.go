@@ -15,6 +15,8 @@ var configurePostgresHost string
 var configureSetupOpenBao bool
 var configureProxy string
 var configureACMEStaging bool
+var configureGenerateMissing []string
+var configureAllowLegacy bool
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -48,6 +50,15 @@ start or stop any of Versola's own services, but it does replace this
 machine's record of which deployment is the current one, which is what
 "versola status", "down" and "uninstall" all act on.
 
+Before it writes any secret, configure works out what it may do about
+each one (the same plan "versola secrets plan" prints) and stops, with
+nothing written, if a secret looks lost, a key pair is only half stored,
+or this is an install of unknown origin -- generating a new value there
+would make stored data unreadable. --generate-missing NAME[,NAME...]
+confirms that the named secrets may be generated anyway;
+--allow-legacy-secrets lets a release that has no secret schema be
+configured by the old rule ("anything missing is generated").
+
 This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a
 database migration needs to be its own explicit, reviewable step rather
@@ -61,6 +72,8 @@ func init() {
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
+	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
+	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
 }
 
@@ -144,7 +157,8 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging})
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging},
+		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
 	return err
 }
 

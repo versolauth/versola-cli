@@ -51,10 +51,10 @@ func TestPlanDir(t *testing.T) {
 
 func TestPlanSecretsRefusesBadInputBeforeDoingAnything(t *testing.T) {
 	var log bytes.Buffer
-	if _, err := PlanSecrets(context.Background(), "k8s", "0.6.3", &log); err == nil || !strings.Contains(err.Error(), "unsupported target") {
+	if _, err := PlanSecrets(context.Background(), "k8s", "0.6.3", nil, &log); err == nil || !strings.Contains(err.Error(), "unsupported target") {
 		t.Errorf("target: %v", err)
 	}
-	if _, err := PlanSecrets(context.Background(), "vps", "", &log); err == nil {
+	if _, err := PlanSecrets(context.Background(), "vps", "", nil, &log); err == nil {
 		t.Error("an empty version must be refused")
 	}
 	if log.Len() != 0 {

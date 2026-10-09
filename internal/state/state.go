@@ -152,6 +152,34 @@ type State struct {
 	// replica in slot 1: carrying replicas across a re-configure is up to
 	// whatever adds replicas (0c's later steps) and rolling upgrades (0d).
 	Slots map[string][]Slot `json:"slots,omitempty"`
+
+	// SecretsRevision is the revision of secrets.schema.json (the schema's
+	// own "revision" field, not its format version) this deployment's secrets
+	// were last settled against: which secrets it was deployed knowing about.
+	// `versola secrets plan` compares it with each secret's `since` to tell a
+	// secret that is new in the version being deployed (generate it) from one
+	// that existed and is now missing from OpenBao (stop).
+	//
+	// Absent, or 0, means revision 1 -- every deployment made before this field
+	// existed, and the schema's own baseline; read it through
+	// EffectiveSecretsRevision, never directly.
+	//
+	// Only READ so far. Nothing writes it yet: the step that applies a plan
+	// will, and Finalize -- which builds a fresh State and carries over only
+	// MountedBundleDirs -- must then carry it over too (or set it), or every
+	// `configure` would reset it to 1. That step should also raise SchemaVersion:
+	// a CLI that predates this field loads and re-saves state (MarkStarting,
+	// MarkRunning) and would silently drop it.
+	SecretsRevision int `json:"secretsRevision,omitempty"`
+}
+
+// EffectiveSecretsRevision is the schema revision this deployment recorded,
+// with an absent record read as 1.
+func (s *State) EffectiveSecretsRevision() int {
+	if s.SecretsRevision < 1 {
+		return 1
+	}
+	return s.SecretsRevision
 }
 
 // Slot is one deployed replica of a service: its slot number and the

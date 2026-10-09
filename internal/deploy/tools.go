@@ -90,6 +90,14 @@ func OpenbaoContainerName(target string) string {
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
 func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
+	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost)
+}
+
+// pullAndRunToolsTo is pullAndRunTools with the container's stdout sent to
+// stdout instead of always to this process's own: a command that prints a
+// machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
+// so the progress of the pull does not end up inside the result.
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -205,6 +213,7 @@ func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
 	}
 	args = append(args, "-v", dir+":/out", image)
 	c := docker.Cmd(args...)
+	c.Stdout = stdout
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := c.Run(); err != nil {

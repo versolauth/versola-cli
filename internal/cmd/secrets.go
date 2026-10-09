@@ -11,7 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/openbao"
+	"github.com/versolauth/versola-cli/internal/secrets"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -177,7 +179,64 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var secretsPlanJSON bool
+
+var secretsPlanCmd = &cobra.Command{
+	Use:   "plan <target> <version>",
+	Short: "Show what configure would do with each secret, without doing it",
+	Long: `plan reads what OpenBao holds for <target>, runs <version>'s
+versola-tools into a temporary directory to learn which secrets that
+release has and what it would generate, and prints, for every secret,
+whether configure would keep it, create it, or has to stop — for example
+because a secret that data depends on is missing from OpenBao and
+generating a new one would make that data unreadable.
+
+  versola secrets plan vps 0.6.3
+  versola secrets plan vps 0.6.3 --json
+
+It only reads: nothing is written to OpenBao or to this machine's
+deployment. This is a preview: configure does not follow the plan yet
+(it still keeps a stored value and takes a generated one for anything
+missing). It exits
+with a non-zero status when the plan has problems.
+
+Secret values are never printed or logged, in either format: the output
+names secrets and actions only. --json prints the same report in a
+machine-readable form.
+
+It needs the AppRole credentials from "versola secrets login <target>"
+(OpenBao must be running), a running Docker, and pulls <version>'s
+versola-tools image, which configure would pull anyway.`,
+	Args: cobra.ExactArgs(2),
+	RunE: runSecretsPlan,
+}
+
+func runSecretsPlan(cmd *cobra.Command, args []string) error {
+	target, version := args[0], args[1]
+
+	// Progress (and the tools container's own output) goes to stderr, so
+	// that stdout is the report and nothing else -- parseable with --json.
+	res, err := deploy.PlanSecrets(context.Background(), target, version, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if secretsPlanJSON {
+		err = secrets.RenderJSON(os.Stdout, version, res)
+	} else {
+		err = secrets.RenderText(os.Stdout, version, res)
+	}
+	if err != nil {
+		return err
+	}
+	if !res.OK() {
+		return fmt.Errorf("the plan has %d problem(s): nothing would be applied", len(res.Problems))
+	}
+	return nil
+}
+
 func init() {
 	secretsCmd.AddCommand(secretsLoginCmd)
 	secretsCmd.AddCommand(secretsTestCmd)
+	secretsCmd.AddCommand(secretsPlanCmd)
+	secretsPlanCmd.Flags().BoolVar(&secretsPlanJSON, "json", false, "print the report as JSON (same content, no secret values)")
 }

@@ -98,50 +98,73 @@ func SecretPath(target, service string) string {
 	return fmt.Sprintf("versola/%s/%s", target, service)
 }
 
+// SecretRecord is what a KV v2 read returns: the fields stored at a path and
+// the version of the record they came from.
+type SecretRecord struct {
+	Data map[string]string
+	// Version is KV v2's own number for this record (1 for the first write, +1
+	// for every later one). A later write can pass it back as `cas`
+	// (check-and-set) to be refused if someone else wrote in between.
+	Version int
+}
+
 // ReadSecret fetches the fields stored at path (see SecretPath), or
 // ok=false if nothing has been written there yet — callers use that to
 // tell "generate this for the first time" apart from a real error.
+//
+// It is ReadSecretVersioned without the version, kept so that callers that
+// don't need one stay as they are.
 func (c *Client) ReadSecret(ctx context.Context, path string) (data map[string]string, ok bool, err error) {
+	rec, ok, err := c.ReadSecretVersioned(ctx, path)
+	return rec.Data, ok, err
+}
+
+// ReadSecretVersioned is ReadSecret that also reports the record's version.
+// When ok is false the record is the zero value (no data, version 0).
+func (c *Client) ReadSecretVersioned(ctx context.Context, path string) (rec SecretRecord, ok bool, err error) {
 	url := fmt.Sprintf("%s/v1/%s/data/%s", c.address, kvMount, path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false, fmt.Errorf("couldn't build OpenBao read request: %w", err)
+		return SecretRecord{}, false, fmt.Errorf("couldn't build OpenBao read request: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", c.token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, false, fmt.Errorf("couldn't reach OpenBao at %s: %w", c.address, err)
+		return SecretRecord{}, false, fmt.Errorf("couldn't reach OpenBao at %s: %w", c.address, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, false, nil
+		return SecretRecord{}, false, nil
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false, fmt.Errorf("couldn't read OpenBao's response: %w", err)
+		return SecretRecord{}, false, fmt.Errorf("couldn't read OpenBao's response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("OpenBao read failed (%s): %s", resp.Status, string(body))
+		return SecretRecord{}, false, fmt.Errorf("OpenBao read failed (%s): %s", resp.Status, string(body))
 	}
 
 	var readResp struct {
 		Data struct {
-			Data map[string]string `json:"data"`
+			Data     map[string]string `json:"data"`
+			Metadata struct {
+				Version int `json:"version"`
+			} `json:"metadata"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &readResp); err != nil {
-		return nil, false, fmt.Errorf("couldn't parse OpenBao's response: %w", err)
+		return SecretRecord{}, false, fmt.Errorf("couldn't parse OpenBao's response: %w", err)
 	}
 	// A path whose every version has been deleted (not just never written)
 	// also 200s, with an empty inner "data" — treat that the same as 404,
 	// since either way there's nothing to read.
 	if len(readResp.Data.Data) == 0 {
-		return nil, false, nil
+		return SecretRecord{}, false, nil
 	}
-	return readResp.Data.Data, true, nil
+	return SecretRecord{Data: readResp.Data.Data, Version: readResp.Data.Metadata.Version}, true, nil
 }
 
 // WriteSecret stores data at path (see SecretPath), creating a new

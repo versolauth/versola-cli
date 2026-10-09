@@ -268,7 +268,9 @@ func readDotenv(path string) (map[string]string, error) {
 
 	result := make(map[string]string)
 	scanner := bufio.NewScanner(f)
+	lineNo := 0
 	for scanner.Scan() {
+		lineNo++
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -278,7 +280,8 @@ func readDotenv(path string) (map[string]string, error) {
 		// characters. The key itself never contains one.
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return nil, fmt.Errorf("couldn't parse %s: malformed line %q", path, line)
+			// The line number, not the line: it holds (part of) a secret value.
+			return nil, fmt.Errorf("couldn't parse %s: malformed line %d", path, lineNo)
 		}
 		result[key] = value
 	}

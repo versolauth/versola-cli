@@ -54,7 +54,7 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions) (ConfigureResult, error) {
+func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -306,7 +306,8 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// never handed in that mode — see develop.md's OpenBao section for
 	// the manual `bao operator unseal` step.
 	fmt.Println("Resolving secrets (OpenBao)...")
-	newPgPassword, err := resolveSecrets(dir, target)
+	secretsOut, err := resolveSecrets(dir, target, version, secretOpts)
+	newPgPassword := secretsOut.NewPostgresPassword
 	if err != nil {
 		// Stored but configure failed after that: the next configure
 		// sees the password as already stored and won't mention it, so
@@ -368,7 +369,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, err
 	}
 
-	if err := state.Finalize(target, version, dir, authURL, proxyOpts.Mode, openbaoBundles()...); err != nil {
+	if err := state.FinalizeWithRevision(target, version, dir, authURL, proxyOpts.Mode, secretsOut.Revision, openbaoBundles()...); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

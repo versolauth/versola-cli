@@ -29,6 +29,12 @@ type Options struct {
 	// generated although the rules would stop (lost, or unknown state). It is
 	// a confirmation about NAMES; it never makes a group complete.
 	GenerateMissing map[string]bool
+	// InstallInProgress says this machine has begun a first install of this
+	// target that never finished (see state.Pending): nothing has been started
+	// on these secrets yet, so whatever the store holds was written by that
+	// attempt, and the first-install rules apply to the rest. Ignored when
+	// prev is a usable record, and on local.
+	InstallInProgress bool
 }
 
 // StateKind is what Plan concluded about this deployment from the machine's
@@ -43,6 +49,10 @@ const (
 	// StateAlarm: a record for this target, but the store holds nothing --
 	// wiped, or the wrong OpenBao.
 	StateAlarm StateKind = "alarm"
+	// StateInstalling: no record, but this machine began a first install that
+	// did not finish. The first-install rules apply although the store may hold
+	// part of what that attempt wrote.
+	StateInstalling StateKind = "installing"
 	// StateUnknown: no record, but the store holds secrets -- an install from
 	// before records, another machine, or a lost ~/.versola.
 	StateUnknown StateKind = "unknown"
@@ -54,8 +64,12 @@ const (
 type ActionKind string
 
 const (
-	ActionCreate    ActionKind = "create"
-	ActionKeep      ActionKind = "keep"
+	ActionCreate ActionKind = "create"
+	ActionKeep   ActionKind = "keep"
+	// ActionReplace: overwrite a stored value with this run's candidate. Only for
+	// a key group left half-written by an interrupted first install (see
+	// StateInstalling): the group is generated again as a whole.
+	ActionReplace   ActionKind = "replace"
 	ActionOrphan    ActionKind = "orphan"
 	ActionSkipUtils ActionKind = "skip-utils"
 )
@@ -80,6 +94,9 @@ const (
 	ReasonForcedByFlag  Reason = "forced-by-flag"
 	ReasonFillShared    Reason = "fill-shared"
 	ReasonLocal         Reason = "local-throwaway"
+	// ReasonRestartInstall: a key group an interrupted run left half-written,
+	// generated again whole.
+	ReasonRestartInstall Reason = "restart-install"
 )
 
 // Action is one decision about one (service, name). It names what happens and
@@ -171,6 +188,8 @@ func (r Result) OK() bool { return len(r.Problems) == 0 }
 //	                   recorded revision); otherwise it is lost
 //	yes     empty      alarm: the store looks wiped; stop
 //	none    not empty  unknown: cannot tell new from lost; stop
+//	none    any, and an unfinished first install is recorded (opts.InstallInProgress)
+//	           installing: as first install -- nothing has run on these secrets
 //
 // Decisions worth knowing:
 //   - Target local is a throwaway stack: its first-install-only secrets are
@@ -185,6 +204,10 @@ func (r Result) OK() bool { return len(r.Problems) == 0 }
 //     differ are an error; a copy missing where others are stored is filled with
 //     the stored value.
 //   - A group is all or nothing: stored in part is an error, never completed.
+//     The exception is a group an interrupted run left half-written and that
+//     nothing can depend on -- an unfinished first install (StateInstalling), or
+//     a group new since the deployed revision: it is generated again whole,
+//     replacing the half that was written.
 //
 // Plan reads its inputs and returns a fresh Result; it never keeps or returns a
 // value.
@@ -215,6 +238,8 @@ func Plan(schema *Schema, candidates, existing Values, prev *Previous, opts Opti
 	switch {
 	case opts.Target == "local":
 		res.State = StateLocal
+	case !usable && opts.InstallInProgress:
+		res.State = StateInstalling
 	case !usable && vaultEmpty:
 		res.State = StateFirstInstall
 	case usable && !vaultEmpty:
@@ -272,6 +297,7 @@ func Plan(schema *Schema, candidates, existing Values, prev *Previous, opts Opti
 		}
 	}
 	blocked := map[string]bool{} // groups reported as partial
+	restart := map[string]bool{} // partial groups of an unfinished first install, generated again whole
 	for group, members := range groups {
 		// Partial is decided per member (stored anywhere, or not at all); the
 		// labels say where each copy actually is.
@@ -291,6 +317,20 @@ func Plan(schema *Schema, candidates, existing Values, prev *Previous, opts Opti
 					missing = append(missing, label)
 				}
 			}
+		}
+		if anyStored && anyAbsent && groupGenerable(members) &&
+			(res.State == StateInstalling || (res.State == StateUpgrade && allNewSince(members, deployed))) {
+			// An interrupted run wrote some of the group's members and not the rest
+			// (a group's members sit in different services, and the services are
+			// written one after another). Either it was a first install, or an
+			// upgrade whose release added this group: in both nothing depends on what
+			// was written -- configure never starts Versola's services, state.json is
+			// written last, and a group that is new since the deployed revision was
+			// never in use. So the whole group is generated again, from this run's
+			// one consistent set of candidates. Completing it from candidates alone
+			// would pair a stored half with a fresh one that does not match it.
+			restart[group] = true
+			continue
 		}
 		if anyStored && anyAbsent {
 			sort.Strings(present)
@@ -333,6 +373,33 @@ func Plan(schema *Schema, candidates, existing Values, prev *Previous, opts Opti
 		}
 		if spec.Group != nil && blocked[*spec.Group] {
 			continue // already reported as a whole
+		}
+
+		if spec.Group != nil && restart[*spec.Group] {
+			seenCand := map[string]bool{}
+			for _, service := range spec.Services {
+				if v, ok := candidates[service][spec.Name]; ok {
+					seenCand[v] = true
+				}
+			}
+			switch {
+			case len(seenCand) == 0:
+				problem(ProblemNoCandidate, spec)
+				continue
+			case len(seenCand) > 1:
+				problem(ProblemCandidateConflict, spec)
+				continue
+			}
+			for _, service := range spec.Services {
+				kind := ActionCreate
+				if _, ok := stored(service, spec.Name); ok {
+					kind = ActionReplace
+				}
+				res.Actions = append(res.Actions, Action{
+					Service: service, Name: spec.Name, Kind: kind, Source: SourceGenerated, Reason: ReasonRestartInstall,
+				})
+			}
+			continue
 		}
 
 		// A shared secret is one value: the stored copies have to agree.
@@ -445,6 +512,28 @@ func Plan(schema *Schema, candidates, existing Values, prev *Previous, opts Opti
 	return res
 }
 
+// allNewSince: every member of the group first appeared after the deployed
+// revision, so nothing that was deployed can depend on it.
+func allNewSince(members []Spec, deployed int) bool {
+	for _, m := range members {
+		if m.SinceRevision() <= deployed {
+			return false
+		}
+	}
+	return true
+}
+
+// groupGenerable: every member of the group may be generated (none is supplied
+// by the operator, none has a policy this build does not know).
+func groupGenerable(members []Spec) bool {
+	for _, m := range members {
+		if m.OnMissing != Generate && m.OnMissing != GenerateOnFirstInstallOnly {
+			return false
+		}
+	}
+	return true
+}
+
 // whyGenerate answers, for a secret with no stored value: may this run
 // generate it, and if so on what grounds -- or, if not, which problem to
 // report. External secrets are handled by the caller.
@@ -456,7 +545,7 @@ func whyGenerate(spec Spec, state StateKind, deployed int, opts Options) (Reason
 		switch state {
 		case StateLocal:
 			return ReasonLocal, ""
-		case StateFirstInstall:
+		case StateFirstInstall, StateInstalling:
 			return ReasonFirstInstall, ""
 		case StateUpgrade:
 			if spec.SinceRevision() > deployed {

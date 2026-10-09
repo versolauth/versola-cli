@@ -61,14 +61,12 @@ func RenderText(w io.Writer, version string, r Result) error {
 	if len(r.Problems) > 0 {
 		fmt.Fprintf(&b, "\nProblems (%d):\n", len(r.Problems))
 		for _, p := range r.Problems {
-			fmt.Fprintf(&b, "  %s: %s\n", p.Kind, explain(r.Target, p))
+			fmt.Fprintf(&b, "  %s: %s\n", p.Kind, explain(r, p))
 		}
 		b.WriteString("\nResult: NOT OK — nothing would be applied.\n")
 	} else {
 		b.WriteString("\nResult: OK\n")
 	}
-	// Said every time: this is a preview, and `configure` does not follow it yet.
-	b.WriteString("This is a preview: `versola configure` does not apply this plan yet; it still keeps a stored value and takes a generated one for anything missing.\n")
 	_, err := io.WriteString(w, b.String())
 	return err
 }
@@ -81,6 +79,8 @@ func describeState(s StateKind) string {
 		return "upgrade (a deployment record exists, OpenBao holds secrets)"
 	case StateAlarm:
 		return "ALARM: a deployment record exists but OpenBao holds no secrets"
+	case StateInstalling:
+		return "first install in progress (an earlier attempt did not finish; nothing has been started on its secrets)"
 	case StateUnknown:
 		return "UNKNOWN: no deployment record, but OpenBao already holds secrets"
 	case StateLocal:
@@ -93,6 +93,8 @@ func describeAction(a Action) string {
 	switch a.Kind {
 	case ActionCreate:
 		return "create (" + string(a.Source) + ", " + describeReason(a.Reason) + ")"
+	case ActionReplace:
+		return "replace (" + string(a.Source) + ", " + describeReason(a.Reason) + ")"
 	case ActionKeep:
 		return "keep"
 	case ActionOrphan:
@@ -117,13 +119,16 @@ func describeReason(r Reason) string {
 		return "shared with a service that has it"
 	case ReasonLocal:
 		return "local is throwaway"
+	case ReasonRestartInstall:
+		return "an interrupted run left this key group half-written; it is generated again whole"
 	}
 	return string(r)
 }
 
 // explain is the one-line meaning of a problem. It is assembled from fixed text
 // and names only.
-func explain(target string, p Problem) string {
+func explain(r Result, p Problem) string {
+	target := r.Target
 	name := clean(p.Name)
 	services := strings.Join(cleanAll(p.Services), ", ")
 	switch p.Kind {

@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"bytes"
 	"reflect"
 	"sort"
 	"testing"
@@ -767,4 +768,139 @@ func TestPlanGroupPartialLabelsSayWhereTheCopiesAre(t *testing.T) {
 		!reflect.DeepEqual(got[0].Missing, []string{"central/SHARED", "edge/OTHER"}) {
 		t.Errorf("%+v", r.Problems)
 	}
+}
+
+// An unfinished first install (state.Pending) makes the first-install rules
+// apply although the store already holds part of what it wrote.
+func TestPlanInstallInProgress(t *testing.T) {
+	s := mustLoad(t, vpsFixture, "vps")
+	opts := Options{Target: "vps", InstallInProgress: true}
+
+	t.Run("a store the interrupted install half-filled is completed, not reported unknown", func(t *testing.T) {
+		// auth was written, central and edge were not: every secret of those two
+		// is missing, none of them groups that span services.
+		existing := Values{"auth": storedFor(s)["auth"]}
+		delete(existing["auth"], "JWT_PRIVATE_KEY") // keep the jwt group whole (both halves missing)
+		r := Plan(s, candidatesFor(s), existing, nil, opts)
+		if r.State != StateInstalling {
+			t.Fatalf("state %s", r.State)
+		}
+		for _, p := range r.Problems {
+			if p.Kind == ProblemUnknownState || p.Kind == ProblemLost {
+				t.Errorf("unexpected %+v", p)
+			}
+		}
+		wantCreate(t, r, "central", "CENTRAL_RESOURCE_SECRET", SourceGenerated, ReasonFirstInstall)
+	})
+	t.Run("without the record of an unfinished install the same store is unknown", func(t *testing.T) {
+		existing := Values{"auth": storedFor(s)["auth"]}
+		r := Plan(s, candidatesFor(s), existing, nil, Options{Target: "vps"})
+		if r.State != StateUnknown || len(problemsOf(r, ProblemUnknownState)) == 0 {
+			t.Fatalf("%s %+v", r.State, r.Problems)
+		}
+	})
+	t.Run("a usable record wins over the unfinished-install flag", func(t *testing.T) {
+		r := Plan(s, candidatesFor(s), storedFor(s, "PASSWORDS_SECRET"), vps1, opts)
+		if r.State != StateUpgrade || len(problemsOf(r, ProblemLost)) != 1 {
+			t.Fatalf("%s %+v", r.State, r.Problems)
+		}
+	})
+	t.Run("a record of another target does not make the flag stale", func(t *testing.T) {
+		r := Plan(s, candidatesFor(s), Values{}, &Previous{Target: "local", Revision: 1}, opts)
+		if r.State != StateInstalling {
+			t.Fatalf("%s", r.State)
+		}
+	})
+	t.Run("local ignores it", func(t *testing.T) {
+		local := mustLoad(t, localFixture, "local")
+		r := Plan(local, candidatesFor(local), Values{}, nil, Options{Target: "local", InstallInProgress: true})
+		if r.State != StateLocal {
+			t.Fatalf("%s", r.State)
+		}
+	})
+	t.Run("a key group the interrupted install left half-written is generated again whole", func(t *testing.T) {
+		// The jwt group spans auth and central: auth was written, central was not.
+		existing := Values{"auth": {"JWT_PRIVATE_KEY": "stored"}}
+		r := Plan(s, candidatesFor(s), existing, nil, opts)
+		if len(problemsOf(r, ProblemGroupPartial)) != 0 {
+			t.Fatalf("%+v", r.Problems)
+		}
+		// The stored half is replaced and the missing half created, from the same
+		// run's candidates: a stored half completed by a fresh one would not match.
+		a, ok := find(r, ActionReplace, "auth", "JWT_PRIVATE_KEY")
+		if !ok || a.Source != SourceGenerated || a.Reason != ReasonRestartInstall {
+			t.Errorf("replace: %+v %v", a, ok)
+		}
+		wantCreate(t, r, "central", "JWKS_JSON", SourceGenerated, ReasonRestartInstall)
+		if _, kept := find(r, ActionKeep, "auth", "JWT_PRIVATE_KEY"); kept {
+			t.Error("the stored half must not be kept")
+		}
+	})
+	t.Run("the edge-key group, split between central and edge, is restarted too", func(t *testing.T) {
+		existing := Values{"central": {"EDGE_PUBLIC_JWK": "stored"}}
+		r := Plan(s, candidatesFor(s), existing, nil, opts)
+		if _, ok := find(r, ActionReplace, "central", "EDGE_PUBLIC_JWK"); !ok {
+			t.Errorf("%+v", r.Actions)
+		}
+		wantCreate(t, r, "edge", "EDGE_PRIVATE_KEY", SourceGenerated, ReasonRestartInstall)
+		wantCreate(t, r, "edge", "EDGE_KEY_ID", SourceGenerated, ReasonRestartInstall)
+	})
+	t.Run("a whole group stored is kept, and a group stored nowhere is generated as first install", func(t *testing.T) {
+		r := Plan(s, candidatesFor(s), storedFor(s), nil, opts)
+		if len(r.Problems) != 0 || count(r, ActionReplace) != 0 {
+			t.Fatalf("%+v", r)
+		}
+		r = Plan(s, candidatesFor(s), Values{"auth": {"AUTH_CODES_SECRET": "x"}}, nil, opts)
+		wantCreate(t, r, "auth", "JWT_PRIVATE_KEY", SourceGenerated, ReasonFirstInstall)
+	})
+	t.Run("a group is not restarted without the note, on upgrade, or with a record of this target", func(t *testing.T) {
+		existing := Values{"auth": {"JWT_PRIVATE_KEY": "stored"}}
+		for name, r := range map[string]Result{
+			"no note":    Plan(s, candidatesFor(s), existing, nil, Options{Target: "vps"}),
+			"upgrade":    Plan(s, candidatesFor(s), existing, vps1, opts),
+			"the record": Plan(s, candidatesFor(s), existing, vps1, Options{Target: "vps"}),
+		} {
+			if len(problemsOf(r, ProblemGroupPartial)) != 1 || count(r, ActionReplace) != 0 {
+				t.Errorf("%s: %+v", name, r.Problems)
+			}
+		}
+	})
+	t.Run("a restarted group still needs one consistent candidate for every member", func(t *testing.T) {
+		cands := candidatesFor(s)
+		delete(cands["central"], "JWKS_JSON")
+		r := Plan(s, cands, Values{"auth": {"JWT_PRIVATE_KEY": "stored"}}, nil, opts)
+		if got := problemNames(r, ProblemNoCandidate); len(got) != 1 || got[0] != "JWKS_JSON" {
+			t.Errorf("%+v", r.Problems)
+		}
+	})
+	t.Run("a group whose members the operator supplies is never regenerated", func(t *testing.T) {
+		ext := &Schema{SchemaVersion: 1, Target: "vps", Secrets: []Spec{
+			{Name: "K_PRIV", Services: []string{"auth"}, Group: ptr("k"), OnMissing: External},
+			{Name: "K_PUB", Services: []string{"central"}, Group: ptr("k"), OnMissing: External},
+		}}
+		r := Plan(ext, Values{"auth": {"K_PRIV": "c"}, "central": {"K_PUB": "c"}}, Values{"auth": {"K_PRIV": "stored"}}, nil, opts)
+		if len(problemsOf(r, ProblemGroupPartial)) != 1 || count(r, ActionReplace) != 0 {
+			t.Errorf("%+v", r)
+		}
+	})
+	t.Run("the report says what is replaced and why, without a value", func(t *testing.T) {
+		r := Plan(s, withMarker(candidatesFor(s)), withMarker(Values{"auth": {"JWT_PRIVATE_KEY": "stored"}}), nil, opts)
+		var b bytes.Buffer
+		if err := RenderText(&b, "1", r); err != nil {
+			t.Fatal(err)
+		}
+		out := b.String()
+		if !contains2(out, "replace (generated, an interrupted run") || contains2(out, marker) {
+			t.Errorf("%s", out)
+		}
+	})
+}
+
+func contains2(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

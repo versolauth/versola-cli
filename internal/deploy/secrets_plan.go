@@ -39,7 +39,7 @@ const (
 // "plan-" and it is safe to delete by hand).
 //
 // Progress goes to log, never to stdout: the caller prints the result.
-func PlanSecrets(ctx context.Context, target, version string, log io.Writer) (secrets.Result, error) {
+func PlanSecrets(ctx context.Context, target, version string, generateMissing []string, log io.Writer) (secrets.Result, error) {
 	if target != "local" && target != "vps" {
 		return secrets.Result{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -69,14 +69,9 @@ func PlanSecrets(ctx context.Context, target, version string, log io.Writer) (se
 		existing[service] = data
 	}
 
-	// The machine's record. A broken or newer-than-this-CLI state is an error:
-	// guessing "no record" there would make a plan out of nothing.
-	var prev *secrets.Previous
-	switch st, err := state.Load(); {
-	case err == nil:
-		prev = &secrets.Previous{Target: st.Target, Revision: st.EffectiveSecretsRevision()}
-	case errors.Is(err, state.ErrNotConfigured):
-	default:
+	// The machine's record, and its note of an unfinished first install.
+	prev, installing, err := loadPrevious(target)
+	if err != nil {
 		return secrets.Result{}, err
 	}
 
@@ -121,7 +116,32 @@ func PlanSecrets(ctx context.Context, target, version string, log io.Writer) (se
 		candidates[service] = c
 	}
 
-	return secrets.Plan(schema, candidates, existing, prev, secrets.Options{Target: target}), nil
+	opts := SecretOptions{GenerateMissing: generateMissing}
+	return secrets.Plan(schema, candidates, existing, prev, secrets.Options{
+		Target:            target,
+		GenerateMissing:   opts.generateSet(),
+		InstallInProgress: installing,
+	}), nil
+}
+
+// loadPrevious is what this machine knows about the target's earlier
+// configures: the record of the deployment (nil if none) and whether a first
+// install of this target was begun and not finished. A broken or
+// newer-than-this-CLI state, or an unreadable note, is an error: guessing "none"
+// there would make a plan out of nothing.
+func loadPrevious(target string) (prev *secrets.Previous, installing bool, err error) {
+	switch st, err := state.Load(); {
+	case err == nil:
+		prev = &secrets.Previous{Target: st.Target, Revision: st.EffectiveSecretsRevision()}
+	case errors.Is(err, state.ErrNotConfigured):
+	default:
+		return nil, false, err
+	}
+	note, err := state.LoadPending()
+	if err != nil {
+		return nil, false, err
+	}
+	return prev, note != nil && note.Target == target, nil
 }
 
 // planDir makes the 0700 temporary directory under ~/.versola that holds one

@@ -225,6 +225,105 @@ first, describing what that particular step is about to do. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
+### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
+
+`configure` (and so `bootstrap`) keeps Versola's secrets in OpenBao, under
+`secret/data/versola/<target>/<service>`. Each release ships a
+`secrets.schema.json` that lists every secret, which services use it, and
+what to do when it is missing: generate it, generate it **only on the first
+install**, or expect you to provide it (`external`). Keys that make data
+unreadable if replaced (JWT signing keys, the edge key, the utils client
+key) are the "first install only" kind: once a deployment is running, the CLI
+never invents a new one for you.
+
+Before it writes anything, `configure` builds a plan from three facts: what
+the schema says, what OpenBao holds now, and which schema revision this
+machine last deployed (recorded in `~/.versola`). If the plan has a problem,
+**nothing is written**.
+
+| State | Meaning | What `configure` does |
+|---|---|---|
+| `first-install` | no record here, OpenBao empty | generates everything the schema asks for |
+| `upgrade` | deployed before, OpenBao filled | keeps what is there; generates only secrets new in this release |
+| `alarm` | deployed before, OpenBao **empty** | stops: the secrets look lost |
+| `installing` | an earlier install here did not finish | continues it (a half-written key group is generated again as a whole) |
+| `unknown` | no record here, OpenBao not empty | stops: it cannot tell a new secret from a lost one |
+| `local` | `local` target (throwaway) | generates anything missing |
+
+Versola's secret **values are never printed** by `configure`, `bootstrap`, or
+`secrets plan` — only names and decisions. The one thing `configure` does
+print is the AppRole `role-id`/`secret-id` of OpenBao itself (also saved in
+`~/.versola/openbao/<target>.json`), by the team lead's decision.
+
+#### `versola secrets plan <target> <version>`
+
+Shows what `configure` would do, without doing it. Read-only: it reads
+OpenBao, runs `versola-tools` into a temporary directory (deleted
+afterwards), and prints one line per secret: `keep`, `create`, or a stop.
+Run it before upgrading a production deployment.
+
+```
+versola secrets login vps        # once: AppRole credentials
+versola secrets plan vps 0.7.0
+versola secrets plan vps 0.7.0 --json
+```
+
+- Needs the AppRole credentials, Docker, and the `versola-tools` image.
+- Progress goes to stderr, the report to stdout.
+- Exit code is non-zero when the plan has problems
+  (`the plan has N problem(s): nothing would be applied`).
+- `--json` prints the same report for scripts:
+  `{version, ok, target, state, schemaRevision, deployedRevision?, actions[], problems[]}`.
+  Actions are `{service, name, action, source?, reason?}`; problems are
+  `{kind, name?, service?, services?, group?, present?, missing?}`.
+  It never contains a value.
+- A release that predates the schema (no `secrets.schema.json`) cannot be
+  planned; the command says so.
+
+Problems that mean a broken schema or release rather than a decision for you
+(`shared-conflict`, `no-candidate`, `candidate-conflict`, `unknown-secret`,
+`invalid-schema`) are reported the same way; they usually need a fixed release.
+
+Typical problems:
+
+| Problem | Meaning | What to do |
+|---|---|---|
+| `lost` | a first-install-only secret is missing though the deployment exists | restore it from a backup; a new one would make existing data unreadable |
+| `group-partial` | part of a key group (e.g. a JWT key pair) is present | restore the missing half, or use `--generate-missing` if the data is expendable |
+| `vault-empty-with-state` | this machine has a record, OpenBao is empty | check that you point at the right OpenBao; restore it |
+| `unknown-state` | OpenBao has secrets, this machine has no record | `secrets plan` to inspect; then seed by hand or `--generate-missing` |
+| `external-missing` | a secret you must supply is absent | write it to OpenBao yourself |
+
+#### `--generate-missing NAME[,NAME...]`
+
+Available on `configure`, `bootstrap`, and `secrets plan`. Allows the named
+secrets to be generated although the plan would stop for them (one that
+looks lost, or an install of unknown origin). A key group is generated only
+if **every** member is named. Use it when you know the old value is gone
+for good, never as a routine flag.
+
+```
+versola configure vps 0.7.0 --auth-url https://id.example.com \
+  --postgres-host 127.0.0.1:5432 --generate-missing <NAME>,<NAME>
+```
+
+`<NAME>` is a secret name exactly as `secrets plan` prints it.
+
+#### `--allow-legacy-secrets`
+
+Available on `configure` and `bootstrap`. For a release **without** a secret
+schema the CLI falls back to the old rule: anything missing from OpenBao is
+generated. That is dangerous when OpenBao already holds secrets (a missing
+one may be lost, not new), so the CLI refuses unless you pass this flag.
+`local` does not need it, nor does retrying your own unfinished install.
+
+#### Upgrading the CLI
+
+A CLI that records the schema revision writes its state file in `~/.versola`
+in **layout 2**. An older CLI cannot read it and stops with a "newer schema"
+error: after the first `configure` with this CLI, do not go back to an older
+one on the same machine.
+
 ### Deploying to a VPS: the reverse proxy
 
 On `vps`, Versola is exposed through its own reverse proxy: the official

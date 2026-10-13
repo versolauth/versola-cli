@@ -26,12 +26,25 @@ services:
     ports:
       - "127.0.0.1:{{ .LocalPort }}:{{ .LocalPort }}"
 {{- end }}
+{{- if .Generations }}
+    # vps: the configuration is not this bundle's files but the proxy's own
+    # directory, outside every bundle: generations of the whole config
+    # (admin console included) and a `current` link to the one in use. A
+    # whole directory, so that switching `current` and `nginx -s reload`
+    # reach the running nginx -- a file bind-mounted on its own keeps
+    # showing the container its old copy. The same path on every configure,
+    # so a new bundle does not recreate the container either.
+    command: ["nginx", "-c", {{ .ConfPath }}, "-g", "daemon off;"]
+    volumes:
+      - {{ .GenerationsMount }}
+{{- else }}
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./proxy/conf.d:/etc/nginx/conf.d:ro
       - ./proxy/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
       # The built admin console, copied into this bundle by versola-tools.
       - ./central-ui:/usr/share/nginx/html/central/admin:ro
+{{- end }}
 {{- if .TLS }}
       - {{ .ACMEVolume }}:/var/cache/nginx/acme-letsencrypt
 

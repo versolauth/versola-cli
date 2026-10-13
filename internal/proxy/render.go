@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -32,7 +34,28 @@ type Config struct {
 	// the deployment's compose file (package topology), not from here.
 	Auth []Backend
 	Edge []Backend
+
+	// Fronts, vps only: the loopback addresses the proxy takes over in front
+	// of auth's APORT and MPORT, balancing them over Auth's AdditionalPort
+	// and MutualTLSPort. Zero: none (local, where every container has its
+	// own ports and edge reaches auth by name).
+	Fronts Fronts
+
+	// GenerationsDir, vps only: the host directory the proxy's configuration
+	// lives in, as generations (see generation.go), instead of the bundle.
+	// Empty: the bundle's files are mounted as they are (local).
+	GenerationsDir string
 }
+
+// Fronts are the ports the proxy listens on, on 127.0.0.1, in front of
+// auth's additional (APORT) and mutual-TLS (MPORT) listeners: the ports
+// the compose file gives auth, which edge and central connect to.
+type Fronts struct {
+	Additional int
+	MutualTLS  int
+}
+
+func (f Fronts) set() bool { return f.Additional != 0 || f.MutualTLS != 0 }
 
 // Backend is one replica an upstream routes to.
 type Backend struct {
@@ -42,6 +65,10 @@ type Backend struct {
 	Service string
 	// Port is the replica's PORT: the one carrying application traffic.
 	Port int
+	// AdditionalPort and MutualTLSPort: an auth replica's APORT and MPORT,
+	// when the proxy is in front of them (Config.Fronts); 0 otherwise.
+	AdditionalPort int
+	MutualTLSPort  int
 }
 
 // upstreamAddrs returns the `server` address of each backend: on the
@@ -113,24 +140,110 @@ func (c Config) checkUpstreams() error {
 			return fmt.Errorf("the auth and edge upstreams both route to %s", a)
 		}
 	}
+	return c.checkFronts()
+}
+
+// checkFronts: the proxy in front of auth's APORT/MPORT needs both ports,
+// on vps, and every auth replica's own pair -- none of them the proxy's own
+// port, which would send the proxy's requests back to itself.
+func (c Config) checkFronts() error {
+	if !c.Fronts.set() {
+		return nil
+	}
+	if c.Mode == ModeLocal {
+		return fmt.Errorf("the proxy only fronts auth's APORT/MPORT on vps")
+	}
+	front := map[int]string{}
+	for name, p := range map[string]int{"APORT": c.Fronts.Additional, "MPORT": c.Fronts.MutualTLS} {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("the proxy's %s front is on port %d, which is not a port", name, p)
+		}
+		front[p] = name
+	}
+	if len(front) != 2 {
+		return fmt.Errorf("the proxy's APORT and MPORT fronts are both on port %d", c.Fronts.Additional)
+	}
+	seen := map[int]bool{}
+	for _, b := range c.Auth {
+		for name, p := range map[string]int{"APORT": b.AdditionalPort, "MPORT": b.MutualTLSPort} {
+			if p < 1 || p > 65535 {
+				return fmt.Errorf("auth replica %s has %s %d, which is not a port", b.Service, name, p)
+			}
+			if f, ok := front[p]; ok {
+				return fmt.Errorf("auth replica %s listens for %s on %d, where the proxy itself listens for %s", b.Service, name, p, f)
+			}
+			if seen[p] {
+				return fmt.Errorf("auth's APORT/MPORT upstreams list port %d twice", p)
+			}
+			seen[p] = true
+		}
+	}
 	return nil
 }
 
-// Upstreams renders the upstreams file alone (UpstreamsFile): what Reload
-// and `up` rewrite when the replicas change. It needs only the mode and the
-// backends, not the rest of the proxy's configuration.
-func (c Config) Upstreams() ([]byte, error) {
+// InternalFile and StreamFile are the proxy's fronts of auth's APORT and
+// MPORT (vps), relative to the deployment bundle like UpstreamsFile. They
+// are written with it, and absent when there are no fronts.
+const (
+	InternalFile = "proxy/conf.d/internal.conf"
+	StreamFile   = "proxy/stream.d/auth-mtls.conf"
+)
+
+// dynamicData is what the files that change with the replicas are
+// rendered from.
+func (c Config) dynamicData() map[string]any {
+	var additional, mutual []string
+	for _, b := range c.Auth {
+		additional = append(additional, fmt.Sprintf("127.0.0.1:%d", b.AdditionalPort))
+		mutual = append(mutual, fmt.Sprintf("127.0.0.1:%d", b.MutualTLSPort))
+	}
+	return map[string]any{
+		"Resolve":             c.Mode == ModeLocal,
+		"AuthUpstreams":       upstreamAddrs(c.Mode, c.Auth),
+		"EdgeUpstreams":       upstreamAddrs(c.Mode, c.Edge),
+		"Fronted":             c.Fronts.set(),
+		"AdditionalListen":    c.Fronts.Additional,
+		"MutualTLSListen":     c.Fronts.MutualTLS,
+		"AdditionalUpstreams": additional,
+		"MutualTLSUpstreams":  mutual,
+	}
+}
+
+// DynamicFiles renders the files that change with the replicas, keyed by
+// their path relative to the bundle: UpstreamsFile always, InternalFile and
+// StreamFile when the proxy fronts auth's APORT/MPORT. It needs only the
+// mode, the backends and the fronts, not the rest of the configuration.
+func (c Config) DynamicFiles() (map[string][]byte, error) {
 	if err := validMode(c.Mode); err != nil {
 		return nil, err
 	}
 	if err := c.checkUpstreams(); err != nil {
 		return nil, err
 	}
-	return render("templates/upstreams.conf.tmpl", map[string]any{
-		"Resolve":       c.Mode == ModeLocal,
-		"AuthUpstreams": upstreamAddrs(c.Mode, c.Auth),
-		"EdgeUpstreams": upstreamAddrs(c.Mode, c.Edge),
-	})
+	data := c.dynamicData()
+	files := map[string][]byte{}
+	templates := map[string]string{UpstreamsFile: "templates/upstreams.conf.tmpl"}
+	if c.Fronts.set() {
+		templates[InternalFile] = "templates/internal.conf.tmpl"
+		templates[StreamFile] = "templates/auth-mtls.conf.tmpl"
+	}
+	for out, tmpl := range templates {
+		b, err := render(tmpl, data)
+		if err != nil {
+			return nil, err
+		}
+		files[out] = b
+	}
+	return files, nil
+}
+
+// Upstreams renders UpstreamsFile alone.
+func (c Config) Upstreams() ([]byte, error) {
+	files, err := c.DynamicFiles()
+	if err != nil {
+		return nil, err
+	}
+	return files[UpstreamsFile], nil
 }
 
 // HasUpstreamsFile reports whether the bundle keeps its upstreams in
@@ -143,15 +256,33 @@ func HasUpstreamsFile(bundleDir string) bool {
 	return err == nil
 }
 
-// WriteUpstreams rewrites the upstreams file in the bundle, atomically.
+// WriteUpstreams rewrites the files that change with the replicas in the
+// bundle (DynamicFiles), each atomically, and removes a front file that no
+// longer applies.
 func WriteUpstreams(bundleDir string, c Config) error {
-	b, err := c.Upstreams()
+	files, err := c.DynamicFiles()
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(bundleDir, UpstreamsFile)
-	if err := fsutil.WriteFileAtomic(path, b, 0o644); err != nil {
-		return fmt.Errorf("couldn't write %s: %w", path, err)
+	return writeDynamic(bundleDir, files)
+}
+
+func writeDynamic(dir string, files map[string][]byte) error {
+	for _, rel := range []string{UpstreamsFile, InternalFile, StreamFile} {
+		path := filepath.Join(dir, rel)
+		b, ok := files[rel]
+		if !ok {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("couldn't remove %s: %w", path, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := fsutil.WriteFileAtomic(path, b, 0o644); err != nil {
+			return fmt.Errorf("couldn't write %s: %w", path, err)
+		}
 	}
 	return nil
 }
@@ -192,7 +323,17 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 	}
 
-	routes, err := templates.ReadFile("templates/routes.conf")
+	if c.GenerationsDir != "" && c.Mode == ModeLocal {
+		return nil, fmt.Errorf("the local proxy mounts its bundle's files, not config generations")
+	}
+	if c.GenerationsDir != "" && !filepath.IsAbs(c.GenerationsDir) {
+		return nil, fmt.Errorf("the proxy's config directory %q is not an absolute path", c.GenerationsDir)
+	}
+	htmlRoot := "/usr/share/nginx/html"
+	if c.GenerationsDir != "" {
+		htmlRoot = GenerationMount + "/" + CurrentGeneration + "/" + generationHTML
+	}
+	routes, err := render("templates/routes.conf", map[string]any{"HTMLRoot": htmlRoot})
 	if err != nil {
 		return nil, err
 	}
@@ -212,16 +353,23 @@ func (c Config) Files() (map[string][]byte, error) {
 		"ExternalPort":  ExternalPort,
 		"LocalPort":     LocalPort,
 		"HostNetwork":   c.Mode != ModeLocal,
-		"Resolve":       c.Mode == ModeLocal,
-		"AuthUpstreams": upstreamAddrs(c.Mode, c.Auth),
-		"EdgeUpstreams": upstreamAddrs(c.Mode, c.Edge),
+		"Stream":        c.Fronts.set(),
+		"Generations":   c.GenerationsDir != "",
+		// JSON strings are YAML's double-quoted scalars: a path with spaces
+		// or a colon stays one value.
+		"ConfPath": quoteYAML(GenerationMount + "/" + CurrentGeneration + "/nginx.conf"),
+		// `$` doubled: Compose would otherwise interpolate it.
+		"GenerationsMount": quoteYAML(strings.ReplaceAll(c.GenerationsDir, "$", "$$") + ":" + GenerationMount + ":ro"),
 	}
 
-	files := map[string][]byte{}
+	files, err := c.DynamicFiles()
+	if err != nil {
+		return nil, err
+	}
 	for out, tmpl := range map[string]string{
 		ComposeFile:                 "templates/proxy.yml.tmpl",
 		"proxy/conf.d/versola.conf": "templates/versola.conf.tmpl",
-		UpstreamsFile:               "templates/upstreams.conf.tmpl",
+		"proxy/nginx.conf":          "templates/nginx.conf.tmpl",
 	} {
 		b, err := render(tmpl, data)
 		if err != nil {
@@ -230,7 +378,6 @@ func (c Config) Files() (map[string][]byte, error) {
 		files[out] = b
 	}
 	for out, src := range map[string]string{
-		"proxy/nginx.conf":        "templates/nginx.conf",
 		"proxy/proxy_params.conf": "templates/proxy_params.conf",
 	} {
 		b, err := templates.ReadFile(src)
@@ -249,6 +396,12 @@ func acmeStateDir(directory string) string {
 		return "staging"
 	}
 	return "production"
+}
+
+// quoteYAML is s as a YAML double-quoted scalar.
+func quoteYAML(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func render(name string, data any) ([]byte, error) {
@@ -281,7 +434,9 @@ func Write(bundleDir string, c Config) error {
 	return nil
 }
 
-// Reload makes the running proxy route to the replicas in c: rewrites the
+// Reload makes the running proxy route to the replicas in c. On vps (config
+// generations) that is Apply and ReloadCurrent, with `current` put back if
+// the running nginx refuses it. Locally: it rewrites the
 // upstreams file in the bundle, has nginx check the result, and reloads it
 // (no restart: connections in flight finish on the old workers, see
 // worker_shutdown_timeout in nginx.conf). If nginx rejects the new file the
@@ -294,6 +449,9 @@ var (
 )
 
 func Reload(bundleDir string, c Config) error {
+	if c.GenerationsDir != "" {
+		return reloadGenerations(bundleDir, c)
+	}
 	content, err := c.Upstreams()
 	if err != nil {
 		return err
@@ -321,4 +479,28 @@ func Reload(bundleDir string, c Config) error {
 		return fmt.Errorf("nginx accepted the new upstreams but the reload failed (the proxy keeps routing to the old ones; the bundle has the new): %w", err)
 	}
 	return nil
+}
+
+func reloadGenerations(bundleDir string, c Config) error {
+	previous, err := Apply(bundleDir, c)
+	if err != nil {
+		return err
+	}
+	if err := ReloadCurrent(c.Mode); err != nil {
+		if rerr := RollBack(c.GenerationsDir, previous); rerr != nil {
+			return fmt.Errorf("%w (and pointing the config back at %s failed: %v)", err, previous, rerr)
+		}
+		return err
+	}
+	return nil
+}
+
+// Stage makes c the configuration the proxy starts with next, when it is
+// not running: Apply on vps, the bundle's upstreams locally.
+func Stage(bundleDir string, c Config) error {
+	if c.GenerationsDir != "" {
+		_, err := Apply(bundleDir, c)
+		return err
+	}
+	return WriteUpstreams(bundleDir, c)
 }

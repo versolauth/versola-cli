@@ -37,6 +37,10 @@ const (
 	DefaultPort            = 8080
 	DefaultDiagnosticsPort = 8081
 	DefaultAdditionalPort  = 8082
+	// DefaultMutualTLSPort is VersolaApp.mutualTlsPort's default (MPORT):
+	// auth's RFC 8705 mutual-TLS listener, which it serves only when its
+	// config has a `mutual-tls` block.
+	DefaultMutualTLSPort = 8083
 )
 
 const (
@@ -55,12 +59,14 @@ const (
 
 // Service is one compose service's ports.
 type Service struct {
-	// Port, DiagnosticsPort, AdditionalPort are the container's PORT,
-	// DPORT and APORT: main traffic, /liveness + /readiness + /metrics,
-	// and auth's account-settings surface.
+	// Port, DiagnosticsPort, AdditionalPort, MutualTLSPort are the
+	// container's PORT, DPORT, APORT and MPORT: main traffic, /liveness +
+	// /readiness + /metrics, auth's account-settings surface, and auth's
+	// mutual-TLS listener.
 	Port            int
 	DiagnosticsPort int
 	AdditionalPort  int
+	MutualTLSPort   int
 
 	// published is every tcp `ports:` entry with one plain host port, in
 	// compose's order. Empty for a `network_mode: host` service (vps),
@@ -85,10 +91,12 @@ type Service struct {
 	// auth binds APORT, so it is an error for auth alone (CheckAdditional);
 	// for the others the variable means nothing.
 	additionalBad bool
+	// mutualBad: the same for MPORT.
+	mutualBad bool
 
-	// additionalSlot is the slot whose shifted APORT does not fit in a
-	// port, or 0: an error for auth (CheckAdditional) only, since no other
-	// service binds APORT.
+	// additionalSlot is the slot whose shifted APORT or MPORT does not fit
+	// in a port, or 0: an error for auth (CheckAdditional) only, since no
+	// other service binds them.
 	additionalSlot int
 
 	hostNetwork bool
@@ -115,17 +123,35 @@ func (s Service) Skipped() []string { return append([]string(nil), s.skipped...)
 // on, "" for every address.
 func (s Service) UnfixedHostIP(i int) string { return s.unfixedIP[i] }
 
-// CheckAdditional is an error when APORT is set to something that is not a
-// port. Callers ask it for the services that actually bind APORT; for any
-// other the value is never used and cannot fail a deployment.
+// CheckAdditional is an error when APORT or MPORT is set to something that
+// is not a port, or shifted out of range. Callers ask it for the services
+// that actually bind them (auth); for any other the values are never used
+// and cannot fail a deployment.
 func (s Service) CheckAdditional(service string) error {
 	if s.additionalSlot > 0 {
-		return fmt.Errorf("slot %d would need APORT %d for %q, which is out of range", s.additionalSlot, s.AdditionalPort, service)
+		return fmt.Errorf("slot %d would need APORT %d / MPORT %d for %q, which is out of range", s.additionalSlot, s.AdditionalPort, s.MutualTLSPort, service)
 	}
 	if s.additionalBad {
 		return fmt.Errorf("service %q sets APORT to something that is not a port number (1-65535)", service)
 	}
+	if s.mutualBad {
+		return fmt.Errorf("service %q sets MPORT to something that is not a port number (1-65535)", service)
+	}
 	return nil
+}
+
+// ShiftAuthListeners returns s -- slot's ports, from ForSlot -- with APORT
+// and MPORT moved by off, and nothing else: their own ports are taken over
+// by another process (the reverse proxy) in front of them. Only for a
+// service on the host's network, whose listeners are the host's ports;
+// publications are not touched. Out of range shows in CheckAdditional.
+func (s Service) ShiftAuthListeners(off, slot int) Service {
+	s.AdditionalPort += off
+	s.MutualTLSPort += off
+	if s.AdditionalPort > 65535 || s.MutualTLSPort > 65535 {
+		s.additionalSlot = slot
+	}
+	return s
 }
 
 // HostNetwork reports whether the compose file gives this service the
@@ -344,16 +370,18 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		Port:            s.Port + off,
 		DiagnosticsPort: s.DiagnosticsPort + off,
 		AdditionalPort:  s.AdditionalPort + off,
+		MutualTLSPort:   s.MutualTLSPort + off,
 		additionalBad:   s.additionalBad,
+		mutualBad:       s.mutualBad,
 		hostNetwork:     s.hostNetwork,
 		containerName:   s.containerName,
 	}
 	// Only a port some process listens on moves with the slot: the replica
-	// is told its own PORT/DPORT/APORT, but whatever else the base
+	// is told its own PORT/DPORT/APORT/MPORT, but whatever else the base
 	// publishes (a port only the image knows) still listens where it did,
 	// and only its host port moves out of the way.
 	shift := func(target int) int {
-		if target == s.Port || target == s.DiagnosticsPort || (s.AdditionalPort > 0 && target == s.AdditionalPort) {
+		if target == s.Port || target == s.DiagnosticsPort || (s.AdditionalPort > 0 && target == s.AdditionalPort) || (s.MutualTLSPort > 0 && target == s.MutualTLSPort) {
 			return target + off
 		}
 		return target
@@ -385,7 +413,7 @@ func (s Service) ForSlot(slot int) (Service, error) {
 			return Service{}, fmt.Errorf("slot %d would need port %d, which is out of range", slot, p)
 		}
 	}
-	if out.AdditionalPort > 65535 {
+	if out.AdditionalPort > 65535 || out.MutualTLSPort > 65535 {
 		out.additionalSlot = slot
 	}
 	return out, nil
@@ -500,7 +528,7 @@ type rawService struct {
 	ports         []rawPort
 }
 
-// portVar is one of PORT, DPORT and APORT as the environment has it: a
+// portVar is one of PORT, DPORT, APORT and MPORT as the environment has it: a
 // port, or bad when it is not one. The text of a bad value is not kept --
 // `compose config` inlines env_file values, so it may be a password that
 // landed in the wrong variable, and nothing that holds a Topology (a
@@ -510,7 +538,7 @@ type portVar struct {
 	bad bool
 }
 
-// envVars holds just PORT, DPORT and APORT of a service's environment.
+// envVars holds just PORT, DPORT, APORT and MPORT of a service's environment.
 // Anything else in the environment is dropped while decoding, and an
 // environment that isn't an object at all reads as empty, so an odd
 // service cannot fail the whole configuration.
@@ -523,7 +551,7 @@ func (e *envVars) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	out := envVars{}
-	for _, key := range []string{"PORT", "DPORT", "APORT"} {
+	for _, key := range []string{"PORT", "DPORT", "APORT", "MPORT"} {
 		raw, ok := all[key]
 		if !ok || string(raw) == "null" {
 			continue
@@ -680,6 +708,12 @@ func (t Topology) Service(name string) (Service, error) {
 	// APORT -- `APORT: ${APORT:-}` -- still loads.
 	if svc.AdditionalPort, err = envPort(name, raw.env, "APORT", DefaultAdditionalPort); err != nil {
 		svc.AdditionalPort, svc.additionalBad = DefaultAdditionalPort, true
+	}
+	// MPORT likewise: auth's alone, and defaulted the way VersolaApp does,
+	// since the app listens there by default whenever its config has a
+	// `mutual-tls` block -- whether or not the compose file names the port.
+	if svc.MutualTLSPort, err = envPort(name, raw.env, "MPORT", DefaultMutualTLSPort); err != nil {
+		svc.MutualTLSPort, svc.mutualBad = DefaultMutualTLSPort, true
 	}
 	return svc, nil
 }

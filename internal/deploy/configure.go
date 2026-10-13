@@ -343,6 +343,9 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
+	if authReplicas, err = frontAuth(authReplicas, target == "vps"); err != nil {
+		return ConfigureResult{}, err
+	}
 	edgeReplicas, err := replicasOf(topo, EdgeService, slotOne)
 	if err != nil {
 		return ConfigureResult{}, err
@@ -354,8 +357,11 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, authReplicas, edgeReplicas); err != nil {
 		return ConfigureResult{}, err
 	}
-	upstreams := proxyUpstreams{Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
-	if err := setUpProxy(dir, auth, proxyOpts, upstreams); err != nil {
+	fronts, genDir, err := proxyRouting(topo, target == "vps")
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
 		return ConfigureResult{}, err
 	}
 

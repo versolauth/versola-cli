@@ -340,8 +340,12 @@ func TestHostPortsOf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hostPortsOf(auth[0], true); !reflect.DeepEqual(got, []int{8180, 8181, 8182}) {
+	if got := hostPortsOf(auth[0], true); !reflect.DeepEqual(got, []int{8180, 8181, 8182, 8183}) {
 		t.Errorf("vps: %v", got)
+	}
+	// Behind the proxy (vps): APORT and MPORT are 1000 higher.
+	if got := hostPortsOf(fronted(t, auth)[0], true); !reflect.DeepEqual(got, []int{8180, 8181, 9182, 9183}) {
+		t.Errorf("vps, fronted: %v", got)
 	}
 	if got := hostPortsOf(auth[0], false); !reflect.DeepEqual(got, []int{8181}) {
 		t.Errorf("local publishes only the diagnostics port: %v", got)

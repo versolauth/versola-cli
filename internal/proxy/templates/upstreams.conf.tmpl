@@ -42,3 +42,15 @@ upstream edge_backend {
     least_conn;
     keepalive 32;
 }
+{{- if .Fronted }}
+
+# vps: auth's additional listener (APORT) on every replica, for the server
+# in internal.conf. edge and central reach it at 127.0.0.1:{{ .AdditionalListen }}.
+upstream auth_additional {
+{{- range .AdditionalUpstreams }}
+    server {{ . }} max_fails=3 fail_timeout=10s;
+{{- end }}
+    least_conn;
+    keepalive 32;
+}
+{{- end }}

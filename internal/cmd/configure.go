@@ -18,6 +18,8 @@ var configureProxy string
 var configureACMEStaging bool
 var configureGenerateMissing []string
 var configureAllowLegacy bool
+var configurePostgresDB string
+var configurePostgresCA string
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -31,6 +33,7 @@ services and doesn't touch the database — see "versola migrate" and
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+  versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
 
 On vps, Versola is exposed through its own reverse proxy (the official
 nginx image, configured by this CLI): by default it serves ports 80/443
@@ -60,6 +63,14 @@ confirms that the named secrets may be generated anyway;
 --allow-legacy-secrets lets a release that has no secret schema be
 configured by the old rule ("anything missing is generated").
 
+On vps, --postgres-db names the database (default: auth) and
+--postgres-ca points at a PEM file with the CA that signed Postgres'
+server certificate, which the services then trust for sslmode=verify-full.
+Both are remembered (the CA file is copied next to the deployment's
+state), so rollout keeps using them and a later configure without the
+flag keeps the stored value; passing a flag again overrides it. They need a versola-tools release that
+understands POSTGRES_DB / POSTGRES_CA_FILE; an older one ignores them.
+
 This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a
 database migration needs to be its own explicit, reviewable step rather
@@ -71,6 +82,8 @@ than something that happens silently — e.g. deploying onto a server.`,
 func init() {
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
+	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
@@ -92,6 +105,12 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
+		return err
+	}
+	// Validated before the lock and the confirmation: a typo'd CA path
+	// should fail immediately, not after the user has said yes.
+	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
+	if err != nil {
 		return err
 	}
 
@@ -160,23 +179,26 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
-	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, configureSetupOpenBao,
+	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
 		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
 	return err
 }
 
-// rejectVpsOnlyFlags: --proxy/--acme-staging only mean something for vps
+// rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps
 // (local's proxy is always on 127.0.0.1:2821, without TLS) -- say so instead of
 // silently ignoring them.
 func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range []string{"proxy", "acme-staging"} {
+	for _, name := range []string{"proxy", "acme-staging", "postgres-db", "postgres-ca"} {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}
 	}
 	return nil
 }
+
+const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
+const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

@@ -567,7 +567,7 @@ func replicasBlockConfigure(st *state.State) error {
 	// the new version and forget the ones that run -- a stand-in among them
 	// -- and the version they run.
 	if st.RolloutUnderway() || st.MixedVersions() != "" {
-		return fmt.Errorf("a rolling upgrade to %s is under way -- finish it with `versola rollout %s` before configuring again (`versola status` shows where it stands)", st.Version, st.Version)
+		return fmt.Errorf("a rolling upgrade to %s is under way -- finish it with `versola rollout %s` (or go back with `versola rollout --abort`) before configuring again (`versola status` shows where it stands)", st.Version, st.Version)
 	}
 	var extra []string
 	for _, svc := range []string{AuthService, EdgeService} {

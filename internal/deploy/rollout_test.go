@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -73,6 +74,11 @@ type world struct {
 	startedFrom  bool
 	ranFromNew   bool
 	proxyRunning bool
+	// targetV and targetDir are what `compose up` creates containers of
+	// and from: the new version and bundle, or an abort's way back.
+	targetV, targetDir string
+	restored           string   // the bundle restorePrevious made active
+	oneOffs            []string // running `compose run` containers
 }
 
 func newWorld(t *testing.T, st *state.State) *world {
@@ -82,7 +88,8 @@ func newWorld(t *testing.T, st *state.State) *world {
 		t.Fatal(err)
 	}
 	w := &world{t: t, topo: topo, containers: map[string]*fakeContainer{}, upstream: map[string][]string{},
-		urls: map[string]string{}, failOnce: map[string]error{}, minUp: map[string]int{}, never: map[string]bool{}, coldOnce: map[string]bool{}, proxyRunning: true}
+		urls: map[string]string{}, failOnce: map[string]error{}, minUp: map[string]int{}, never: map[string]bool{}, coldOnce: map[string]bool{}, proxyRunning: true,
+		targetV: toV, targetDir: newBundleDir}
 	for _, base := range []string{CentralService, AuthService, EdgeService} {
 		for n := 1; n <= topology.MaxSlot; n++ {
 			r, err := standInReplica(topo, base, n, true)
@@ -179,12 +186,12 @@ func (w *world) compose(args ...string) error {
 		if !defined {
 			return fmt.Errorf("no such service: %s", svc)
 		}
-		want := imageOf(baseOf(svc), toV)
+		want := imageOf(baseOf(svc), w.targetV)
 		c := w.containers[svc]
-		if c != nil && c.image == want && c.workDir == newBundleDir && c.running {
+		if c != nil && c.image == want && c.workDir == w.targetDir && c.running {
 			return nil // same definition, running: compose leaves it
 		}
-		w.containers[svc] = &fakeContainer{image: want, workDir: newBundleDir, running: true, ready: !w.never[svc]}
+		w.containers[svc] = &fakeContainer{image: want, workDir: w.targetDir, running: true, ready: !w.never[svc]}
 		return nil
 	})
 }
@@ -292,6 +299,15 @@ func (w *world) inspect(service string) (containerInfo, error) {
 	return containerInfo{found: true, image: c.image, workDir: c.workDir, running: c.running}, nil
 }
 
+func (w *world) restorePrevious(bundle string, _ time.Time) error {
+	return w.step("restore "+bundle, func() error {
+		w.restored = bundle
+		return nil
+	})
+}
+
+func (w *world) oneOffsRunning() ([]string, error) { return w.oneOffs, nil }
+
 func (w *world) removeContainer(service string) error {
 	return w.step("rm "+service, func() error {
 		delete(w.containers, service)
@@ -322,7 +338,7 @@ func preparedState(auth, edge []state.Slot) *state.State {
 }
 
 func engineFor(w *world, surge, downtime bool) *rolloutEngine {
-	return &rolloutEngine{st: w.load(), topo: w.topo, bundleDir: newBundleDir, ops: w, out: func(string, ...any) {},
+	return &rolloutEngine{st: w.load(), topo: w.topo, bundleDir: w.targetDir, ops: w, out: func(string, ...any) {},
 		fronts: proxy.Fronts{Additional: 8082, MutualTLS: 8083}, genDir: "/gen", surge: surge, allowDowntime: downtime}
 }
 
@@ -361,7 +377,7 @@ func (w *world) done(t *testing.T, authSlots, edgeSlots []int) {
 	for name, c := range w.containers {
 		if !want[name] {
 			t.Errorf("container %s left behind", name)
-		} else if c.image != imageOf(baseOf(name), toV) || c.workDir != newBundleDir || !c.running {
+		} else if c.image != imageOf(baseOf(name), w.targetV) || c.workDir != w.targetDir || !c.running {
 			t.Errorf("%s: %+v", name, c)
 		}
 	}

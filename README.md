@@ -371,8 +371,9 @@ serves the admin console at `/central/admin/`.
 
   Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
   picks the database (default `auth`) and `--postgres-ca <file>` is a PEM
-  file with the CA that signed its certificate. Both are vps-only and, like
-  `--auth-url`, must be repeated on every `configure`. They need a
+  file with the CA that signed its certificate. Both are vps-only and are remembered
+  (the CA file is copied next to the deployment's state): `rollout` reuses
+  them, and a later `configure` without the flag keeps the stored value. They need a
   `versola-tools` release that understands `POSTGRES_DB` /
   `POSTGRES_CA_FILE`.
 

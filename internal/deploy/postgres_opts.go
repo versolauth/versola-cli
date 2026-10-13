@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // postgresCAMount is where --postgres-ca's file appears inside the
@@ -24,6 +26,33 @@ type PostgresOptions struct {
 }
 
 var postgresDBPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// postgresOptionsOf returns the options recorded in a deployment's state.
+func postgresOptionsOf(st *state.State) PostgresOptions {
+	return PostgresOptions{DB: st.PostgresDB, CAFile: st.PostgresCAPath()}
+}
+
+// withStored fills what the flags left empty from the recorded vps
+// deployment, so that an explicit flag overrides and no flag keeps what was
+// configured before. Nothing is taken from a record of another target, or
+// when there is no readable record.
+func (o PostgresOptions) withStored(target string) PostgresOptions {
+	if target != "vps" {
+		return o
+	}
+	st, err := state.Load()
+	if err != nil || st.Target != "vps" {
+		return o
+	}
+	stored := postgresOptionsOf(st)
+	if o.DB == "" {
+		o.DB = stored.DB
+	}
+	if o.CAFile == "" {
+		o.CAFile = stored.CAFile
+	}
+	return o
+}
 
 // Validate checks the options for target and returns them with CAFile made
 // absolute (docker's -v needs an absolute host path). Both options only

@@ -92,6 +92,8 @@ func TestLayout3RoundTrip(t *testing.T) {
 		PostgresHost:      "127.0.0.1:5432",
 		PreviousVersion:   "0.6.3",
 		Surge:             map[string]int{"auth": 2},
+		PostgresDB:        "versola",
+		PostgresCA:        PostgresCAFileName,
 	}
 	if err := want.Save(); err != nil {
 		t.Fatal(err)
@@ -113,13 +115,13 @@ func TestLayout3RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"postgresHost", "previousVersion", "surge"} {
+	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa"} {
 		if _, ok := keys[k]; !ok {
 			t.Errorf("state.json lacks %q", k)
 		}
 	}
-	if string(keys["schemaVersion"]) != "3" {
-		t.Errorf("schemaVersion = %s, want 3", keys["schemaVersion"])
+	if string(keys["schemaVersion"]) != "4" {
+		t.Errorf("schemaVersion = %s, want 4", keys["schemaVersion"])
 	}
 }
 
@@ -130,7 +132,7 @@ func TestLayout3EmptyFieldsOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"postgresHost", "previousVersion", "surge"} {
+	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa"} {
 		if strings.Contains(string(b), k) {
 			t.Errorf("%s written while empty: %s", k, b)
 		}
@@ -139,7 +141,7 @@ func TestLayout3EmptyFieldsOmitted(t *testing.T) {
 
 func TestLoadRefusesNewerLayout(t *testing.T) {
 	dir := activeDir(t)
-	writeState(t, dir, `{"schemaVersion":4,"target":"vps","version":"9.9.9"}`)
+	writeState(t, dir, `{"schemaVersion":5,"target":"vps","version":"9.9.9"}`)
 	if _, err := Load(); !errors.Is(err, ErrNewerSchema) {
 		t.Fatalf("got %v, want ErrNewerSchema", err)
 	}
@@ -253,7 +255,7 @@ func TestFinalizeOverLayout1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.SchemaVersion != 3 || s.PostgresHost != "127.0.0.1:5432" || s.Version != "0.7.0" {
+	if s.SchemaVersion != 4 || s.PostgresHost != "127.0.0.1:5432" || s.Version != "0.7.0" {
 		t.Errorf("got %+v", s)
 	}
 	if s.PreviousVersion != "" || s.Surge != nil || s.Slots != nil {

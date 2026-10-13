@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/fsutil"
 	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
@@ -34,11 +35,17 @@ import (
 // guessing from which fields happen to be present.
 //
 // Version 2 added SecretsRevision. Version 3 added PostgresHost,
-// PreviousVersion and Surge (rolling upgrades). A CLI refuses a file of a
+// PreviousVersion and Surge (rolling upgrades). Version 4 added
+// PostgresDB and PostgresCA (--postgres-db, --postgres-ca). A CLI refuses a file of a
 // newer layout than its own (see Load) rather than load it and drop the
 // fields it does not know on its next Save; an older layout is read, with
 // the fields it lacks left empty.
-const SchemaVersion = 3
+const SchemaVersion = 4
+
+// PostgresCAFileName is where Finalize keeps a copy of --postgres-ca's file,
+// in Dir() next to state.json, so that later steps do not depend on the
+// path the operator gave still existing.
+const PostgresCAFileName = "postgres-ca.crt"
 
 const stateFileName = "state.json"
 
@@ -144,6 +151,16 @@ type State struct {
 	// have to be told it once more. Empty in records written before layout
 	// 3: then it is not known, and such a step has to ask for it.
 	PostgresHost string `json:"postgresHost,omitempty"`
+
+	// PostgresDB is --postgres-db (vps only); empty means versola-tools'
+	// own default. Recorded for the same reason as PostgresHost. Empty in
+	// records written before layout 4.
+	PostgresDB string `json:"postgresDb,omitempty"`
+
+	// PostgresCA is the name, inside Dir(), of the copy of --postgres-ca's
+	// file (PostgresCAFileName), or empty when there is none. See
+	// PostgresCAPath.
+	PostgresCA string `json:"postgresCa,omitempty"`
 
 	// PreviousVersion is the Versola version this deployment ran before a
 	// rolling upgrade (`versola rollout`) moved it to Version. Written when
@@ -371,6 +388,12 @@ type FinalizeOptions struct {
 	ProxyMode string
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
+	// PostgresDB is --postgres-db, "" for none.
+	PostgresDB string
+	// PostgresCAFile is a PEM file to copy into Dir() as PostgresCAFileName
+	// and record; "" for none (a copy left by an earlier deployment is
+	// removed).
+	PostgresCAFile string
 	// SecretsRevision is the schema revision secrets were settled against,
 	// 0 when the release has no schema.
 	SecretsRevision int
@@ -437,6 +460,7 @@ func Finalize(o FinalizeOptions) error {
 		AuthURL:       o.AuthURL,
 		ProxyMode:     o.ProxyMode,
 		PostgresHost:  o.PostgresHost,
+		PostgresDB:    o.PostgresDB,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,
 	}
@@ -458,6 +482,19 @@ func Finalize(o FinalizeOptions) error {
 			s.MountedBundleDirs = []string{prev.BundleDir}
 		}
 	}
+	caPath := filepath.Join(dir, PostgresCAFileName)
+	if o.PostgresCAFile != "" {
+		ca, err := os.ReadFile(o.PostgresCAFile)
+		if err != nil {
+			return fmt.Errorf("couldn't read the Postgres CA file: %w", err)
+		}
+		if err := fsutil.WriteFileAtomic(caPath, ca, 0o644); err != nil {
+			return fmt.Errorf("couldn't keep a copy of the Postgres CA file: %w", err)
+		}
+		s.PostgresCA = PostgresCAFileName
+	} else if err := os.Remove(caPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("couldn't remove the previous Postgres CA copy: %w", err)
+	}
 	if err := s.Save(); err != nil {
 		return err
 	}
@@ -475,6 +512,19 @@ func Finalize(o FinalizeOptions) error {
 	// started, and any left behind by a configure that failed halfway.
 	pruneBundles(dir, append(append([]string{s.BundleDir}, s.MountedBundleDirs...), o.Keep...)...)
 	return nil
+}
+
+// PostgresCAPath returns the full path of the recorded copy of the Postgres CA
+// file, or "" when the deployment has none.
+func (s *State) PostgresCAPath() string {
+	if s.PostgresCA == "" {
+		return ""
+	}
+	dir, err := Dir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, s.PostgresCA)
 }
 
 // Save writes the state record, replacing whatever was there. It is written

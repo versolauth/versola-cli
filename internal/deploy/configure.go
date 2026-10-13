@@ -103,7 +103,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	if target == "vps" && postgresHost == "" {
 		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
 	}
-	pg, err := pg.Validate(target)
+	pg, err := pg.withStored(target).Validate(target)
 	if err != nil {
 		return ConfigureResult{}, err
 	}
@@ -454,6 +454,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}
 	if staged != nil {

@@ -66,8 +66,9 @@ configured by the old rule ("anything missing is generated").
 On vps, --postgres-db names the database (default: auth) and
 --postgres-ca points at a PEM file with the CA that signed Postgres'
 server certificate, which the services then trust for sslmode=verify-full.
-Like --auth-url, both have to be repeated on every configure, because the
-bundle is regenerated each time. They need a versola-tools release that
+Both are remembered (the CA file is copied next to the deployment's
+state), so rollout keeps using them and a later configure without the
+flag keeps the stored value; passing a flag again overrides it. They need a versola-tools release that
 understands POSTGRES_DB / POSTGRES_CA_FILE; an older one ignores them.
 
 This is the first of three steps "versola bootstrap" runs together in

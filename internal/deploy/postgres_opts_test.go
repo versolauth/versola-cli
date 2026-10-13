@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 func TestPostgresOptionsValidate(t *testing.T) {
@@ -94,5 +96,61 @@ func TestPostgresOptionsToolsArgs(t *testing.T) {
 				t.Fatalf("toolsArgs = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestPostgresOptionsStored(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir, err := state.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(dir, "bundle-1")
+	if err := os.MkdirAll(bundle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := func(target string) {
+		t.Helper()
+		if err := state.Finalize(state.FinalizeOptions{Target: target, Version: "1.0.0", BundleDir: bundle,
+			AuthURL: "https://id.example.com", ProxyMode: "external", PostgresHost: "db:5432",
+			PostgresDB: "versola", PostgresCAFile: ca}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record("vps")
+	stored := filepath.Join(dir, state.PostgresCAFileName)
+
+	cases := map[string]struct {
+		target string
+		in     PostgresOptions
+		want   PostgresOptions
+	}{
+		"no flags keep stored": {"vps", PostgresOptions{}, PostgresOptions{DB: "versola", CAFile: stored}},
+		"db flag overrides":    {"vps", PostgresOptions{DB: "other"}, PostgresOptions{DB: "other", CAFile: stored}},
+		"ca flag overrides":    {"vps", PostgresOptions{CAFile: "/x/ca.pem"}, PostgresOptions{DB: "versola", CAFile: "/x/ca.pem"}},
+		"local ignores stored": {"local", PostgresOptions{}, PostgresOptions{}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := c.in.withStored(c.target); got != c.want {
+				t.Fatalf("got %+v, want %+v", got, c.want)
+			}
+		})
+	}
+
+	// What rollout and secrets plan hand to versola-tools.
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-e", "POSTGRES_DB=versola", "-v", stored + ":/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}
+	if got := postgresOptionsOf(st).toolsArgs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("toolsArgs = %v, want %v", got, want)
 	}
 }

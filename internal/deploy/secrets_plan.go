@@ -90,7 +90,7 @@ func PlanSecrets(ctx context.Context, target, version string, generateMissing []
 	defer removeOnSignal(log, cleanup)()
 
 	fmt.Fprintf(log, "Running versola-tools %s to get its schema and candidates...\n", version)
-	if err := pullAndRunToolsTo(log, dir, ToolsImage(version), target, planAuthURL, planPostgresHost, PostgresOptions{}); err != nil {
+	if err := pullAndRunToolsTo(log, dir, ToolsImage(version), target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target)); err != nil {
 		if isManifestUnknown(err) {
 			return secrets.Result{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it). Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2")`, version)
 		}

@@ -36,6 +36,10 @@ moment a POST is written fails whatever the CLI did.
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
 
+The rollout's preflight runs here too: the memory check for real (the stubs
+use a few MiB, so it passes on any host that runs this), the Postgres
+connection check only as a warning -- there is no Postgres.
+
 `--abort-at` stops the rollout with SIGTERM ("stop after the step under
 way") once its output shows that phase, runs `versola rollout --abort` under
 the same traffic, and passes when the abort exits 0, the traffic client

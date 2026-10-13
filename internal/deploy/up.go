@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -175,7 +174,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// Versola's topology, so that one build of it can deploy any release
 	// (design doc §3.5). The service names are what is still assumed.
 	fmt.Println("Waiting for central to be ready...")
-	if err := wait.ForReady(readyURLs[centralReplicas[0].Service], 60*time.Second); err != nil {
+	if err := wait.ForReady(readyURLs[centralReplicas[0].Service], readyTimeout); err != nil {
 		return fmt.Errorf("central never became ready: %w", err)
 	}
 
@@ -199,7 +198,7 @@ func Up(opts UpOptions, st *state.State) error {
 			return fmt.Errorf("couldn't start %s: %w", step.Name, err)
 		}
 		for _, svc := range step.Ready {
-			if err := wait.ForReady(readyURLs[svc], 60*time.Second); err != nil {
+			if err := wait.ForReady(readyURLs[svc], readyTimeout); err != nil {
 				return fmt.Errorf("%s never became ready: %w", svc, err)
 			}
 		}

@@ -650,3 +650,20 @@ func run(timeout time.Duration, name string, args ...string) (string, error) {
 	}
 	return string(out), err
 }
+
+// HostMemoryAvailable is /proc/meminfo's MemAvailable on the machine the
+// Docker daemon runs on, for a check that has to know what one more
+// container can get right now (a rolling upgrade's stand-in replica).
+// readable is false, with why, when this process can't see that machine's
+// memory: not Linux, or Docker pointed at a remote daemon -- the cases
+// DockerMemory refuses for vps. err is an unreadable /proc/meminfo.
+func HostMemoryAvailable() (bytes int64, readable bool, why string, err error) {
+	if runtime.GOOS != "linux" {
+		return 0, false, "this machine runs " + runtime.GOOS + ", not the vps", nil
+	}
+	if remote, endpoint := dockerTargetsRemoteHost(); remote {
+		return 0, false, fmt.Sprintf("Docker is pointed at %q, not this machine's own daemon", endpoint), nil
+	}
+	b, err := linuxMemAvailable()
+	return b, true, "", err
+}

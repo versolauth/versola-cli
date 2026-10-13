@@ -79,6 +79,10 @@ type rolloutOps interface {
 	removeContainer(service string) error
 	// migrate applies the new version's migrations and records MigratedAt.
 	migrate() error
+	// standInCheck refuses when the host has not the free memory, or
+	// Postgres not the connections, for a stand-in of svc now (see
+	// rollout_preflight.go).
+	standInCheck(st *state.State, svc string) error
 	// markStarting and markRunning: state.MarkStarting / MarkRunning.
 	markStarting() error
 	markRunning() error
@@ -609,6 +613,9 @@ func (e *rolloutEngine) startStandIn(svc string) (int, error) {
 	n := free[0]
 	r, err := standInReplica(e.topo, svc, n, true)
 	if err != nil {
+		return 0, err
+	}
+	if err := e.ops.standInCheck(e.st, svc); err != nil {
 		return 0, err
 	}
 	if _, err := e.readyURL(r); err != nil {

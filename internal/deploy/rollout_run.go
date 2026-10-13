@@ -43,10 +43,13 @@ type RolloutOptions struct {
 	AssumeCompatible bool
 }
 
-// rolloutReadyTimeout bounds the wait for one container of the new version
-// to report ready. Longer than `up`'s minute: central's start on a loaded
-// server was not measured (see the PR's "not verified" list).
-const rolloutReadyTimeout = 120 * time.Second
+// readyTimeout bounds the wait for one container to report ready -- in
+// `up`, `replica add` and a rollout alike. Two minutes: auth and edge wait
+// that long for central before they give up and exit (Docker's restart
+// policy then starts them again), so a shorter wait here reported a failure
+// for a stack that was still coming up. central's start on a loaded server
+// is not measured yet.
+const readyTimeout = 120 * time.Second
 
 // CheckRollout is everything about `rollout <version>` that can be refused
 // on the record alone, before the operator is asked to confirm. done is true
@@ -286,9 +289,8 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 	}
 	fmt.Fprintf(&b, "   %d. finish: the proxy on the new bundle, the previous one removed\n", step)
 	if !o.NoSurge {
-		b.WriteString("\n  Note: a stand-in is one more JVM next to the running ones (about 0.6-0.9 GB) and about 10 more\n" +
-			"  Postgres connections. This versola-cli does not check free memory or max_connections yet --\n" +
-			"  look at `free -m` first; on a small server use --no-surge (with two or more replicas).\n")
+		b.WriteString("\n  Note: a stand-in is one more JVM next to the running ones (about 0.9 GB) and one more Postgres\n" +
+			"  connection pool (10-11). Both are checked before it starts; if either is short, use --no-surge.\n")
 	}
 	b.WriteString("\n  If it stops (an error, Ctrl-C, a dropped SSH session), running the same command continues it.\n")
 	return b.String()
@@ -319,9 +321,9 @@ func openbaoSetUpByHand(target string) bool {
 }
 
 // rolloutPreflight checks what the record cannot say, before anything
-// changes: the host ports each stand-in will take. (Free memory and
-// Postgres connections are a later step: see RolloutPlan's note.)
-func rolloutPreflight(st *state.State, o RolloutOptions) error {
+// changes: the host ports each stand-in will take, the memory it needs and
+// the Postgres connections its pool opens.
+func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	// The rollout moves traffic by reloading the proxy; a stopped one would
 	// only get files, and nothing would be routed around a replica being
 	// replaced.
@@ -362,16 +364,22 @@ func rolloutPreflight(st *state.State, o RolloutOptions) error {
 			}
 		}
 	}
-	// TODO(0d PR-3): free memory against a JVM's footprint, and Postgres
-	// max_connections against one more pool, belong here.
-	return nil
+	// The memory and the Postgres connections a stand-in takes (see
+	// rollout_preflight.go). Memory is checked again right before each
+	// stand-in starts: what is free changes while the rollout runs.
+	services := standInServices(st, o, abort)
+	warn := func(f string, a ...any) { fmt.Printf(f, a...) }
+	if err := checkStandInMemory(hostMemory{dockerRolloutOps{project: topo.Project()}}, st, services, warn); err != nil {
+		return err
+	}
+	return checkPgConnections(filepath.Dir(composePath), services, dockerPgHeadroom, warn)
 }
 
 // Rollout runs `versola rollout <version>` on st (what CheckRollout passed):
 // prepares the new version unless that is done, then carries the rollout
 // to the end. The caller holds state.Lock for the whole run.
 func Rollout(st *state.State, version string, o RolloutOptions) error {
-	if err := rolloutPreflight(st, o); err != nil {
+	if err := rolloutPreflight(st, o, false); err != nil {
 		return err
 	}
 	if !st.RolloutUnderway() {
@@ -567,7 +575,7 @@ func Abort(st *state.State, o RolloutOptions) error {
 		}
 		return nil
 	}
-	if err := rolloutPreflight(st, o); err != nil {
+	if err := rolloutPreflight(st, o, true); err != nil {
 		return err
 	}
 	leaving := st.Version
@@ -658,7 +666,7 @@ func watchInterrupts() (interrupted func() bool, stop func()) {
 func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 	fmt.Print(RolloutPlan(st, version, o))
 	fmt.Println()
-	if err := rolloutPreflight(st, o); err != nil {
+	if err := rolloutPreflight(st, o, false); err != nil {
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
 	}
@@ -697,7 +705,7 @@ func AbortDryRun(st *state.State, o RolloutOptions) error {
 		}
 		return nil
 	}
-	if err := rolloutPreflight(st, o); err != nil {
+	if err := rolloutPreflight(st, o, true); err != nil {
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
 	}
@@ -780,7 +788,7 @@ type dockerRolloutOps struct {
 	host string
 }
 
-func (o dockerRolloutOps) waitReady(u string) error { return wait.ForReady(u, rolloutReadyTimeout) }
+func (o dockerRolloutOps) waitReady(u string) error { return wait.ForReady(u, readyTimeout) }
 
 // writeReplicas writes overrides.yml along with replicas.yml: the rollout
 // recreates auth's slot 1 from this bundle, and without the override it
@@ -884,6 +892,15 @@ func (o dockerRolloutOps) warm(r replica) error {
 }
 
 func (o dockerRolloutOps) migrate() error { return Migrate(o.st, MigrateOptions{}) }
+func (o dockerRolloutOps) standInCheck(st *state.State, svc string) error {
+	warn := func(f string, a ...any) { fmt.Printf(f, a...) }
+	if err := checkStandInMemory(hostMemory{o}, st, []string{svc}, warn); err != nil {
+		return err
+	}
+	// The pool of the version being started, from this run's bundle (the
+	// preflight before a new rollout could only read the running one's).
+	return checkPgConnections(o.dir, []string{svc}, pgHeadroomWithin(time.Minute), warn)
+}
 func (o dockerRolloutOps) oneOffsRunning() ([]string, error) {
 	out, err := docker.Output("ps", "--format", "{{.Names}}",
 		"--filter", "label=com.docker.compose.project="+o.project,

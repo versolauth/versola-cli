@@ -417,7 +417,7 @@ func (o dockerReplicaOps) isRunning(c string) (bool, error) { return docker.IsRu
 func (o dockerReplicaOps) compose(args ...string) error {
 	return docker.Run(state.ComposeArgs(o.composePath, args...)...)
 }
-func (o dockerReplicaOps) waitReady(url string) error  { return wait.ForReady(url, 60*time.Second) }
+func (o dockerReplicaOps) waitReady(url string) error  { return wait.ForReady(url, readyTimeout) }
 func (o dockerReplicaOps) reload(c proxy.Config) error { return proxy.Reload(o.dir, c) }
 func (o dockerReplicaOps) waitFronts(f proxy.Fronts) error {
 	return proxy.WaitFronts(f, 15*time.Second)

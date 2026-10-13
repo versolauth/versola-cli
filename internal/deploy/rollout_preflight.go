@@ -1,0 +1,380 @@
+package deploy
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/state"
+	"github.com/versolauth/versola-cli/internal/topology"
+)
+
+// A stand-in replica is one more JVM next to the running ones, with one
+// more connection pool. Before one starts, the rollout checks that the host
+// has the memory and Postgres the connections -- the two things that, short,
+// turn a rolling upgrade into an outage of the replicas already serving.
+// Neither check has a switch to turn it off: the way round a refusal is
+// --no-surge (no stand-in), which needs neither.
+
+// standInMemoryFallback is the least a stand-in is assumed to need: one
+// replica's budget. Since 0.7.0 the images size the JVM in absolute terms
+// (heap 512m with Xms = Xmx, direct memory, metaspace and code cache capped:
+// about 848 MiB for auth and 880 MiB for edge, per the Dockerfiles), so a
+// replica's footprint no longer depends on the host. Rounded up to 900 MiB.
+// Not measured on a real host yet.
+const standInMemoryFallback = 900 * 1024 * 1024
+
+// memoryReserve is left free on top of what a stand-in needs: the OS,
+// page cache and Postgres must not be squeezed to the last byte.
+const memoryReserve = 256 * 1024 * 1024
+
+// memoryProbe is what the memory check reads, a seam for tests.
+type memoryProbe interface {
+	// available is MemAvailable on the Docker host. readable is false
+	// (with why) when this process can't see that host's memory.
+	available() (bytes int64, readable bool, why string, err error)
+	// usage is the memory a running container of a compose service uses
+	// now (docker stats: its cgroup usage minus page cache). found is
+	// false when there is no running container to measure.
+	usage(service string) (bytes int64, found bool, err error)
+}
+
+// standInNeed is what a stand-in of svc needs: the most any running replica
+// of svc uses now, but never less than standInMemoryFallback -- a replica
+// measured soon after its start has not touched all of its heap yet (Xms is
+// committed, not resident), and the stand-in will grow to the full size.
+// measured says whether a measurement raised it above that floor.
+func standInNeed(p memoryProbe, st *state.State, svc string) (need int64, measured bool, err error) {
+	for _, sl := range st.ActiveSlots(svc) {
+		if n, ok := st.Surge[svc]; ok && n == sl.N {
+			continue
+		}
+		b, found, err := p.usage(topology.SlotService(svc, sl.N))
+		if err != nil {
+			return 0, false, err
+		}
+		if found && b > need {
+			need, measured = b, true
+		}
+	}
+	if need < standInMemoryFallback {
+		need, measured = standInMemoryFallback, false
+	}
+	return need, measured, nil
+}
+
+// checkStandInMemory refuses when the host can't hold a stand-in of any of
+// services next to what runs. It warns (through warn) rather than refuses
+// when the host's free memory can't be read at all.
+func checkStandInMemory(p memoryProbe, st *state.State, services []string, warn func(string, ...any)) error {
+	if len(services) == 0 {
+		return nil
+	}
+	avail, readable, why, err := p.available()
+	if !readable {
+		return fmt.Errorf("can't check the free memory a stand-in replica needs: %s -- run `versola rollout` on the vps itself (over SSH), or use --no-surge", why)
+	}
+	if err != nil {
+		warn("Warning: couldn't read the free memory (%v) -- not checked whether a stand-in replica fits.\n", err)
+		return nil
+	}
+	for _, svc := range services {
+		need, measured, err := standInNeed(p, st, svc)
+		if err != nil {
+			return err
+		}
+		if avail >= need+memoryReserve {
+			continue
+		}
+		basis := "what a running " + svc + " replica uses now"
+		if !measured {
+			basis = "the size of one replica"
+		}
+		hint := "--no-surge (one replica fewer serves while each is replaced"
+		if replicas := len(st.ActiveSlots(svc)); replicas < 2 {
+			hint += "; with one replica add --allow-downtime: it is down until the new one is ready"
+		}
+		return fmt.Errorf("not enough free memory for a stand-in %s replica: it needs about %s (%s) plus %s kept free, and %s is available -- free memory first, or run with %s)",
+			svc, mib(need), basis, mib(memoryReserve), mib(avail), hint)
+	}
+	return nil
+}
+
+func mib(b int64) string { return fmt.Sprintf("%d MiB", b/(1024*1024)) }
+
+// standInServices are the services a rollout (or abort) with surge will
+// still start a stand-in for: those without one recorded already (a
+// running stand-in is counted in what runs). Continuing a rollout forward
+// (not an abort), a service whose every replica is recorded at the target
+// already is done and gets no stand-in: checking memory for one would
+// refuse a rollout that only has its last steps left. (A recorded version
+// is not proof -- the engine still replaces a replica its container says
+// is not done, and checks memory again before any stand-in it starts.)
+// An abort checks every service: replicas that never moved are recorded
+// at the version it goes back to and are recreated all the same.
+func standInServices(st *state.State, o RolloutOptions, abort bool) []string {
+	if o.NoSurge {
+		return nil
+	}
+	var out []string
+	for _, svc := range []string{AuthService, EdgeService} {
+		if _, ok := st.Surge[svc]; ok {
+			continue
+		}
+		if !abort && st.RolloutUnderway() && !st.RollingBack && allAt(st.ActiveSlots(svc), st.Version) {
+			continue
+		}
+		out = append(out, svc)
+	}
+	return out
+}
+
+func allAt(slots []state.Slot, version string) bool {
+	for _, sl := range slots {
+		if sl.Version != version {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- Postgres connections ----
+
+// pgCheckImage runs psql for the connection check. The same major version
+// as local's Postgres; psql talks to older servers too.
+const pgCheckImage = "postgres:18-alpine"
+
+// pgMargin is kept free on top of a stand-in's pool.
+const pgMargin = 3
+
+// pgTarget is what the connection check needs from a service's config,
+// read from the bundle: no secret among it.
+type pgTarget struct {
+	host, port, db, user, sslmode string
+	// pool is the service's connection pool size (maximum-pool-size;
+	// minimum-idle equals it in Versola's configs, so a replica holds all
+	// of it from its start).
+	pool int
+}
+
+var (
+	pgBlockRe = regexp.MustCompile(`(?s)\npostgres\s*\{(.*?)\n\}`)
+	// Keys at the start of a line: `url` must not match notifications-url.
+	pgURLRe  = regexp.MustCompile(`(?m)^\s*url\s*[=:]\s*"([^"]*)"`)
+	pgUserRe = regexp.MustCompile(`(?m)^\s*user\s*[=:]\s*"([^"]*)"`)
+	pgPoolRe = regexp.MustCompile(`(?m)^\s*maximum-pool-size\s*[=:]\s*(\d+)`)
+)
+
+// parsePgTarget reads the postgres block of a service's HOCON config as
+// versola-tools writes it. Only a jdbc:postgresql URL with a literal host is
+// understood; anything else is an error (the check then only warns).
+func parsePgTarget(conf string) (pgTarget, error) {
+	m := pgBlockRe.FindStringSubmatch("\n" + conf)
+	if m == nil {
+		return pgTarget{}, fmt.Errorf("no postgres block")
+	}
+	block := m[1]
+	u := pgURLRe.FindStringSubmatch(block)
+	if u == nil || !strings.HasPrefix(u[1], "jdbc:postgresql://") {
+		return pgTarget{}, fmt.Errorf("no jdbc:postgresql url")
+	}
+	parsed, err := url.Parse(strings.TrimPrefix(u[1], "jdbc:"))
+	if err != nil || parsed.Hostname() == "" {
+		return pgTarget{}, fmt.Errorf("can't read the postgres url")
+	}
+	t := pgTarget{host: parsed.Hostname(), port: parsed.Port(), db: strings.TrimPrefix(parsed.Path, "/"), sslmode: parsed.Query().Get("sslmode")}
+	if t.port == "" {
+		t.port = "5432"
+	}
+	if us := pgUserRe.FindStringSubmatch(block); us != nil {
+		t.user = us[1]
+	}
+	if t.user == "" || strings.Contains(t.user, "${") || t.db == "" {
+		return pgTarget{}, fmt.Errorf("the postgres user or database is not written out")
+	}
+	if p := pgPoolRe.FindStringSubmatch(block); p != nil {
+		t.pool, _ = strconv.Atoi(p[1])
+	}
+	if t.pool == 0 {
+		t.pool = 10 // HikariCP's default
+	}
+	return t, nil
+}
+
+// pgListenConns is the dedicated LISTEN connection a service holds besides
+// its pool (edge and central, for their caches).
+var pgListenConns = map[string]int{EdgeService: 1, CentralService: 1}
+
+// pgHeadroomQuery is how many more client connections the server takes:
+// max_connections, less the slots kept for superusers (and, from Postgres
+// 16, for roles with pg_use_reserved_connections), less the client
+// backends open now (this check's own included). A role that is not a
+// superuser sees backend_type only for its own sessions; another role's
+// session shows as a row with a user and no type, and counts too (a
+// background worker running as a role may be counted with them: on the
+// safe side).
+const pgHeadroomQuery = `SELECT current_setting('max_connections')::int` +
+	` - current_setting('superuser_reserved_connections')::int` +
+	` - coalesce(nullif(current_setting('reserved_connections', true), '')::int, 0)` +
+	` - (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend' OR (backend_type IS NULL AND usesysid IS NOT NULL))::int`
+
+// pgHeadroom runs the query with psql in a throwaway container on the host's
+// network. The password stays out of this process: docker reads it from the
+// service's secrets file into the container's environment (--env-file),
+// and the shell there hands it to psql. The connection parameters go in as
+// environment variables, never into a command line.
+type pgRunner func(t pgTarget, secretsFile string) (int, error)
+
+// dockerPgHeadroom is the runner before a rollout starts: time to pull the
+// image the first time. pgHeadroomWithin(time.Minute) is the one inside the
+// engine, where a second Ctrl-C waits for the check under way.
+func dockerPgHeadroom(t pgTarget, secretsFile string) (int, error) {
+	return pgHeadroomWithin(3*time.Minute)(t, secretsFile)
+}
+
+func pgHeadroomWithin(timeout time.Duration) pgRunner {
+	return func(t pgTarget, secretsFile string) (int, error) { return runPgHeadroom(t, secretsFile, timeout) }
+}
+
+func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
+	args := []string{"run", "--rm", "--pull", "missing", "--network", "host", "--env-file", secretsFile,
+		"-e", "PGHOST=" + t.host, "-e", "PGPORT=" + t.port, "-e", "PGDATABASE=" + t.db, "-e", "PGUSER=" + t.user,
+		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-rollout-preflight"}
+	if t.sslmode != "" {
+		args = append(args, "-e", "PGSSLMODE="+t.sslmode)
+	} else {
+		// What the services do without sslmode in the URL: verify the
+		// server. Against the system's CAs here; a database behind a CA of
+		// its own fails this check, which then only warns.
+		args = append(args, "-e", "PGSSLMODE=verify-full", "-e", "PGSSLROOTCERT=system")
+	}
+	args = append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
+	out, stderr, err := docker.OutputWithin(timeout, args...)
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 125 {
+			// docker itself failed (pulling the image, or reading the
+			// secrets file -- whose parse errors can quote the file):
+			// its message is not repeated.
+			return 0, fmt.Errorf("docker couldn't run the check (pulling %s, or starting it, failed)", pgCheckImage)
+		}
+		// psql's own errors (refused, authentication failed, TLS) name
+		// the host and the user, never the password.
+		return 0, fmt.Errorf("%v%s", err, firstLine(stderr))
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("unexpected answer from psql")
+	}
+	return n, nil
+}
+
+// firstLine is the last non-empty line of psql's or docker's error output,
+// as ": <line>" -- the reason, without the pull progress. psql does not
+// print the password in its errors.
+func firstLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return ": " + l
+		}
+	}
+	return ""
+}
+
+// checkPgConnections refuses when Postgres can't take the pool of a stand-in
+// of any of services (they run one after another: the largest counts). It
+// only warns when the check itself can't run -- a config it can't read, the
+// image out of reach, a server it can't log in to: the rollout's own
+// readiness checks still stop a stand-in that can't connect.
+func checkPgConnections(bundleDir string, services []string, run pgRunner, warn func(string, ...any)) error {
+	if len(services) == 0 {
+		return nil
+	}
+	need, needFor := 0, ""
+	var target pgTarget
+	var secrets string
+	for _, svc := range services {
+		b, err := os.ReadFile(filepath.Join(bundleDir, svc+".conf"))
+		if err != nil {
+			warn("Warning: couldn't read %s.conf (%v) -- the Postgres connections a stand-in needs are not checked.\n", svc, err)
+			return nil
+		}
+		t, err := parsePgTarget(string(b))
+		if err != nil {
+			warn("Warning: couldn't read the Postgres settings of %s (%v) -- the connections a stand-in needs are not checked.\n", svc, err)
+			return nil
+		}
+		if n := t.pool + pgListenConns[svc]; n > need {
+			need, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
+		}
+	}
+	fmt.Println("Checking that Postgres has the connections for a stand-in replica...")
+	headroom, err := run(target, secrets)
+	if err != nil {
+		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. A stand-in opens %d.\n", err, need)
+		return nil
+	}
+	if headroom < need+pgMargin {
+		return fmt.Errorf("Postgres takes %d more connections and a stand-in %s replica opens %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or run with --no-surge",
+			headroom, needFor, need, pgMargin)
+	}
+	return nil
+}
+
+// ---- the real probes ----
+
+type hostMemory struct{ ops dockerRolloutOps }
+
+func (h hostMemory) available() (int64, bool, string, error) { return checks.HostMemoryAvailable() }
+
+func (h hostMemory) usage(service string) (int64, bool, error) {
+	ids, err := h.ops.containersOf(service)
+	if err != nil || len(ids) != 1 {
+		return 0, false, nil
+	}
+	if running, err := docker.IsRunning(ids[0]); err != nil || !running {
+		return 0, false, nil
+	}
+	// A failed or invalid reading ("-- / --": the container stopped in
+	// between) is "not measured", not an error: the floor applies.
+	out, _, err := docker.OutputWithin(30*time.Second, "stats", "--no-stream", "--format", "{{.MemUsage}}", ids[0])
+	if err != nil {
+		return 0, false, nil
+	}
+	b, err := parseMemUsage(string(out))
+	if err != nil {
+		return 0, false, nil
+	}
+	return b, true, nil
+}
+
+// parseMemUsage reads the first figure of docker stats' MemUsage ("812.4MiB
+// / 3.8GiB").
+func parseMemUsage(s string) (int64, error) {
+	first, _, _ := strings.Cut(strings.TrimSpace(s), "/")
+	first = strings.TrimSpace(first)
+	units := []struct {
+		suffix string
+		mult   float64
+	}{{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30}, {"TiB", 1 << 40}, {"kB", 1e3}, {"KB", 1e3}, {"MB", 1e6}, {"GB", 1e9}, {"B", 1}}
+	for _, u := range units {
+		if strings.HasSuffix(first, u.suffix) {
+			v, err := strconv.ParseFloat(strings.TrimSuffix(first, u.suffix), 64)
+			if err != nil {
+				return 0, fmt.Errorf("unexpected memory figure %q", first)
+			}
+			return int64(v * u.mult), nil
+		}
+	}
+	return 0, fmt.Errorf("unexpected memory figure %q", first)
+}

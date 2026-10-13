@@ -484,6 +484,67 @@ While a rollout or an abort is under way, `configure`, `up` and `replica`
 refuse, and so does `down` unless `--force` is given -- afterwards only
 `rollout` (or `--abort`) starts the deployment again, not `up`.
 
+**Before a stand-in starts** the rollout checks, and refuses with the
+numbers if either is short (the way round is `--no-surge`, which needs
+neither):
+
+- memory: free memory (`MemAvailable`) must hold one more replica --
+  what a running replica of that service uses now (`docker stats`), never
+  less than 900 MiB (since 0.7.0 a replica's JVM is sized at about
+  850-880 MiB, and a freshly started one has not reached that yet) -- plus
+  256 MiB: a rollout with a stand-in needs at least about 1.15 GiB free. Checked before anything changes and again
+  right before each stand-in. It has to run on the vps itself: with Docker
+  pointed at another host it refuses.
+- Postgres connections: a stand-in opens its whole pool at once (10 for
+  auth, 10 plus a LISTEN connection for edge, read from the bundle's
+  configs). `psql` in a throwaway `postgres:18-alpine` container (pulled
+  the first time) asks the server how many more client connections it
+  takes (counting other roles' sessions too); fewer than the pool plus 3 is
+  a refusal. The connection uses the `sslmode` of the service's URL
+  (versola-tools writes `disable` for a Postgres on loopback; without one,
+  `verify-full` against the system's CAs, as the services do). The check
+  runs again before each stand-in, with the new version's pool size. The password goes from
+  the service's `*.secrets.env` into that container's environment only --
+  never onto a command line or the screen. If the check can't run (no
+  image, a database behind a CA of its own, a login failure) it only
+  warns: a stand-in that can't connect never becomes ready and is removed
+  again.
+
+**Short outages a rollout does have:**
+
+- central is stopped and started (it is not replicated): the admin console
+  and self-registration are down until it is ready -- usually under a
+  minute, not yet measured on a loaded server. auth and edge keep serving.
+- auth's mutual-TLS port (8083) is passed through as TCP: taking a replica
+  out of the proxy ends the connections through it once the old nginx
+  workers stop (up to 30 s); clients reconnect. The listener is on by
+  default; nothing on id.versola.kz uses it today.
+- every edge replica the rollout starts (the stand-in, each recreated
+  slot, again on an abort) gets its own client certificate through
+  central.
+
+#### Runbook: a rolling upgrade on the vps
+
+1. Read the release notes of the new version: additive migrations, the
+   running version working on the new schema. If not, this is a
+   `configure` / `migrate` / `up` deployment instead (and 0.6.x -> 0.7.0
+   needs a fresh database).
+2. Back the database up (`pg_dump` of each schema) -- migrations can't be
+   rolled back -- and copy `~/.versola/active/state.json`.
+3. `versola rollout <version> --dry-run`: the plan, the checks, the
+   secrets plan, the migrations it would apply. Nothing changes.
+4. `versola rollout <version> --assume-compatible`. Cut off, run the same
+   command again; `versola status` shows where it stands.
+5. Check through the proxy (`curl -H 'Host: <your domain>'
+   http://127.0.0.1:2821/.well-known/openid-configuration` and the admin
+   console).
+
+Going back: `versola rollout --abort` while the rollout is unfinished
+(add `--no-surge` if the rollout needed it); once it finished, roll the
+earlier version out the same way. If the old version can't run on the
+migrated schema at all, restore the database from step 2 and deploy the
+old version with `configure` / `migrate` / `up`.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health

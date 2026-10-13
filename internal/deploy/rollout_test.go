@@ -77,8 +77,10 @@ type world struct {
 	// targetV and targetDir are what `compose up` creates containers of
 	// and from: the new version and bundle, or an abort's way back.
 	targetV, targetDir string
-	restored           string   // the bundle restorePrevious made active
-	oneOffs            []string // running `compose run` containers
+	restored           string          // the bundle restorePrevious made active
+	oneOffs            []string        // running `compose run` containers
+	memShort           map[string]bool // standInMemory refuses for these services
+	memChecked         []string
 }
 
 func newWorld(t *testing.T, st *state.State) *world {
@@ -307,6 +309,14 @@ func (w *world) restorePrevious(bundle string, _ time.Time) error {
 }
 
 func (w *world) oneOffsRunning() ([]string, error) { return w.oneOffs, nil }
+
+func (w *world) standInCheck(_ *state.State, svc string) error {
+	w.memChecked = append(w.memChecked, svc)
+	if w.memShort[svc] {
+		return fmt.Errorf("not enough free memory for a stand-in %s replica", svc)
+	}
+	return nil
+}
 
 func (w *world) removeContainer(service string) error {
 	return w.step("rm "+service, func() error {
@@ -758,7 +768,7 @@ func TestRolloutPlanAndSummary(t *testing.T) {
 	st := rolloutGuardState(t)
 	st.SetSlots(AuthService, []state.Slot{{N: 1, Version: fromV}, {N: 2, Version: fromV}})
 	plan := RolloutPlan(st, toV, RolloutOptions{})
-	for _, want := range []string{"0.6.2 -> 0.7.0", "Postgres at 127.0.0.1:5432", "auth: a stand-in on 0.7.0 in slot 3", "edge: a stand-in on 0.7.0 in slot 2", "free -m", "central: stopped and started"} {
+	for _, want := range []string{"0.6.2 -> 0.7.0", "Postgres at 127.0.0.1:5432", "auth: a stand-in on 0.7.0 in slot 3", "edge: a stand-in on 0.7.0 in slot 2", "Both are checked before it starts", "central: stopped and started"} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("plan lacks %q:\n%s", want, plan)
 		}

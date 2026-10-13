@@ -251,3 +251,27 @@ func applyShield(c *exec.Cmd) {
 		shield(c)
 	}
 }
+
+// OutputWithin runs docker bounded by timeout and returns its stdout and
+// stderr separately: for a short check whose failure is reported, not
+// streamed (a rolling upgrade's Postgres preflight). Running out of time is
+// an error.
+func OutputWithin(timeout time.Duration, args ...string) (stdout []byte, stderr string, err error) {
+	done, err := track()
+	if err != nil {
+		return nil, "", err
+	}
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "docker", args...)
+	applyShield(c)
+	c.WaitDelay = time.Second
+	var errBuf strings.Builder
+	c.Stderr = &errBuf
+	out, err := c.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return out, errBuf.String(), fmt.Errorf("docker didn't finish within %s", timeout)
+	}
+	return out, errBuf.String(), err
+}

@@ -35,8 +35,13 @@ services:
     # showing the container its old copy. The same path on every configure,
     # so a new bundle does not recreate the container either.
     command: ["nginx", "-c", {{ .ConfPath }}, "-g", "daemon off;"]
+    # Long syntax: the short "src:dst:ro" form splits on every colon, so a
+    # path with one in it would not be one value.
     volumes:
-      - {{ .GenerationsMount }}
+      - type: bind
+        source: {{ .GenerationsSource }}
+        target: {{ .GenerationsTarget }}
+        read_only: true
 {{- else }}
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro

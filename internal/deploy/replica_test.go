@@ -43,6 +43,9 @@ func (f *fakeOps) waitDrained() { f.events = append(f.events, "drained") }
 func (f *fakeOps) reload(c proxy.Config) error {
 	return f.do("reload " + backends(c))
 }
+func (f *fakeOps) waitFronts(fr proxy.Fronts) error {
+	return f.do(fmt.Sprintf("fronts %d/%d", fr.Additional, fr.MutualTLS))
+}
 func (f *fakeOps) writeUpstreams(c proxy.Config) error {
 	return f.do("upstreams " + backends(c))
 }
@@ -414,5 +417,47 @@ func TestHostPortsOfSkipsOtherAddresses(t *testing.T) {
 	}
 	if got := hostPortsOf(auth[0], false); !reflect.DeepEqual(got, []int{8180}) {
 		t.Errorf("only the loopback publication can be probed: %v", got)
+	}
+}
+
+// On vps a reload is only trusted once the fronts answer: `nginx -s
+// reload` returns before nginx has applied (or failed to apply) anything.
+func TestAddChecksTheFrontsAfterTheReload(t *testing.T) {
+	ops := newFakeOps()
+	s := testScaler(t, ops, nil)
+	s.fronts = proxy.Fronts{Additional: 8082, MutualTLS: 8083}
+	if err := s.add(AuthService, 1); err != nil {
+		t.Fatal(err)
+	}
+	reload, fronts := -1, -1
+	for i, e := range ops.events {
+		if strings.HasPrefix(e, "reload") {
+			reload = i
+		}
+		if e == "fronts 8082/8083" {
+			fronts = i
+		}
+	}
+	if reload < 0 || fronts != reload+1 {
+		t.Errorf("events: %v", ops.events)
+	}
+
+	ops = newFakeOps()
+	ops.failOn["fronts 8082/8083"] = errors.New("502")
+	s = testScaler(t, ops, nil)
+	s.fronts = proxy.Fronts{Additional: 8082, MutualTLS: 8083}
+	err := s.add(AuthService, 1)
+	if err == nil || !strings.Contains(err.Error(), "isn't serving its fronts") {
+		t.Errorf("err = %v", err)
+	}
+	// Without fronts (local) there is nothing to ask.
+	ops = newFakeOps()
+	if err := testScaler(t, ops, nil).add(AuthService, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ops.events {
+		if strings.HasPrefix(e, "fronts") {
+			t.Errorf("asked the fronts without any: %v", ops.events)
+		}
 	}
 }

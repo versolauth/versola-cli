@@ -173,9 +173,10 @@ func poll(timeout time.Duration, try func() error) error {
 //   - APORT: an HTTP answer through the proxy that is not its own "nothing
 //     behind me" (502, 504) -- whatever auth answers on its path, it is
 //     auth answering.
-//   - MPORT: the proxy accepts a TCP connection there. No TLS handshake:
-//     TLS is auth's, and a release without the mutual-TLS listener has
-//     nothing behind it (nothing calls it then either).
+//   - MPORT: the proxy accepts a TCP connection there -- which proves the
+//     proxy listens, not that an auth replica answers behind it. No TLS
+//     handshake: TLS is auth's, and a release without the mutual-TLS
+//     listener has nothing behind it (nothing calls it then either).
 func WaitFronts(f Fronts, timeout time.Duration) error {
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return poll(timeout, func() error { return checkFronts(client, f) })
@@ -194,7 +195,7 @@ func checkFronts(client *http.Client, f Fronts) error {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.MutualTLS))
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("auth's MPORT through the proxy (%s): %w", addr, err)
+		return fmt.Errorf("the proxy doesn't accept connections in front of auth's MPORT (%s): %w", addr, err)
 	}
 	conn.Close()
 	return nil

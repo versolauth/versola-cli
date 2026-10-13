@@ -355,11 +355,12 @@ func (c Config) Files() (map[string][]byte, error) {
 		"HostNetwork":   c.Mode != ModeLocal,
 		"Stream":        c.Fronts.set(),
 		"Generations":   c.GenerationsDir != "",
-		// JSON strings are YAML's double-quoted scalars: a path with spaces
-		// or a colon stays one value.
-		"ConfPath": quoteYAML(GenerationMount + "/" + CurrentGeneration + "/nginx.conf"),
-		// `$` doubled: Compose would otherwise interpolate it.
-		"GenerationsMount": quoteYAML(strings.ReplaceAll(c.GenerationsDir, "$", "$$") + ":" + GenerationMount + ":ro"),
+		// JSON strings are YAML's double-quoted scalars, so a path with
+		// spaces stays one value; `$` is doubled, or Compose would
+		// interpolate it.
+		"ConfPath":          quoteYAML(GenerationMount + "/" + CurrentGeneration + "/nginx.conf"),
+		"GenerationsSource": quoteYAML(strings.ReplaceAll(c.GenerationsDir, "$", "$$")),
+		"GenerationsTarget": GenerationMount,
 	}
 
 	files, err := c.DynamicFiles()

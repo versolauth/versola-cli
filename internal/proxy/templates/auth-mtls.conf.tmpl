@@ -17,4 +17,8 @@ server {
     listen 127.0.0.1:{{ .MutualTLSListen }};
     proxy_pass auth_mutual_tls;
     proxy_connect_timeout 5s;
+    # A pass-through connection is closed after this long without a byte
+    # either way (nginx's default is 10 minutes): edge keeps its mutual-TLS
+    # connections pooled, and reconnects when one is closed.
+    proxy_timeout 1h;
 }

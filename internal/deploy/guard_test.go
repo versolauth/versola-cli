@@ -35,7 +35,7 @@ func guardBundle(t *testing.T, withUpstreams bool) (*state.State, string) {
 			t.Fatal(err)
 		}
 		// What configure writes on vps since config generations.
-		yml := "services:\n  proxy:\n    volumes:\n      - \"/home/v/.versola/active/proxy-vps:" + proxy.GenerationMount + ":ro\"\n"
+		yml := "services:\n  proxy:\n    volumes:\n      - type: bind\n        source: \"/home/v/.versola/active/proxy-vps\"\n        target: " + proxy.GenerationMount + "\n        read_only: true\n"
 		if err := os.WriteFile(filepath.Join(bundle, proxy.ComposeFile), []byte(yml), 0o600); err != nil {
 			t.Fatal(err)
 		}

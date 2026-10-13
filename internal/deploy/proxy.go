@@ -214,7 +214,7 @@ func startProxy(composePath string, st *state.State, routed proxy.Config) error 
 	}
 	if routed.Fronts != (proxy.Fronts{}) {
 		if err := proxyOps.waitFronts(routed.Fronts); err != nil {
-			return fmt.Errorf("the reverse proxy doesn't reach auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+			return fmt.Errorf("the reverse proxy isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
 		}
 	}
 	return nil

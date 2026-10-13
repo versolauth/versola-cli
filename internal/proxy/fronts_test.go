@@ -67,7 +67,7 @@ func TestFilesWithFronts(t *testing.T) {
 	compose := string(files[ComposeFile])
 	for _, w := range []string{
 		`command: ["nginx", "-c", "/etc/nginx/versola/current/nginx.conf", "-g", "daemon off;"]`,
-		`- "/home/v/.versola/active/proxy-vps:/etc/nginx/versola:ro"`,
+		"- type: bind\n        source: \"/home/v/.versola/active/proxy-vps\"\n        target: /etc/nginx/versola\n        read_only: true\n",
 		"network_mode: host",
 	} {
 		if !strings.Contains(compose, w) {
@@ -92,7 +92,7 @@ func TestFilesWithFrontsTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	compose := string(files[ComposeFile])
-	for _, w := range []string{`- "/home/v/.versola/active/proxy-vps:/etc/nginx/versola:ro"`, "- " + ACMEVolume + ":/var/cache/nginx/acme-letsencrypt"} {
+	for _, w := range []string{"source: \"/home/v/.versola/active/proxy-vps\"\n        target: /etc/nginx/versola\n", "- " + ACMEVolume + ":/var/cache/nginx/acme-letsencrypt"} {
 		if !strings.Contains(compose, w) {
 			t.Errorf("proxy.yml lacks %q:\n%s", w, compose)
 		}
@@ -216,7 +216,30 @@ func TestGenerationsMountEscapesDollar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(files[ComposeFile]), `"/home/a$$b/.versola/active/proxy-vps:/etc/nginx/versola:ro"`) {
+	if !strings.Contains(string(files[ComposeFile]), `source: "/home/a$$b/.versola/active/proxy-vps"`) {
 		t.Errorf("proxy.yml:\n%s", files[ComposeFile])
+	}
+}
+
+// A colon or a comma in the home directory: one value in proxy.yml (long
+// syntax) and in docker's --mount (a quoted CSV field).
+func TestGenerationsPathWithColonAndComma(t *testing.T) {
+	c := frontedConfig(t)
+	c.GenerationsDir = "/home/a:b,c/.versola/active/proxy-vps"
+	files, err := c.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(files[ComposeFile]), `source: "/home/a:b,c/.versola/active/proxy-vps"`) {
+		t.Errorf("proxy.yml:\n%s", files[ComposeFile])
+	}
+	if got := csvField("src=/home/a:b,c"); got != `"src=/home/a:b,c"` {
+		t.Errorf("csvField: %s", got)
+	}
+	if got := csvField(`src=/x"y,z`); got != `"src=/x""y,z"` {
+		t.Errorf("csvField with a quote: %s", got)
+	}
+	if got := csvField("src=/home/v"); got != "src=/home/v" {
+		t.Errorf("csvField plain: %s", got)
 	}
 }

@@ -209,15 +209,30 @@ func copyTree(src, dst string) error {
 func validateGeneration(dir, gen string) error {
 	stateDir := "/var/cache/nginx/acme-letsencrypt"
 	prepare := "mkdir -p " + stateDir + "/" + acmeStateDir(ACMEProduction) + " " + stateDir + "/" + acmeStateDir(ACMEStaging)
-	_, err := dockerOutput("run", "--rm", "--entrypoint", "sh",
+	_, err := dockerOutput("run", "--rm", "--network", "none", "--entrypoint", "sh",
 		"--tmpfs", stateDir,
-		// --mount, not -v: a path with a colon is one value here.
-		"--mount", "type=bind,src="+dir+",dst="+GenerationMount+",readonly",
+		// --mount, not -v: -v splits on colons. Its value is a CSV record,
+		// so a path with a comma or a quote is quoted as one field.
+		"--mount", "type=bind,"+csvField("src="+dir)+",dst="+GenerationMount+",readonly",
 		Image, "-c", prepare+" && exec nginx -t -c "+confPath(gen))
 	if err != nil {
+		// 125 is docker run's own failure (no image and the pull failed,
+		// no daemon, a bad flag): the config was never looked at.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 125 {
+			return fmt.Errorf("couldn't run %s to check the new proxy config (nothing was changed): %s", Image, nginxSays(err))
+		}
 		return fmt.Errorf("nginx rejected the new proxy config (nothing was changed): %s", nginxSays(err))
 	}
 	return nil
+}
+
+// csvField is s as one field of a CSV record (docker's --mount value).
+func csvField(s string) string {
+	if !strings.ContainsAny(s, ",\"\n\r") {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // nginxSays is nginx's own words from a failed docker call (stderr), or
@@ -348,5 +363,5 @@ func ReloadCurrent(mode string) error {
 // to reload into: such a bundle is configured again, not started.
 func UsesGenerations(bundleDir string) bool {
 	b, err := os.ReadFile(filepath.Join(bundleDir, ComposeFile))
-	return err == nil && bytes.Contains(b, []byte(":"+GenerationMount+":ro"))
+	return err == nil && bytes.Contains(b, []byte("target: "+GenerationMount+"\n"))
 }

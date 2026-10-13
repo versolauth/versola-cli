@@ -417,8 +417,14 @@ Its configuration lives outside the deployment bundles, in
 `current` pointing at the one in use. `up` and `replica add|remove` build
 a new generation, have nginx check it in a throwaway container, switch
 `current` and reload nginx -- the container is not restarted, so requests
-in flight finish. It is recreated only when its definition changes (a new
-image, or once, the first time a deployment moves to this layout).
+in flight finish. Compose recreates it only when its definition changes:
+once, the first time a deployment moves to this layout, and after that for
+a new proxy image or a change of `--proxy` mode or TLS.
+
+A reload ends the TCP connections passed through to auth's MPORT once the
+old nginx workers stop (after up to 30 seconds), and a connection idle for
+an hour is closed; edge reconnects. A replica added later gets new
+connections only.
 
 This needs a Versola release whose versola-tools ships the admin console;
 `configure vps` says so clearly when pointed at an older one.

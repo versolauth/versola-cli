@@ -94,6 +94,7 @@ func TestApplyBuildsChecksAndSwitches(t *testing.T) {
 	}
 	// Checked in a throwaway container, against that generation.
 	if len(f.calls) != 1 || !strings.HasPrefix(f.calls[0], "run --rm") ||
+		!strings.Contains(f.calls[0], "--network none") ||
 		!strings.Contains(f.calls[0], "type=bind,src="+c.GenerationsDir+",dst=/etc/nginx/versola,readonly") ||
 		!strings.Contains(f.calls[0], "nginx -t -c /etc/nginx/versola/gen-000001/nginx.conf") {
 		t.Errorf("validation: %v", f.calls)
@@ -116,8 +117,6 @@ func TestApplyBuildsChecksAndSwitches(t *testing.T) {
 	}
 }
 
-// A config nginx refuses changes nothing: `current` stays, the rejected
-// generation is gone, and nginx's words are in the error.
 // A restrictive umask does not leave the generation unreadable to nginx.
 func TestGenerationReadableUnderUmask(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -142,6 +141,8 @@ func TestGenerationReadableUnderUmask(t *testing.T) {
 	}
 }
 
+// A config nginx refuses changes nothing: `current` stays, the rejected
+// generation is gone, and nginx's words are in the error.
 func TestApplyRefusedChangesNothing(t *testing.T) {
 	f := &fakeDocker{}
 	f.install(t)
@@ -295,5 +296,23 @@ func TestNginxAcceptsGenerations(t *testing.T) {
 				t.Fatalf("nginx -t through current: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// docker run failing on its own (exit 125: no image, no daemon) is not
+// nginx rejecting the config, and says so; nothing changes either way.
+func TestValidateRunFailure(t *testing.T) {
+	f := &fakeDocker{}
+	f.install(t)
+	c, bundle := generationsConfig(t)
+	cmd := exec.Command("sh", "-c", "echo 'Unable to find image' >&2; exit 125")
+	_, runErr := cmd.Output()
+	f.validate = runErr
+	_, err := Apply(bundle, c)
+	if err == nil || !strings.Contains(err.Error(), "couldn't run "+Image) || strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("err = %v", err)
+	}
+	if cur, _ := currentGeneration(c.GenerationsDir); cur != "" {
+		t.Errorf("current %q", cur)
 	}
 }

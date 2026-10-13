@@ -37,6 +37,9 @@ type replicaOps interface {
 	waitReady(url string) error
 	// reload makes the running proxy route to c's backends.
 	reload(c proxy.Config) error
+	// waitFronts waits until the proxy serves its fronts of auth's
+	// APORT/MPORT (vps), after a reload.
+	waitFronts(f proxy.Fronts) error
 	// writeUpstreams only stages the config (proxy.Stage), when there is no
 	// proxy to reload: the next start of it uses it.
 	writeUpstreams(c proxy.Config) error
@@ -328,7 +331,18 @@ func (s *replicaScaler) route(c proxy.Config) error {
 	if !running {
 		return s.ops.writeUpstreams(c)
 	}
-	return s.ops.reload(c)
+	if err := s.ops.reload(c); err != nil {
+		return err
+	}
+	// `nginx -s reload` only signals nginx: a config it then fails to apply
+	// (a port it can't bind, say) is only in its log. The fronts answering
+	// is what shows the reload took.
+	if c.Fronts != (proxy.Fronts{}) {
+		if err := s.ops.waitFronts(c.Fronts); err != nil {
+			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(s.st.ProxyMode))
+		}
+	}
+	return nil
 }
 
 // remove stops count replicas of service, the highest slots first, one at
@@ -400,6 +414,9 @@ func (o dockerReplicaOps) compose(args ...string) error {
 }
 func (o dockerReplicaOps) waitReady(url string) error  { return wait.ForReady(url, 60*time.Second) }
 func (o dockerReplicaOps) reload(c proxy.Config) error { return proxy.Reload(o.dir, c) }
+func (o dockerReplicaOps) waitFronts(f proxy.Fronts) error {
+	return proxy.WaitFronts(f, 15*time.Second)
+}
 func (o dockerReplicaOps) writeUpstreams(c proxy.Config) error {
 	return proxy.Stage(o.dir, c)
 }

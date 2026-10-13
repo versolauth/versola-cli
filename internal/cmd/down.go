@@ -7,10 +7,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-var removeVolumes bool
+var (
+	removeVolumes bool
+	downForce     bool
+)
 
 var downCmd = &cobra.Command{
 	Use:   "down",
@@ -23,6 +27,7 @@ picks up the same data. Pass --volumes to delete it instead.`,
 
 func init() {
 	downCmd.Flags().BoolVar(&removeVolumes, "volumes", false, "also remove the Postgres data volume")
+	downCmd.Flags().BoolVar(&downForce, "force", false, "stop the stack even while a rolling upgrade is under way")
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
@@ -36,6 +41,15 @@ func runDown(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer unlock()
+
+	// While a rolling upgrade is under way, stopping everything is rarely
+	// what is meant (it takes a vps deployment down mid-upgrade), and `up`
+	// can't start it again afterwards -- only `rollout` can.
+	if st, err := state.Load(); err == nil {
+		if err := deploy.DownBlocked(st, downForce); err != nil {
+			return err
+		}
+	}
 
 	composePath, exists, err := state.ComposeFile()
 	if err != nil {

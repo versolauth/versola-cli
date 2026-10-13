@@ -32,8 +32,21 @@ moment a POST is written fails whatever the CLI did.
 
 ```
 ./run.sh run /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
+./run.sh run /path/to/versola --abort-at prepared|central|standin|midway
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
+
+`--abort-at` stops the rollout with SIGTERM ("stop after the step under
+way") once its output shows that phase, runs `versola rollout --abort` under
+the same traffic, and passes when the abort exits 0, the traffic client
+reports no failures, and every central/auth/edge container is version A
+again. `prepared` (stopped while pulling, before migrate) must restore the
+previous configuration without restarting anything; the client then only
+expects version A. With `--no-surge` there is no stand-in, so `standin`
+stops after the first replaced replica, like `midway`. What stubs can't
+show: the old version on a really migrated schema, edge registering its
+client certificate with central, real start times -- those need the real
+images (the `0.7.0` -> `0.7.0-rt1` run on the stand).
 
 Linux only, needs more than 3.25 GiB of available memory and 4 GiB of disk (the
 CLI's own prerequisite checks) and free ports 2821, 8082, 8083 and 8200. It

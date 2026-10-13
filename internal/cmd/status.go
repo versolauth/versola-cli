@@ -56,6 +56,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Migrations applied: never (run `versola migrate`)")
 		}
+		if st.Env != "" && st.Env != deploy.ProdEnv {
+			fmt.Printf("Environment: %s (TEST MODE: fixed OTP code, no SMS/e-mail delivery -- not for real users)\n", st.Env)
+		}
 		fmt.Println(deploy.ReplicaSummary(st))
 		fmt.Println()
 	}

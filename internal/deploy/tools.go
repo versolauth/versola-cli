@@ -89,7 +89,7 @@ func OpenbaoContainerName(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
+func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg VpsOptions) error {
 	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg)
 }
 
@@ -97,7 +97,7 @@ func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg Postgr
 // stdout instead of always to this process's own: a command that prints a
 // machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
 // so the progress of the pull does not end up inside the result.
-func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg VpsOptions) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -180,21 +180,8 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		}
 	}
 	args = append(args, "-e", "TARGET="+toolsTarget(target))
-	// -e ENV_NAME=...: the literal environment name gen-env.scala writes
-	// into the generated configs -- deliberately not derived from target
-	// (vps isn't itself an environment: the same VPS could run "prod"
-	// today and "qa" tomorrow -- see gen-env.scala's own comment on `env`,
-	// and goshacodes' review on versolauth/versola#176). Only vps needs
-	// this: docker-local's env is always fixed to "docker-local"
-	// regardless. Hardcoded to "prod" here for now, matching the one real
-	// VPS this deploys to today -- this is the one place a future
-	// `--env` flag on `configure vps` would plug in, once there's a
-	// second real target that isn't prod.
-	if target == "vps" {
-		args = append(args, "-e", "ENV_NAME=prod")
-	}
 	// -e AUTH_URL=...: the public domain this deployment is reachable at.
-	// Unlike ENV_NAME above, this has no sensible hardcoded default here
+	// This has no sensible hardcoded default here
 	// -- it's specific to whoever's deploying (see goshacodes' review on
 	// versolauth/versola#176: "this is our domain, users of cli will have
 	// other domains"), so it comes from the caller (Configure, which got
@@ -210,7 +197,9 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 	// deploying, comes from --postgres-host via Configure.
 	if target == "vps" {
 		args = append(args, "-e", "POSTGRES_HOST="+postgresHost)
-		// -e POSTGRES_DB=... and the -v/-e POSTGRES_CA_FILE pair, only when
+		// -e ENV_NAME=... (the environment name gen-env writes into the
+		// configs; "prod" unless --env), then -e POSTGRES_DB=... and the
+		// -v/-e POSTGRES_CA_FILE pair, only when
 		// --postgres-db/--postgres-ca were given (versola-tools defaults the
 		// database to "auth" and has no CA otherwise). The CA file is
 		// mounted read-only: the container runs as this process's UID (-u

@@ -54,7 +54,7 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
+func Configure(target, version, authURL, postgresHost string, pg VpsOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
 	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
 }
 
@@ -95,7 +95,7 @@ type stagedConfigure struct {
 // The secrets plan (0f) is applied here, before any container of the new
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
-func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
+func configure(target, version, authURL, postgresHost string, pg VpsOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -470,7 +470,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
-		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
+		Env: pg.Env, PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}
 	if staged != nil {

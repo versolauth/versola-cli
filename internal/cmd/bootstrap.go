@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -17,6 +18,7 @@ var postgresHost string
 var setupOpenBao bool
 var bootstrapProxy string
 var bootstrapACMEStaging bool
+var bootstrapEnv string
 var bootstrapPostgresDB string
 var bootstrapPostgresCA string
 var bootstrapGenerateMissing []string
@@ -33,9 +35,16 @@ Currently supported:
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
+  versola bootstrap vps 0.1.1 --auth-url https://qa.example.com --postgres-host 127.0.0.1:5432 --env qa
 
 On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
 certificate -- see "versola configure --help" for --proxy.
+
+On vps, --env <name> (default: prod) sets the environment. Any name but
+"prod" is a TEST environment (fixed OTP code 123456, no SMS/e-mail delivery,
+temporary passwords can be revealed) and prints a warning first -- see
+"versola configure --help"; a later run without the flag keeps the stored
+value, so going back to production needs an explicit --env prod.
 
 On vps, --postgres-db names the database (default: auth) and --postgres-ca
 points at a PEM file with the CA that signed Postgres' server certificate
@@ -79,6 +88,7 @@ func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	bootstrapCmd.Flags().StringVar(&bootstrapEnv, "env", "", envUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
@@ -116,9 +126,13 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
-	pg, err := deploy.PostgresOptions{DB: bootstrapPostgresDB, CAFile: bootstrapPostgresCA}.Validate(target)
+	pg, err := deploy.VpsOptions{Env: bootstrapEnv, DB: bootstrapPostgresDB, CAFile: bootstrapPostgresCA}.Validate(target)
 	if err != nil {
 		return err
+	}
+
+	if w := deploy.TestModeWarning(target, pg); w != "" {
+		fmt.Fprint(os.Stderr, w)
 	}
 
 	// Held for the whole configure/migrate/up sequence below -- see

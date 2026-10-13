@@ -211,7 +211,7 @@ versola up
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
   it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
-  and accepts `--postgres-db` and `--postgres-ca`.
+  and accepts `--env`, `--postgres-db` and `--postgres-ca`.
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -368,6 +368,17 @@ serves the admin console at `/central/admin/`.
   ```
   versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   ```
+
+  `--env <name>` (default `prod`) sets the environment the services run
+  as. Only the exact name `prod` is production; any other name is a test
+  environment (fixed OTP code `123456` with no SMS/e-mail delivery,
+  temporary passwords can be revealed, `/service/*` enabled) and `configure`
+  and `bootstrap` print a warning first -- such a deployment must not serve
+  real users. The name is lower-case letters, digits, `-` or `_`, up to 32.
+  It is vps-only and remembered (`rollout` and `secrets plan` reuse it, and
+  `status` shows it when it is not `prod`); a later `configure` without the
+  flag keeps the stored value, so going back to production needs an
+  explicit `--env prod`.
 
   Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
   picks the database (default `auth`) and `--postgres-ca <file>` is a PEM

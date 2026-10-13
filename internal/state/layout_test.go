@@ -92,6 +92,7 @@ func TestLayout3RoundTrip(t *testing.T) {
 		PostgresHost:      "127.0.0.1:5432",
 		PreviousVersion:   "0.6.3",
 		Surge:             map[string]int{"auth": 2},
+		Env:               "qa",
 		PostgresDB:        "versola",
 		PostgresCA:        PostgresCAFileName,
 	}
@@ -115,13 +116,13 @@ func TestLayout3RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &keys); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa"} {
+	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa", "env"} {
 		if _, ok := keys[k]; !ok {
 			t.Errorf("state.json lacks %q", k)
 		}
 	}
-	if string(keys["schemaVersion"]) != "4" {
-		t.Errorf("schemaVersion = %s, want 4", keys["schemaVersion"])
+	if string(keys["schemaVersion"]) != "5" {
+		t.Errorf("schemaVersion = %s, want 5", keys["schemaVersion"])
 	}
 }
 
@@ -132,7 +133,7 @@ func TestLayout3EmptyFieldsOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa"} {
+	for _, k := range []string{"postgresHost", "previousVersion", "surge", "postgresDb", "postgresCa", "env"} {
 		if strings.Contains(string(b), k) {
 			t.Errorf("%s written while empty: %s", k, b)
 		}
@@ -141,7 +142,7 @@ func TestLayout3EmptyFieldsOmitted(t *testing.T) {
 
 func TestLoadRefusesNewerLayout(t *testing.T) {
 	dir := activeDir(t)
-	writeState(t, dir, `{"schemaVersion":5,"target":"vps","version":"9.9.9"}`)
+	writeState(t, dir, `{"schemaVersion":6,"target":"vps","version":"9.9.9"}`)
 	if _, err := Load(); !errors.Is(err, ErrNewerSchema) {
 		t.Fatalf("got %v, want ErrNewerSchema", err)
 	}
@@ -255,7 +256,7 @@ func TestFinalizeOverLayout1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.SchemaVersion != 4 || s.PostgresHost != "127.0.0.1:5432" || s.Version != "0.7.0" {
+	if s.SchemaVersion != 5 || s.PostgresHost != "127.0.0.1:5432" || s.Version != "0.7.0" {
 		t.Errorf("got %+v", s)
 	}
 	if s.PreviousVersion != "" || s.Surge != nil || s.Slots != nil {
@@ -266,5 +267,18 @@ func TestFinalizeOverLayout1(t *testing.T) {
 	}
 	if _, err := os.Stat(oldBundle); err != nil {
 		t.Errorf("the bundle the running containers mount was removed: %v", err)
+	}
+}
+
+// A record written before layout 5 has no env: it loads, and reads as prod.
+func TestLayout4RecordLoadsAsProd(t *testing.T) {
+	dir := activeDir(t)
+	writeState(t, dir, `{"schemaVersion":4,"target":"vps","version":"0.7.0","bundleDir":"bundle-1","postgresHost":"db:5432","postgresDb":"versola"}`)
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Env != "" || s.PostgresDB != "versola" {
+		t.Errorf("got %+v, want empty Env (prod) and the rest kept", s)
 	}
 }

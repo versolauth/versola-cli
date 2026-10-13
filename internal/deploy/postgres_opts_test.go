@@ -10,7 +10,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-func TestPostgresOptionsValidate(t *testing.T) {
+func TestVpsOptionsValidate(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
 		p := filepath.Join(dir, name)
@@ -24,24 +24,33 @@ func TestPostgresOptionsValidate(t *testing.T) {
 
 	cases := map[string]struct {
 		target  string
-		opts    PostgresOptions
+		opts    VpsOptions
 		wantErr string
 	}{
-		"nothing set, local": {"local", PostgresOptions{}, ""},
-		"nothing set, vps":   {"vps", PostgresOptions{}, ""},
-		"db ok":              {"vps", PostgresOptions{DB: "versola_prod-1"}, ""},
-		"db max length":      {"vps", PostgresOptions{DB: strings.Repeat("a", 63)}, ""},
-		"db too long":        {"vps", PostgresOptions{DB: strings.Repeat("a", 64)}, "not a valid database name"},
-		"db with space":      {"vps", PostgresOptions{DB: "my db"}, "not a valid database name"},
-		"db with quote":      {"vps", PostgresOptions{DB: `a"b`}, "not a valid database name"},
-		"db with dot":        {"vps", PostgresOptions{DB: "a.b"}, "not a valid database name"},
-		"db local":           {"local", PostgresOptions{DB: "x"}, "--postgres-db only applies to vps"},
-		"ca ok":              {"vps", PostgresOptions{CAFile: good}, ""},
-		"ca local":           {"local", PostgresOptions{CAFile: good}, "--postgres-ca only applies to vps"},
-		"ca missing":         {"vps", PostgresOptions{CAFile: filepath.Join(dir, "nope.pem")}, "--postgres-ca:"},
-		"ca is a directory":  {"vps", PostgresOptions{CAFile: dir}, "not a regular file"},
-		"ca not a PEM":       {"vps", PostgresOptions{CAFile: notPEM}, "does not contain a PEM certificate"},
-		"both ok":            {"vps", PostgresOptions{DB: "versola", CAFile: good}, ""},
+		"env ok":             {"vps", VpsOptions{Env: "qa-2_x"}, ""},
+		"env prod":           {"vps", VpsOptions{Env: "prod"}, ""},
+		"env max length":     {"vps", VpsOptions{Env: strings.Repeat("a", 32)}, ""},
+		"env too long":       {"vps", VpsOptions{Env: strings.Repeat("a", 33)}, "not a valid environment name"},
+		"env upper case":     {"vps", VpsOptions{Env: "QA"}, "not a valid environment name"},
+		"env with space":     {"vps", VpsOptions{Env: "q a"}, "not a valid environment name"},
+		"env with dot":       {"vps", VpsOptions{Env: "q.a"}, "not a valid environment name"},
+		"env with slash":     {"vps", VpsOptions{Env: "a/b"}, "not a valid environment name"},
+		"env local":          {"local", VpsOptions{Env: "qa"}, "--env only applies to vps"},
+		"nothing set, local": {"local", VpsOptions{}, ""},
+		"nothing set, vps":   {"vps", VpsOptions{}, ""},
+		"db ok":              {"vps", VpsOptions{DB: "versola_prod-1"}, ""},
+		"db max length":      {"vps", VpsOptions{DB: strings.Repeat("a", 63)}, ""},
+		"db too long":        {"vps", VpsOptions{DB: strings.Repeat("a", 64)}, "not a valid database name"},
+		"db with space":      {"vps", VpsOptions{DB: "my db"}, "not a valid database name"},
+		"db with quote":      {"vps", VpsOptions{DB: `a"b`}, "not a valid database name"},
+		"db with dot":        {"vps", VpsOptions{DB: "a.b"}, "not a valid database name"},
+		"db local":           {"local", VpsOptions{DB: "x"}, "--postgres-db only applies to vps"},
+		"ca ok":              {"vps", VpsOptions{CAFile: good}, ""},
+		"ca local":           {"local", VpsOptions{CAFile: good}, "--postgres-ca only applies to vps"},
+		"ca missing":         {"vps", VpsOptions{CAFile: filepath.Join(dir, "nope.pem")}, "--postgres-ca:"},
+		"ca is a directory":  {"vps", VpsOptions{CAFile: dir}, "not a regular file"},
+		"ca not a PEM":       {"vps", VpsOptions{CAFile: notPEM}, "does not contain a PEM certificate"},
+		"both ok":            {"vps", VpsOptions{DB: "versola", CAFile: good}, ""},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -62,13 +71,13 @@ func TestPostgresOptionsValidate(t *testing.T) {
 	}
 }
 
-func TestPostgresOptionsValidateMakesCAAbsolute(t *testing.T) {
+func TestVpsOptionsValidateMakesCAAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	got, err := PostgresOptions{CAFile: "ca.pem"}.Validate("vps")
+	got, err := VpsOptions{CAFile: "ca.pem"}.Validate("vps")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,17 +87,19 @@ func TestPostgresOptionsValidateMakesCAAbsolute(t *testing.T) {
 	}
 }
 
-func TestPostgresOptionsToolsArgs(t *testing.T) {
+func TestVpsOptionsToolsArgs(t *testing.T) {
 	cases := map[string]struct {
-		opts PostgresOptions
+		opts VpsOptions
 		want []string
 	}{
-		"none": {PostgresOptions{}, nil},
-		"db":   {PostgresOptions{DB: "versola"}, []string{"-e", "POSTGRES_DB=versola"}},
-		"ca": {PostgresOptions{CAFile: "/etc/ssl/db-ca.pem"},
-			[]string{"-v", "/etc/ssl/db-ca.pem:/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}},
-		"both": {PostgresOptions{DB: "versola", CAFile: "/ca.pem"},
-			[]string{"-e", "POSTGRES_DB=versola", "-v", "/ca.pem:/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}},
+		"none":          {VpsOptions{}, []string{"-e", "ENV_NAME=prod"}},
+		"env":           {VpsOptions{Env: "qa"}, []string{"-e", "ENV_NAME=qa"}},
+		"explicit prod": {VpsOptions{Env: "prod"}, []string{"-e", "ENV_NAME=prod"}},
+		"db":            {VpsOptions{DB: "versola"}, []string{"-e", "ENV_NAME=prod", "-e", "POSTGRES_DB=versola"}},
+		"ca": {VpsOptions{CAFile: "/etc/ssl/db-ca.pem"},
+			[]string{"-e", "ENV_NAME=prod", "-v", "/etc/ssl/db-ca.pem:/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}},
+		"both": {VpsOptions{Env: "staging", DB: "versola", CAFile: "/ca.pem"},
+			[]string{"-e", "ENV_NAME=staging", "-e", "POSTGRES_DB=versola", "-v", "/ca.pem:/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -99,7 +110,7 @@ func TestPostgresOptionsToolsArgs(t *testing.T) {
 	}
 }
 
-func TestPostgresOptionsStored(t *testing.T) {
+func TestVpsOptionsStored(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -119,7 +130,7 @@ func TestPostgresOptionsStored(t *testing.T) {
 		t.Helper()
 		if err := state.Finalize(state.FinalizeOptions{Target: target, Version: "1.0.0", BundleDir: bundle,
 			AuthURL: "https://id.example.com", ProxyMode: "external", PostgresHost: "db:5432",
-			PostgresDB: "versola", PostgresCAFile: ca}); err != nil {
+			Env: "qa", PostgresDB: "versola", PostgresCAFile: ca}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -128,13 +139,15 @@ func TestPostgresOptionsStored(t *testing.T) {
 
 	cases := map[string]struct {
 		target string
-		in     PostgresOptions
-		want   PostgresOptions
+		in     VpsOptions
+		want   VpsOptions
 	}{
-		"no flags keep stored": {"vps", PostgresOptions{}, PostgresOptions{DB: "versola", CAFile: stored}},
-		"db flag overrides":    {"vps", PostgresOptions{DB: "other"}, PostgresOptions{DB: "other", CAFile: stored}},
-		"ca flag overrides":    {"vps", PostgresOptions{CAFile: "/x/ca.pem"}, PostgresOptions{DB: "versola", CAFile: "/x/ca.pem"}},
-		"local ignores stored": {"local", PostgresOptions{}, PostgresOptions{}},
+		"no flags keep stored": {"vps", VpsOptions{}, VpsOptions{Env: "qa", DB: "versola", CAFile: stored}},
+		"env flag overrides":   {"vps", VpsOptions{Env: "staging"}, VpsOptions{Env: "staging", DB: "versola", CAFile: stored}},
+		"explicit prod wins":   {"vps", VpsOptions{Env: "prod"}, VpsOptions{Env: "prod", DB: "versola", CAFile: stored}},
+		"db flag overrides":    {"vps", VpsOptions{DB: "other"}, VpsOptions{Env: "qa", DB: "other", CAFile: stored}},
+		"ca flag overrides":    {"vps", VpsOptions{CAFile: "/x/ca.pem"}, VpsOptions{Env: "qa", DB: "versola", CAFile: "/x/ca.pem"}},
+		"local ignores stored": {"local", VpsOptions{}, VpsOptions{}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -149,8 +162,58 @@ func TestPostgresOptionsStored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-e", "POSTGRES_DB=versola", "-v", stored + ":/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}
-	if got := postgresOptionsOf(st).toolsArgs(); !reflect.DeepEqual(got, want) {
+	want := []string{"-e", "ENV_NAME=qa", "-e", "POSTGRES_DB=versola", "-v", stored + ":/input/postgres-ca.crt:ro", "-e", "POSTGRES_CA_FILE=/input/postgres-ca.crt"}
+	if got := vpsOptionsOf(st).toolsArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("toolsArgs = %v, want %v", got, want)
+	}
+}
+
+func TestTestModeWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir, err := state.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(dir, "bundle-1")
+	if err := os.MkdirAll(bundle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := func(env string) {
+		t.Helper()
+		if err := state.Finalize(state.FinalizeOptions{Target: "vps", Version: "1.0.0", BundleDir: bundle,
+			AuthURL: "https://id.example.com", ProxyMode: "external", PostgresHost: "db:5432", Env: env}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := map[string]struct {
+		stored string
+		target string
+		opts   VpsOptions
+		want   string // substring; "" means no warning
+	}{
+		"prod by default":       {"", "vps", VpsOptions{}, ""},
+		"explicit prod":         {"", "vps", VpsOptions{Env: "prod"}, ""},
+		"flag gives test mode":  {"", "vps", VpsOptions{Env: "qa"}, `"qa"`},
+		"stored test mode kept": {"qa", "vps", VpsOptions{}, `"qa"`},
+		"explicit prod resets":  {"qa", "vps", VpsOptions{Env: "prod"}, ""},
+		"local never warns":     {"qa", "local", VpsOptions{}, ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			record(c.stored)
+			got := TestModeWarning(c.target, c.opts)
+			if c.want == "" {
+				if got != "" {
+					t.Fatalf("got warning %q, want none", got)
+				}
+				return
+			}
+			if !strings.Contains(got, c.want) || !strings.Contains(got, "123456") {
+				t.Fatalf("warning %q lacks %q or the OTP note", got, c.want)
+			}
+		})
 	}
 }

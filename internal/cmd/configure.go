@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ var configureProxy string
 var configureACMEStaging bool
 var configureGenerateMissing []string
 var configureAllowLegacy bool
+var configureEnv string
 var configurePostgresDB string
 var configurePostgresCA string
 
@@ -33,6 +35,7 @@ services and doesn't touch the database — see "versola migrate" and
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+  versola configure vps 0.1.1 --auth-url https://qa.example.com --postgres-host 127.0.0.1:5432 --env qa
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
 
 On vps, Versola is exposed through its own reverse proxy (the official
@@ -63,6 +66,15 @@ confirms that the named secrets may be generated anyway;
 --allow-legacy-secrets lets a release that has no secret schema be
 configured by the old rule ("anything missing is generated").
 
+On vps, --env <name> (default: prod) sets the environment the services run
+as. Only the exact name "prod" is production; any other name is a test
+environment: the OTP code is fixed (123456) with no SMS/e-mail delivery,
+temporary passwords can be revealed and the /service/* endpoints are
+enabled. Such a deployment must not serve real users, and configure prints
+a warning when it is not prod. --env is remembered (rollout and
+"secrets plan" reuse it, and a later configure without the flag keeps the
+stored value), so going back to production needs an explicit --env prod.
+
 On vps, --postgres-db names the database (default: auth) and
 --postgres-ca points at a PEM file with the CA that signed Postgres'
 server certificate, which the services then trust for sslmode=verify-full.
@@ -82,6 +94,7 @@ than something that happens silently — e.g. deploying onto a server.`,
 func init() {
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	configureCmd.Flags().StringVar(&configureEnv, "env", "", envUsage)
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
@@ -109,9 +122,14 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
-	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
+	pg, err := deploy.VpsOptions{Env: configureEnv, DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
 	if err != nil {
 		return err
+	}
+
+	// Before the lock and the confirmation, so it is the first thing seen.
+	if w := deploy.TestModeWarning(target, pg); w != "" {
+		fmt.Fprint(os.Stderr, w)
 	}
 
 	// Held from here through deploy.Configure's own Finalize -- see
@@ -185,14 +203,14 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	return err
 }
 
-// rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps
+// rejectVpsOnlyFlags: --proxy/--acme-staging/--env/--postgres-db/--postgres-ca only mean something for vps
 // (local's proxy is always on 127.0.0.1:2821, without TLS) -- say so instead of
 // silently ignoring them.
 func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range []string{"proxy", "acme-staging", "postgres-db", "postgres-ca"} {
+	for _, name := range []string{"proxy", "acme-staging", "env", "postgres-db", "postgres-ca"} {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}
@@ -200,5 +218,6 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	return nil
 }
 
+const envUsage = "vps only: environment name (default: prod). Anything but \"prod\" is a TEST environment: fixed OTP code 123456 with no SMS/e-mail delivery, temporary passwords can be revealed -- never for real users. Lower-case letters, digits, '-' or '_', up to 32. Remembered: a later configure without the flag keeps the stored value, so go back to production with an explicit --env prod"
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

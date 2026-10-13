@@ -36,11 +36,12 @@ import (
 //
 // Version 2 added SecretsRevision. Version 3 added PostgresHost,
 // PreviousVersion, Surge and RollingBack (rolling upgrades and their abort). Version 4 added
-// PostgresDB and PostgresCA (--postgres-db, --postgres-ca). A CLI refuses a file of a
+// PostgresDB and PostgresCA (--postgres-db, --postgres-ca). Version 5 added
+// Env (--env; empty reads as "prod"). A CLI refuses a file of a
 // newer layout than its own (see Load) rather than load it and drop the
 // fields it does not know on its next Save; an older layout is read, with
 // the fields it lacks left empty.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // PostgresCAFileName is where Finalize keeps a copy of --postgres-ca's file,
 // in Dir() next to state.json, so that later steps do not depend on the
@@ -151,6 +152,11 @@ type State struct {
 	// have to be told it once more. Empty in records written before layout
 	// 3: then it is not known, and such a step has to ask for it.
 	PostgresHost string `json:"postgresHost,omitempty"`
+
+	// Env is --env (vps only): the environment name written into the
+	// services' configs. Empty means "prod" -- and is what records written
+	// before layout 5 read as.
+	Env string `json:"env,omitempty"`
 
 	// PostgresDB is --postgres-db (vps only); empty means versola-tools'
 	// own default. Recorded for the same reason as PostgresHost. Empty in
@@ -396,6 +402,8 @@ type FinalizeOptions struct {
 	ProxyMode string
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
+	// Env is --env, "" for prod.
+	Env string
 	// PostgresDB is --postgres-db, "" for none.
 	PostgresDB string
 	// PostgresCAFile is a PEM file to copy into Dir() as PostgresCAFileName
@@ -475,6 +483,7 @@ func Finalize(o FinalizeOptions) error {
 		AuthURL:       o.AuthURL,
 		ProxyMode:     o.ProxyMode,
 		PostgresHost:  o.PostgresHost,
+		Env:           o.Env,
 		PostgresDB:    o.PostgresDB,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,

@@ -210,7 +210,8 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`).
+  it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
+  and accepts `--postgres-db` and `--postgres-ca`.
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -367,6 +368,13 @@ serves the admin console at `/central/admin/`.
   ```
   versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   ```
+
+  Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
+  picks the database (default `auth`) and `--postgres-ca <file>` is a PEM
+  file with the CA that signed its certificate. Both are vps-only and, like
+  `--auth-url`, must be repeated on every `configure`. They need a
+  `versola-tools` release that understands `POSTGRES_DB` /
+  `POSTGRES_CA_FILE`.
 
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but

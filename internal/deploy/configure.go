@@ -54,8 +54,8 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
-	return configure(target, version, authURL, postgresHost, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
+func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
+	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
 }
 
 // stagedConfigure is what a rolling upgrade (`versola rollout`) changes about
@@ -89,7 +89,7 @@ type stagedConfigure struct {
 // The secrets plan (0f) is applied here, before any container of the new
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
-func configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
+func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -102,6 +102,10 @@ func configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	}
 	if target == "vps" && postgresHost == "" {
 		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
+	}
+	pg, err := pg.Validate(target)
+	if err != nil {
+		return ConfigureResult{}, err
 	}
 
 	if staged == nil {
@@ -179,7 +183,7 @@ func configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg); err != nil {
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 

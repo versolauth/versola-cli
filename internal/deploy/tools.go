@@ -89,15 +89,15 @@ func OpenbaoContainerName(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL, postgresHost string) error {
-	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost)
+func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
+	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg)
 }
 
 // pullAndRunToolsTo is pullAndRunTools with the container's stdout sent to
 // stdout instead of always to this process's own: a command that prints a
 // machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
 // so the progress of the pull does not end up inside the result.
-func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string) error {
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -210,6 +210,13 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 	// deploying, comes from --postgres-host via Configure.
 	if target == "vps" {
 		args = append(args, "-e", "POSTGRES_HOST="+postgresHost)
+		// -e POSTGRES_DB=... and the -v/-e POSTGRES_CA_FILE pair, only when
+		// --postgres-db/--postgres-ca were given (versola-tools defaults the
+		// database to "auth" and has no CA otherwise). The CA file is
+		// mounted read-only: the container runs as this process's UID (-u
+		// above) or as root on a rootless daemon, so it can read a file
+		// this user can read, and never needs to write it.
+		args = append(args, pg.toolsArgs()...)
 	}
 	args = append(args, "-v", dir+":/out", image)
 	c := docker.Cmd(args...)

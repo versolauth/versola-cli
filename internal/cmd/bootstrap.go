@@ -17,6 +17,8 @@ var postgresHost string
 var setupOpenBao bool
 var bootstrapProxy string
 var bootstrapACMEStaging bool
+var bootstrapPostgresDB string
+var bootstrapPostgresCA string
 var bootstrapGenerateMissing []string
 var bootstrapAllowLegacy bool
 
@@ -30,9 +32,14 @@ Currently supported:
   versola bootstrap local 0.1.1
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
 
 On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
 certificate -- see "versola configure --help" for --proxy.
+
+On vps, --postgres-db names the database (default: auth) and --postgres-ca
+points at a PEM file with the CA that signed Postgres' server certificate
+-- see "versola configure --help".
 
 vps deploys to a real server. By default this provisions vps's OpenBao
 automatically too (init, unseal, kv-v2, AppRole, policy, role — same as
@@ -72,6 +79,8 @@ func init() {
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
+	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
@@ -103,6 +112,12 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
+		return err
+	}
+	// Validated before the lock and the confirmation: a typo'd CA path
+	// should fail immediately, not after the user has said yes.
+	pg, err := deploy.PostgresOptions{DB: bootstrapPostgresDB, CAFile: bootstrapPostgresCA}.Validate(target)
+	if err != nil {
 		return err
 	}
 
@@ -155,7 +170,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
-	res, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
+	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
 		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {

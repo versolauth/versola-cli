@@ -274,7 +274,7 @@ func Rollout(st *state.State, version string, o RolloutOptions) error {
 		}
 		proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir)}
 		fmt.Printf("\nPreparing Versola %s next to the running %s (nothing running changes in this step)...\n", version, st.Version)
-		if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets,
+		if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, PostgresOptions{}, openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets,
 			&stagedConfigure{from: st, surge: !o.NoSurge}); err != nil {
 			return fmt.Errorf("preparing %s failed -- nothing running was changed: %w", version, err)
 		}
@@ -423,7 +423,7 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	defer removeOnSignal(os.Stdout, cleanup)()
 
 	fmt.Printf("Running versola-tools %s into a temporary directory...\n", version)
-	if err := pullAndRunTools(dir, ToolsImage(version), st.Target, st.AuthURL, st.PostgresHost); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), st.Target, st.AuthURL, st.PostgresHost, PostgresOptions{}); err != nil {
 		if isManifestUnknown(err) {
 			return fmt.Errorf("version %q of Versola doesn't exist (no versola-tools image published for it)", version)
 		}

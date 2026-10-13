@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,5 +67,39 @@ func TestIsNoSuchContainer(t *testing.T) {
 		if got := isNoSuchContainer(tc.stderr); got != tc.want {
 			t.Errorf("isNoSuchContainer(%q) = %v, want %v", tc.stderr, got, tc.want)
 		}
+	}
+}
+
+func TestLeaveWaitsForTheRunningCommandAndStartsNoOther(t *testing.T) {
+	done, _ := track()
+	if Busy() {
+		t.Error("an unshielded command counted")
+	}
+	done()
+	SetShielded(true)
+	defer func() {
+		SetShielded(false)
+		trackMu.Lock()
+		leaving = false
+		trackMu.Unlock()
+	}()
+	done, err := track()
+	if err != nil || !Busy() {
+		t.Fatalf("a shielded command not counted: %v", err)
+	}
+	idle := Leave()
+	select {
+	case <-idle:
+		t.Fatal("idle while a command still runs")
+	default:
+	}
+	if _, err := track(); !errors.Is(err, ErrLeaving) {
+		t.Errorf("a new command after Leave: %v", err)
+	}
+	done()
+	select {
+	case <-idle:
+	default:
+		t.Error("not idle after the last command finished")
 	}
 }

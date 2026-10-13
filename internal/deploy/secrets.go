@@ -144,6 +144,65 @@ func resolveSecrets(dir, target, version string, opts SecretOptions) (secretsOut
 
 // resolveSecretsWith is resolveSecrets with the OpenBao client already logged in.
 func resolveSecretsWith(ctx context.Context, client *openbao.Client, dir, target, version string, opts SecretOptions) (secretsOutcome, error) {
+	set, err := settleSecrets(ctx, client, dir, target, version, opts)
+	if err != nil {
+		return set.out, err
+	}
+	out := set.out
+	candidates, existing, shared, replace := set.candidates, set.existing, set.shared, set.replace
+	pgPassword, pgIsNew := set.pgPassword, set.pgIsNew
+
+	// An install that has no record yet is about to start writing secrets: note
+	// it first, so that if it fails partway the next run knows what the store
+	// holds (see state.Pending). Before resolveUtilsKey, which writes too.
+	if set.writeNote {
+		if err := state.SavePending(state.Pending{Target: target, SecretsRevision: out.Revision, StartedAt: time.Now().UTC()}); err != nil {
+			return out, err
+		}
+	}
+
+	// The `utils` key pair is settled before any service's secrets are merged, because it
+	// decides which public half central is offered. Its private half is stored apart from the
+	// service paths (see utilsService) and left in the bundle directory for the operator.
+	if err := resolveUtilsKey(ctx, client, dir, target, existing["central"], candidates["central"]); err != nil {
+		return out, err
+	}
+
+	// NewPostgresPassword is set as soon as the new password is
+	// actually stored in OpenBao for at least one service -- even if a
+	// later service fails. From then on the next configure finds it
+	// stored and treats it as old, so this run is the only one that can
+	// tell the operator about it (Configure prints it on error too).
+	for _, service := range secretServices {
+		wrotePg, err := resolveServiceSecrets(ctx, client, dir, target, service, existing[service], candidates[service], shared[service], replace[service])
+		if wrotePg && pgIsNew {
+			out.NewPostgresPassword = pgPassword
+		}
+		if err != nil {
+			return out, fmt.Errorf("couldn't resolve secrets for %s: %w", service, err)
+		}
+	}
+	return out, nil
+}
+
+// settledSecrets is what settleSecrets decided: everything resolveSecretsWith
+// needs to write, before any of it is written.
+type settledSecrets struct {
+	candidates, existing map[string]map[string]string // service -> name -> value
+	shared               map[string]map[string]string // service -> name -> value, for secrets listed for several services
+	replace              map[string]map[string]bool   // service -> names the plan overwrites with a candidate
+	pgPassword           string
+	pgIsNew              bool
+	writeNote            bool // whether this run is a first install proper (see state.Pending)
+	out                  secretsOutcome
+}
+
+// settleSecrets reads what versola-tools wrote into dir and what OpenBao
+// holds, checks the secrets plan, and settles every value -- writing nothing,
+// to OpenBao or anywhere else. resolveSecretsWith writes what it settled; a
+// rollout's dry run only uses it to write throwaway env files for
+// `migrate --dry-run`.
+func settleSecrets(ctx context.Context, client *openbao.Client, dir, target, version string, opts SecretOptions) (settledSecrets, error) {
 	// Everything is read before anything is written, so the plan, and the
 	// Postgres password, can be settled across all three services first (see
 	// pickPostgresPassword).
@@ -152,18 +211,18 @@ func resolveSecretsWith(ctx context.Context, client *openbao.Client, dir, target
 	for _, service := range secretServices {
 		c, err := readDotenv(filepath.Join(dir, service+".generated-secrets.env"))
 		if err != nil {
-			return secretsOutcome{}, err
+			return settledSecrets{}, err
 		}
 		e, _, err := client.ReadSecret(ctx, openbao.SecretPath(target, service))
 		if err != nil {
-			return secretsOutcome{}, fmt.Errorf("couldn't read existing %s secrets from OpenBao: %w", service, err)
+			return settledSecrets{}, fmt.Errorf("couldn't read existing %s secrets from OpenBao: %w", service, err)
 		}
 		candidates[service], existing[service] = c, e
 	}
 
 	prev, installing, err := loadPrevious(target)
 	if err != nil {
-		return secretsOutcome{}, err
+		return settledSecrets{}, err
 	}
 	hasRecord := prev != nil && prev.Target == target
 
@@ -183,9 +242,9 @@ func resolveSecretsWith(ctx context.Context, client *openbao.Client, dir, target
 		if !result.OK() {
 			// Names and actions only: a Result cannot hold a value.
 			if err := secrets.RenderText(os.Stdout, version, result); err != nil {
-				return secretsOutcome{}, err
+				return settledSecrets{}, err
 			}
-			return secretsOutcome{}, fmt.Errorf("the secrets plan has %d problem(s), listed above: nothing was written to OpenBao", len(result.Problems))
+			return settledSecrets{}, fmt.Errorf("the secrets plan has %d problem(s), listed above: nothing was written to OpenBao", len(result.Problems))
 		}
 		fmt.Printf("  secrets plan (%s, schema revision %d): OK\n", result.State, result.SchemaRevision)
 		shared = sharedValues(schema, existing, candidates)
@@ -219,15 +278,15 @@ func resolveSecretsWith(ctx context.Context, client *openbao.Client, dir, target
 		}
 		fresh, err := legacyGuard(target, version, existing, hasRecord, installing, opts)
 		if err != nil {
-			return secretsOutcome{}, err
+			return settledSecrets{}, err
 		}
 		writeNote = fresh
 	default:
-		return secretsOutcome{}, err
+		return settledSecrets{}, err
 	}
 
 	if services := conflictingPostgresPasswords(existing); services != nil {
-		return secretsOutcome{}, fmt.Errorf("OpenBao holds different Postgres passwords for %s, but they all log in as the same Postgres role, so at least one of them can't connect. "+
+		return settledSecrets{}, fmt.Errorf("OpenBao holds different Postgres passwords for %s, but they all log in as the same Postgres role, so at least one of them can't connect. "+
 			"This CLI can't tell which one the role actually has, so it won't pick one: set the same, correct %s under secret/versola/%s/<service> for each of them, then re-run configure",
 			strings.Join(services, ", "), postgresPasswordKey, target)
 	}
@@ -258,37 +317,8 @@ func resolveSecretsWith(ctx context.Context, client *openbao.Client, dir, target
 		out.NewPostgresPassword = pgPassword
 	}
 
-	// An install that has no record yet is about to start writing secrets: note
-	// it first, so that if it fails partway the next run knows what the store
-	// holds (see state.Pending). Before resolveUtilsKey, which writes too.
-	if writeNote {
-		if err := state.SavePending(state.Pending{Target: target, SecretsRevision: out.Revision, StartedAt: time.Now().UTC()}); err != nil {
-			return out, err
-		}
-	}
-
-	// The `utils` key pair is settled before any service's secrets are merged, because it
-	// decides which public half central is offered. Its private half is stored apart from the
-	// service paths (see utilsService) and left in the bundle directory for the operator.
-	if err := resolveUtilsKey(ctx, client, dir, target, existing["central"], candidates["central"]); err != nil {
-		return out, err
-	}
-
-	// NewPostgresPassword is set as soon as the new password is
-	// actually stored in OpenBao for at least one service -- even if a
-	// later service fails. From then on the next configure finds it
-	// stored and treats it as old, so this run is the only one that can
-	// tell the operator about it (Configure prints it on error too).
-	for _, service := range secretServices {
-		wrotePg, err := resolveServiceSecrets(ctx, client, dir, target, service, existing[service], candidates[service], shared[service], replace[service])
-		if wrotePg && pgIsNew {
-			out.NewPostgresPassword = pgPassword
-		}
-		if err != nil {
-			return out, fmt.Errorf("couldn't resolve secrets for %s: %w", service, err)
-		}
-	}
-	return out, nil
+	return settledSecrets{candidates: candidates, existing: existing, shared: shared, replace: replace,
+		pgPassword: pgPassword, pgIsNew: pgIsNew, writeNote: writeNote, out: out}, nil
 }
 
 // unlistedCandidates names (service/name, sorted) the candidates versola-tools

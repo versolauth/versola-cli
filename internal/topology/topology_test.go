@@ -966,3 +966,24 @@ func TestSkippedPublications(t *testing.T) {
 		t.Errorf("a slot keeps the list: %v %v", s2.Skipped(), err)
 	}
 }
+
+func TestImageAndProject(t *testing.T) {
+	topo, err := Parse([]byte(`{"name":"versola-vps","services":{"auth":{"image":"ghcr.io/versolauth/auth:0.7.0","environment":{"PORT":"8080"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topo.Project() != "versola-vps" {
+		t.Errorf("project %q", topo.Project())
+	}
+	auth, err := topo.Service("auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot2, err := auth.ForSlot(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.Image() != "ghcr.io/versolauth/auth:0.7.0" || slot2.Image() != auth.Image() {
+		t.Errorf("image %q / slot 2 %q", auth.Image(), slot2.Image())
+	}
+}

@@ -153,6 +153,16 @@ func loadPrevious(target string) (prev *secrets.Previous, installing bool, err e
 // Docker can bind-mount it wherever it can mount those (Docker Desktop shares
 // the user's profile, not necessarily the temp directory).
 func planDir() (dir string, cleanup func(io.Writer), err error) {
+	return scratchDir("plan-")
+}
+
+// scratchDirPrefixes are the temporary directories under ~/.versola that hold
+// versola-tools output with secret candidates: a plan's, and a rollout dry
+// run's (which also holds the env files it runs `migrate --dry-run` with).
+var scratchDirPrefixes = []string{"plan-", "rollout-dryrun-"}
+
+// scratchDir is planDir for any of scratchDirPrefixes.
+func scratchDir(prefix string) (dir string, cleanup func(io.Writer), err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", nil, fmt.Errorf("couldn't find home directory: %w", err)
@@ -162,7 +172,7 @@ func planDir() (dir string, cleanup func(io.Writer), err error) {
 		return "", nil, fmt.Errorf("couldn't create %s: %w", base, err)
 	}
 	sweepStalePlanDirs(base, stalePlanAge)
-	dir, err = os.MkdirTemp(base, "plan-")
+	dir, err = os.MkdirTemp(base, prefix)
 	if err != nil {
 		return "", nil, fmt.Errorf("couldn't create a directory for the plan in %s: %w", base, err)
 	}
@@ -177,7 +187,7 @@ func planDir() (dir string, cleanup func(io.Writer), err error) {
 // removes it as left behind by a run that was killed. Far longer than a plan takes.
 const stalePlanAge = time.Hour
 
-// sweepStalePlanDirs removes plan-* directories in base last modified more than
+// sweepStalePlanDirs removes plan-* (and rollout-dryrun-*) directories in base last modified more than
 // maxAge ago: what a plan killed with SIGKILL (which nothing can handle) leaves.
 // Best effort; a directory it can't remove is simply tried again next time.
 func sweepStalePlanDirs(base string, maxAge time.Duration) {
@@ -186,7 +196,7 @@ func sweepStalePlanDirs(base string, maxAge time.Duration) {
 		return
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "plan-") {
+		if !e.IsDir() || !hasScratchPrefix(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -195,6 +205,15 @@ func sweepStalePlanDirs(base string, maxAge time.Duration) {
 		}
 		_ = os.RemoveAll(filepath.Join(base, e.Name()))
 	}
+}
+
+func hasScratchPrefix(name string) bool {
+	for _, p := range scratchDirPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // removeOnSignal runs cleanup and exits with the conventional 128+signal status

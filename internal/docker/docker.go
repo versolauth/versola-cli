@@ -17,10 +17,13 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,7 +33,7 @@ import (
 // runner also needs to inspect what was written to it, and the two can't
 // share one default.
 func Cmd(args ...string) *exec.Cmd {
-	c := exec.Command("docker", args...)
+	c := command(args...)
 	c.Stdout = os.Stdout
 	return c
 }
@@ -40,6 +43,11 @@ func Cmd(args ...string) *exec.Cmd {
 func Run(args ...string) error {
 	c := Cmd(args...)
 	c.Stderr = os.Stderr
+	done, err := track()
+	if err != nil {
+		return err
+	}
+	defer done()
 	return c.Run()
 }
 
@@ -49,7 +57,12 @@ func Run(args ...string) error {
 // streamed -- this is for short, structured commands, not anything that
 // takes long enough for a frozen-looking terminal to matter.
 func Output(args ...string) ([]byte, error) {
-	return exec.Command("docker", args...).Output()
+	done, err := track()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	return command(args...).Output()
 }
 
 // RunQuiet runs docker with both output streams discarded, for the calls
@@ -59,7 +72,7 @@ func Output(args ...string) ([]byte, error) {
 // Docker writes "No such container" to stderr, which looks like something
 // went wrong when it's the normal path.
 func RunQuiet(args ...string) error {
-	return exec.Command("docker", args...).Run()
+	return command(args...).Run()
 }
 
 // IsRunning reports whether a container with this name exists and is
@@ -71,7 +84,7 @@ func RunQuiet(args ...string) error {
 // already up, or do I need to start it" doesn't care which kind of "no"
 // it gets.
 func IsRunning(name string) (bool, error) {
-	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", name).Output()
+	out, err := command("inspect", "-f", "{{.State.Running}}", name).Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return false, nil
@@ -89,6 +102,7 @@ func IsRunningWithin(name string, timeout time.Duration) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", name)
+	applyShield(c)
 	// Once docker is killed, don't go on waiting for output pipes a child
 	// of it may still hold open.
 	c.WaitDelay = time.Second
@@ -125,7 +139,7 @@ func IsRunningWithin(name string, timeout time.Duration) (bool, error) {
 // callers need to know which one they're talking to before reaching for
 // `-u` at all.
 func IsRootless() (bool, error) {
-	out, err := exec.Command("docker", "info", "--format", "{{.SecurityOptions}}").Output()
+	out, err := command("info", "--format", "{{.SecurityOptions}}").Output()
 	if err != nil {
 		return false, fmt.Errorf("couldn't check whether the docker daemon is rootless: %w", err)
 	}
@@ -139,7 +153,7 @@ func IsRootless() (bool, error) {
 // found" that a container is gone (and, say, that files it mounts may be
 // deleted), which must never happen just because Docker couldn't answer.
 func Inspect(name, format string) (out string, found bool, err error) {
-	b, err := exec.Command("docker", "inspect", "--type", "container", "-f", format, name).Output()
+	b, err := command("inspect", "--type", "container", "-f", format, name).Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && isNoSuchContainer(string(exitErr.Stderr)) {
 			return "", false, nil
@@ -156,4 +170,84 @@ func Inspect(name, format string) (out string, found bool, err error) {
 func isNoSuchContainer(stderr string) bool {
 	s := strings.ToLower(stderr)
 	return strings.Contains(s, "no such object") || strings.Contains(s, "no such container")
+}
+
+// ErrLeaving is what a docker command asked for after Leave gets instead of
+// running.
+var ErrLeaving = errors.New("not started: versola is leaving at your request")
+
+// The shielded docker commands running now, and whether Leave was asked.
+var (
+	trackMu sync.Mutex
+	running int
+	leaving bool
+	idle    chan struct{} // closed once leaving and nothing runs
+)
+
+// Busy reports whether a docker command started while shielded is still
+// running.
+func Busy() bool {
+	trackMu.Lock()
+	defer trackMu.Unlock()
+	return running > 0
+}
+
+// Leave stops new shielded docker commands from starting (they return
+// ErrLeaving) and returns a channel that is closed once none is running --
+// when this process may exit without leaving one halfway through, and so
+// release its lock while docker still works on a container.
+func Leave() <-chan struct{} {
+	trackMu.Lock()
+	defer trackMu.Unlock()
+	if !leaving {
+		leaving = true
+		idle = make(chan struct{})
+		if running == 0 {
+			close(idle)
+		}
+	}
+	return idle
+}
+
+func track() (done func(), err error) {
+	trackMu.Lock()
+	defer trackMu.Unlock()
+	if !shielded.Load() {
+		return func() {}, nil
+	}
+	if leaving {
+		return nil, ErrLeaving
+	}
+	running++
+	return func() {
+		trackMu.Lock()
+		defer trackMu.Unlock()
+		running--
+		if leaving && running == 0 {
+			close(idle)
+		}
+	}, nil
+}
+
+// shielded: see SetShielded.
+var shielded atomic.Bool
+
+// SetShielded makes every docker process started from now on run in a
+// process group of its own (on: true) or, again, in this one's. A Ctrl-C in
+// the terminal goes to the whole foreground process group -- a `docker
+// compose up` this CLI runs included, which would stop halfway through
+// recreating a container. A rolling upgrade shields its docker calls and
+// handles the interrupt itself, between two steps.
+func SetShielded(on bool) { shielded.Store(on) }
+
+func command(args ...string) *exec.Cmd {
+	c := exec.Command("docker", args...)
+	applyShield(c)
+	return c
+}
+
+func applyShield(c *exec.Cmd) {
+	if shielded.Load() {
+		shield(c)
+	}
 }

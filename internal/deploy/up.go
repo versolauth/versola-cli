@@ -316,11 +316,12 @@ func checkRunnable(st *state.State, bundleDir string) error {
 	if err := requireCurrentBundle(st, bundleDir); err != nil {
 		return err
 	}
-	if why := st.MixedVersions(); why != "" {
-		// TODO(0d PR-2): `versola rollout` lands with the rolling upgrade
-		// itself; until then this state only comes from a hand-edited
-		// state.json.
-		return fmt.Errorf("the recorded replicas are not one version (%s) -- `up` starts what is recorded and can't tell which way an upgrade was going; finish or abort it with `versola rollout`", why)
+	why := st.MixedVersions()
+	if why == "" && st.RolloutUnderway() {
+		why = fmt.Sprintf("a rolling upgrade from %s is recorded as not finished", st.PreviousVersion)
+	}
+	if why != "" {
+		return fmt.Errorf("the recorded replicas are not one version (%s) -- `up` starts what is recorded and can't tell which way an upgrade was going; finish it with `versola rollout %s`", why, st.Version)
 	}
 	return nil
 }

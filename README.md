@@ -438,6 +438,61 @@ connections only.
 This needs a Versola release whose versola-tools ships the admin console;
 `configure vps` says so clearly when pointed at an older one.
 
+### `rollout <version>` / `rollout --abort` (vps)
+
+`versola rollout <version> --assume-compatible` moves a running vps
+deployment to another Versola version without stopping it: the new
+version is prepared next to the running one (versola-tools, the secrets
+plan), the database is migrated, central is stopped and started on the
+new version (the admin console and self-registration are down until it is
+ready; auth and edge keep serving), then each auth and edge replica is
+replaced one at a time behind a stand-in replica in a free slot, and the
+proxy moves to the new configuration. Cut off anywhere (an error, Ctrl-C,
+a dropped SSH session), the same command continues; progress is read back
+from `state.json` and the containers. `--dry-run` shows the plan, the
+secrets plan and the pending migrations and changes nothing. `--no-surge`
+replaces replicas without a stand-in (one fewer serves meanwhile; with one
+replica it needs `--allow-downtime`).
+
+**Compatibility is yours to confirm.** During a rollout the running
+version works on the new version's schema, and an abort runs it there
+alone. Versola releases before 1.0 don't promise that ("compatibility
+between 0.x releases is not guaranteed"), so `rollout` refuses to start
+without `--assume-compatible`: read the release notes first (additive
+migrations; the running version works on the new schema). A release that
+is not compatible is deployed with `configure`, `migrate` and `up` (a
+short stop) after a database backup. **0.7.0 needs a fresh database**
+(its migrations were squashed): a deployment on 0.6.x can't be rolled out
+to it, and moving to 0.7.0 means installing it on an empty schema.
+
+`versola rollout --abort` goes back to the version the unfinished rollout
+came from:
+
+- nothing started from the new version yet (prepared, possibly migrated):
+  the previous configuration becomes the active one again; no container
+  is touched;
+- otherwise the previous version is configured again and moved to the same
+  way, stand-in first: central restarts once more, and every auth and edge
+  replica is recreated -- also the ones that never left the old version,
+  because they still mount the previous configuration's files, which are
+  removed at the end. A stand-in of the new version is retired before one
+  of the old version starts.
+
+Migrations and secrets don't go back: the old version runs on the migrated
+schema (not guaranteed before 1.0 -- a replica that doesn't become ready
+stays out of the proxy while the others serve; restore the database from
+the backup if the old version can't run at all), and secrets the new
+version added stay in OpenBao. No compatibility confirmation is asked. If
+the rollout used `--no-surge` because the server has no memory for one more
+JVM, pass `--no-surge` to the abort too. Cut off, `--abort` again continues
+it (`state.json` records that an abort is under way, so it does not turn
+round). Once a rollout has finished there is nothing to abort: roll the
+earlier version out instead.
+
+While a rollout or an abort is under way, `configure`, `up` and `replica`
+refuse, and so does `down` unless `--force` is given -- afterwards only
+`rollout` (or `--abort`) starts the deployment again, not `up`.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
@@ -447,7 +502,8 @@ Shows the containers from the last `bootstrap` run and their health
 
 Stops the locally deployed stack. Pass `--volumes` to also delete the
 Postgres data volume (kept by default, so a later `bootstrap` picks up
-the same data).
+the same data). While a rolling upgrade is under way it refuses (see
+`rollout`); `--force` stops the stack anyway.
 
 ### `uninstall`
 

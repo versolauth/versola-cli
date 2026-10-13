@@ -17,10 +17,12 @@ var (
 	rolloutAllowDowntime   bool
 	rolloutGenerateMissing []string
 	rolloutAllowLegacy     bool
+	rolloutAbort           bool
+	rolloutAssumeCompat    bool
 )
 
 var rolloutCmd = &cobra.Command{
-	Use:   "rollout <version>",
+	Use:   "rollout (<version> | --abort)",
 	Short: "Upgrade a running vps deployment to another version without stopping it",
 	Long: `rollout moves a running vps deployment to another Versola version while it
 keeps serving:
@@ -45,8 +47,23 @@ If it stops -- an error, Ctrl-C, a dropped SSH session -- running the same
 command again continues from where it stopped: progress is read back from
 the containers themselves. Ctrl-C stops after the step under way; a second
 Ctrl-C leaves at once. A different version can't be rolled out while one
-rollout is unfinished, and going back (--abort) is not part of this
-versola-cli yet.
+rollout is unfinished.
+
+Compatibility: the two versions run side by side on the new version's
+schema, and Versola releases before 1.0 don't promise that works (0.7.0, for
+one, needs a fresh database). A rollout therefore refuses to start unless
+--assume-compatible says you have checked the release notes: additive
+migrations, and the running version working on the new schema.
+
+--abort goes back to the version the unfinished rollout came from. If no
+container was started from the new version's configuration yet, the
+previous configuration simply becomes the active one again. Otherwise the
+previous version is configured again and every replica -- central, auth,
+edge, including the ones that never moved -- is moved back the same way,
+stand-in first. Migrations and secrets do not go back: the old version runs
+on the migrated schema (not guaranteed before 1.0). Cut off, --abort again
+continues it. After a rollout has finished there is nothing to abort: roll
+the earlier version out instead.
 
 --no-surge replaces replicas without a stand-in (for a server without the
 memory for one more JVM): one replica fewer serves meanwhile, so it needs
@@ -59,7 +76,15 @@ apply. It changes nothing.
 
 Only for vps deployments made by this versola-cli; a local one is configured
 and started again instead.`,
-	Args: cobra.ExactArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if rolloutAbort {
+			if len(args) != 0 {
+				return fmt.Errorf("--abort takes no version: it goes back to the one the rollout came from")
+			}
+			return nil
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
 	RunE: runRollout,
 }
 
@@ -70,14 +95,20 @@ func init() {
 	rolloutCmd.Flags().BoolVar(&rolloutAllowDowntime, "allow-downtime", false, "with --no-surge: recreate a service that has one replica in place, unreachable until it is ready")
 	rolloutCmd.Flags().StringSliceVar(&rolloutGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
+	rolloutCmd.Flags().BoolVar(&rolloutAbort, "abort", false, "go back to the version the unfinished rollout came from (migrations and secrets stay)")
+	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "you checked the release notes: the running version works on the new version's schema (releases before 1.0 don't promise it)")
 }
 
 func runRollout(cmd *cobra.Command, args []string) error {
-	version := args[0]
 	opts := deploy.RolloutOptions{
 		NoSurge: rolloutNoSurge, AllowDowntime: rolloutAllowDowntime,
-		Secrets: deploy.SecretOptions{GenerateMissing: rolloutGenerateMissing, AllowLegacy: rolloutAllowLegacy},
+		Secrets:          deploy.SecretOptions{GenerateMissing: rolloutGenerateMissing, AllowLegacy: rolloutAllowLegacy},
+		AssumeCompatible: rolloutAssumeCompat,
 	}
+	if rolloutAbort {
+		return runAbort(opts)
+	}
+	version := args[0]
 
 	// Held for the whole run, dry run included: a concurrent configure, up
 	// or replica would change the deployment this acts on halfway through.
@@ -105,6 +136,9 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if rolloutDryRun {
 		return deploy.RolloutDryRun(st, version, opts)
 	}
+	if err := deploy.RequireCompatible(st, version, opts); err != nil {
+		return err
+	}
 
 	fmt.Print(deploy.RolloutPlan(st, version, opts))
 	if !rolloutYes {
@@ -113,4 +147,37 @@ func runRollout(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return deploy.Rollout(st, version, opts)
+}
+
+func runAbort(opts deploy.RolloutOptions) error {
+	unlock, err := state.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	st, err := state.Load()
+	if err != nil {
+		if !errors.Is(err, state.ErrNotConfigured) {
+			return err
+		}
+		st = nil
+	}
+	if err := deploy.CheckAbort(st, opts); err != nil {
+		return err
+	}
+	if rolloutDryRun {
+		return deploy.AbortDryRun(st, opts)
+	}
+	fmt.Print(deploy.AbortPlan(st, opts))
+	if !rolloutYes {
+		back := st.PreviousVersion
+		if st.RollingBack {
+			back = st.Version
+		}
+		if err := deploy.ConfirmVpsDeploy(fmt.Sprintf("go back to Versola %s on the VPS as above (migrations and secrets stay)", back)); err != nil {
+			return err
+		}
+	}
+	return deploy.Abort(st, opts)
 }

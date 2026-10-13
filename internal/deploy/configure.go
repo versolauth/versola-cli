@@ -67,6 +67,12 @@ type stagedConfigure struct {
 	// surge: the rollout will start a stand-in replica of auth and of edge
 	// in the lowest free slot, so their ports are checked now as well.
 	surge bool
+	// abort: this prepares the bundle of the version a rollout goes back to
+	// (`versola rollout --abort`): from.PreviousVersion is configured, the
+	// stand-in from records is carried over (it is retired and started again
+	// on the old version), migrations are recorded as done (an abort never
+	// migrates), and the record is marked RollingBack.
+	abort bool
 }
 
 // configure is Configure, or with staged set the preparation step of a
@@ -417,10 +423,20 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	// file puts a stand-in on is found clashing now, before anything changes.
 	checkAuth, checkEdge := authReplicas, edgeReplicas
 	if staged != nil && staged.surge {
-		if checkAuth, err = withStandIn(topo, AuthService, authSlots, version, target == "vps"); err != nil {
+		// A stand-in already recorded (an abort of a rollout that started
+		// one) is replaced by the new one, in the lowest free slot once it is
+		// gone: checked without it.
+		baseAuth, baseEdge := authSlots, edgeSlots
+		if n, ok := staged.from.Surge[AuthService]; ok {
+			baseAuth = withoutSlot(authSlots, n)
+		}
+		if n, ok := staged.from.Surge[EdgeService]; ok {
+			baseEdge = withoutSlot(edgeSlots, n)
+		}
+		if checkAuth, err = withStandIn(topo, AuthService, baseAuth, version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
-		if checkEdge, err = withStandIn(topo, EdgeService, edgeSlots, version, target == "vps"); err != nil {
+		if checkEdge, err = withStandIn(topo, EdgeService, baseEdge, version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -460,6 +476,15 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if staged != nil {
 		fin.Slots = map[string][]state.Slot{AuthService: authSlots, EdgeService: edgeSlots}
 		fin.PreviousVersion = staged.from.Version
+		if staged.abort {
+			fin.RollingBack = true
+			fin.Surge = staged.from.Surge
+			migrated := time.Now().UTC()
+			if staged.from.MigratedAt != nil {
+				migrated = *staged.from.MigratedAt
+			}
+			fin.MigratedAt = &migrated
+		}
 	}
 	if err := state.Finalize(fin); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)

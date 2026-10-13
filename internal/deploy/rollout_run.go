@@ -36,6 +36,11 @@ type RolloutOptions struct {
 	// Secrets: --generate-missing / --allow-legacy-secrets, as for configure;
 	// applied when the new version is prepared.
 	Secrets SecretOptions
+	// AssumeCompatible is --assume-compatible: the operator confirms that the
+	// running version works on the new version's schema while the rollout is
+	// under way, and the other way round should it be aborted. Pre-1.0
+	// releases do not promise it (see RequireCompatible).
+	AssumeCompatible bool
 }
 
 // rolloutReadyTimeout bounds the wait for one container of the new version
@@ -79,7 +84,10 @@ func CheckRollout(st *state.State, version string, o RolloutOptions) (done bool,
 		switch version {
 		case st.Version:
 		case st.PreviousVersion:
-			return false, fmt.Errorf("a rollout from %s to %s is under way; going back to %s is `versola rollout --abort`, which this versola-cli does not have yet -- `versola rollout %s` finishes the rollout", st.PreviousVersion, st.Version, version, st.Version)
+			if st.RollingBack {
+				return false, fmt.Errorf("an abort back to %s is under way -- `versola rollout --abort` (or `versola rollout %s`) finishes it; roll %s out again only after that", st.Version, st.Version, version)
+			}
+			return false, fmt.Errorf("a rollout from %s to %s is under way; going back to %s is `versola rollout --abort` -- `versola rollout %s` finishes the rollout", st.PreviousVersion, st.Version, version, st.Version)
 		default:
 			return false, fmt.Errorf("a rollout to %s is under way -- finish it with `versola rollout %s` before rolling out %s", st.Version, st.Version, version)
 		}
@@ -114,6 +122,96 @@ func CheckRollout(st *state.State, version string, o RolloutOptions) (done bool,
 	return false, nil
 }
 
+// RequireCompatible refuses to start a rollout the operator has not
+// confirmed compatible (--assume-compatible). A rolling upgrade runs the two
+// versions side by side on the new version's schema, and an abort runs the
+// old one on it alone; Versola's releases before 1.0 do not promise either
+// ("compatibility between 0.x releases is not guaranteed" -- 0.7.0, for one,
+// needs a fresh database). Nothing in a release says so yet, so the operator
+// has to, having read its notes. Continuing a rollout under way needs no
+// confirmation: it was given when it started.
+func RequireCompatible(st *state.State, version string, o RolloutOptions) error {
+	if st.RolloutUnderway() || o.AssumeCompatible {
+		return nil
+	}
+	return fmt.Errorf("a rolling upgrade runs %s and %s side by side on the database as %s migrates it, and Versola releases before 1.0 don't promise that works (some, like 0.7.0, need a fresh database) -- "+
+		"read the release notes of %s; if its migrations are additive and %s runs on its schema, run again with --assume-compatible. Otherwise deploy it with `versola configure`, `migrate` and `up` (a short stop; back the database up first)",
+		st.Version, version, version, version, st.Version)
+}
+
+// CheckAbort is everything about `rollout --abort` that can be refused on
+// the record alone. It goes back to PreviousVersion; no compatibility
+// confirmation is asked (going back is what the release contract is for),
+// but the plan says what does not go back.
+func CheckAbort(st *state.State, o RolloutOptions) error {
+	if st == nil {
+		return fmt.Errorf("nothing has been configured yet -- there is no rollout to abort")
+	}
+	if st.Target != "vps" {
+		return fmt.Errorf("`rollout --abort` goes back on a vps deployment; a %s deployment is configured and started again instead", st.Target)
+	}
+	if o.AllowDowntime && !o.NoSurge {
+		return fmt.Errorf("--allow-downtime only goes with --no-surge (with a stand-in, nothing is down)")
+	}
+	if !st.RolloutUnderway() {
+		return fmt.Errorf("no rollout is under way -- nothing to abort. To go back to an earlier version, roll it out: `versola rollout <version> --assume-compatible`")
+	}
+	if st.PreviousVersion == "" {
+		return fmt.Errorf("a stand-in is recorded but not the version the rollout came from -- `versola rollout %s` finishes it", st.Version)
+	}
+	composePath, exists, err := st.ComposeFilePath()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file) -- configure it again")
+	}
+	if err := requireCurrentBundle(st, filepath.Dir(composePath)); err != nil {
+		return err
+	}
+	if o.NoSurge && !o.AllowDowntime {
+		for _, svc := range []string{AuthService, EdgeService} {
+			slots := st.ActiveSlots(svc)
+			if n, ok := st.Surge[svc]; ok {
+				slots = withoutSlot(slots, n)
+			}
+			if len(slots) == 1 {
+				return fmt.Errorf("%s has one replica: without a stand-in (--no-surge) moving it back leaves %s unreachable until it is ready -- drop --no-surge, or add --allow-downtime to accept that", svc, svc)
+			}
+		}
+	}
+	return nil
+}
+
+// AbortPlan describes what `rollout --abort` is about to do.
+func AbortPlan(st *state.State, o RolloutOptions) string {
+	var b strings.Builder
+	from, to := st.Version, st.PreviousVersion
+	if st.RollingBack {
+		from, to = st.PreviousVersion, st.Version
+	}
+	fmt.Fprintf(&b, "Aborting the rolling upgrade of the vps deployment at %s\n", st.AuthURL)
+	fmt.Fprintf(&b, "  Versola: back from %s to %s", from, to)
+	if st.RollingBack {
+		b.WriteString("  (under way: continuing where it stopped)")
+	}
+	b.WriteString("\n\n")
+	b.WriteString("  What does NOT go back:\n")
+	fmt.Fprintf(&b, "   - the database: migrations already applied stay (they can't be rolled back); %s runs on that schema.\n", to)
+	b.WriteString("     Versola releases before 1.0 don't promise that works -- a replica that does not become ready on it\n" +
+		"     stays out of the proxy and the others serve; restore from a backup if the old version can't run at all.\n")
+	fmt.Fprintf(&b, "   - secrets: any that %s added stay in OpenBao (%s does not read them).\n\n", from, to)
+	b.WriteString("  Steps:\n")
+	b.WriteString("   - if no container was started from the new version's configuration yet: the previous one becomes\n" +
+		"     the active one again and nothing running is touched;\n")
+	fmt.Fprintf(&b, "   - otherwise %s is configured again (versola-tools, the secrets plan -- what OpenBao holds is kept),\n", to)
+	fmt.Fprintf(&b, "     central is stopped and started on it, and every auth and edge replica is moved to it as a rollout\n     would (%s), including the replicas that never left %s:\n",
+		map[bool]string{true: "without a stand-in", false: "a stand-in first; a stand-in of " + from + " is retired"}[o.NoSurge], to)
+	b.WriteString("     they mount files of the previous configuration, which is removed at the end.\n")
+	b.WriteString("\n  If it stops (an error, Ctrl-C, a dropped SSH session), `versola rollout --abort` again continues it.\n")
+	return b.String()
+}
+
 // RolloutPlan describes what `rollout version` is about to do, from the
 // record alone: printed before the confirmation, and by --dry-run.
 func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
@@ -135,7 +233,16 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 	if openbaoSetUpByHand(st.Target) {
 		b.WriteString(", OpenBao set up by hand")
 	}
-	b.WriteString("\n\n  Steps:\n")
+	b.WriteString("\n")
+	switch {
+	case st.RolloutUnderway():
+	case o.AssumeCompatible:
+		b.WriteString("  Compatibility: confirmed by you (--assume-compatible) -- releases before 1.0 don't promise it\n")
+	default:
+		b.WriteString("  Compatibility: NOT confirmed -- the rollout refuses without --assume-compatible (releases before 1.0\n" +
+			"  don't promise the running version works on the new schema; read the release notes)\n")
+	}
+	b.WriteString("\n  Steps:\n")
 	done := func(ok bool) string {
 		if ok {
 			return "  [done]"
@@ -268,45 +375,68 @@ func Rollout(st *state.State, version string, o RolloutOptions) error {
 		return err
 	}
 	if !st.RolloutUnderway() {
-		dir, err := bundleDirOf(st)
-		if err != nil {
-			return err
-		}
-		proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir)}
 		fmt.Printf("\nPreparing Versola %s next to the running %s (nothing running changes in this step)...\n", version, st.Version)
-		if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets,
-			&stagedConfigure{from: st, surge: !o.NoSurge}); err != nil {
-			return fmt.Errorf("preparing %s failed -- nothing running was changed: %w", version, err)
-		}
-		next, err := state.Load()
+		next, err := prepareStaged(st, version, o, &stagedConfigure{from: st, surge: !o.NoSurge})
 		if err != nil {
-			return err
+			return fmt.Errorf("preparing %s failed -- nothing running was changed: %w", version, err)
 		}
 		st = next
 	}
-
-	composePath, _, err := st.ComposeFilePath()
-	if err != nil {
+	if err := runEngine(st, o); err != nil {
 		return err
 	}
+	fmt.Printf("\nVersola %s is rolled out at %s.\n", st.Version, st.AuthURL)
+	return nil
+}
+
+// prepareStaged runs the staged configure of version on st's deployment and
+// returns the record it wrote.
+func prepareStaged(st *state.State, version string, o RolloutOptions, staged *stagedConfigure) (*state.State, error) {
+	dir, err := bundleDirOf(st)
+	if err != nil {
+		return nil, err
+	}
+	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir)}
+	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, staged); err != nil {
+		return nil, err
+	}
+	return state.Load()
+}
+
+// newDockerRolloutOps is the real world of a prepared rollout recorded in st.
+func newDockerRolloutOps(st *state.State) (dockerRolloutOps, topology.Topology, string, error) {
+	composePath, _, err := st.ComposeFilePath()
+	if err != nil {
+		return dockerRolloutOps{}, topology.Topology{}, "", err
+	}
 	topo, err := loadTopology(composePath)
+	if err != nil {
+		return dockerRolloutOps{}, topology.Topology{}, "", err
+	}
+	authURL, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
+	if err != nil {
+		return dockerRolloutOps{}, topology.Topology{}, "", fmt.Errorf("the recorded auth URL is no longer valid: %w", err)
+	}
+	if topo.Project() == "" {
+		return dockerRolloutOps{}, topology.Topology{}, "", fmt.Errorf("the compose file has no project name, so the rollout can't find its containers")
+	}
+	ops := dockerRolloutOps{
+		dockerReplicaOps: dockerReplicaOps{dir: filepath.Dir(composePath), composePath: composePath, mode: st.ProxyMode},
+		st:               st, project: topo.Project(), host: authURL.Host,
+	}
+	return ops, topo, composePath, nil
+}
+
+// runEngine carries the prepared rollout recorded in st -- forwards, or an
+// abort's way back -- to the end.
+func runEngine(st *state.State, o RolloutOptions) error {
+	ops, topo, composePath, err := newDockerRolloutOps(st)
 	if err != nil {
 		return err
 	}
 	fronts, genDir, err := proxyRouting(topo, true)
 	if err != nil {
 		return err
-	}
-	authURL, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
-	if err != nil {
-		return fmt.Errorf("the recorded auth URL is no longer valid: %w", err)
-	}
-	if topo.Project() == "" {
-		return fmt.Errorf("the compose file has no project name, so the rollout can't find its containers")
-	}
-	ops := dockerRolloutOps{
-		dockerReplicaOps: dockerReplicaOps{dir: filepath.Dir(composePath), composePath: composePath, mode: st.ProxyMode},
-		st:               st, project: topo.Project(), host: authURL.Host,
 	}
 
 	interrupted, stopWatching := watchInterrupts()
@@ -318,11 +448,159 @@ func Rollout(st *state.State, version string, o RolloutOptions) error {
 
 	e := &rolloutEngine{st: st, topo: topo, bundleDir: filepath.Dir(composePath), ops: ops, out: func(f string, a ...any) { fmt.Printf(f, a...) },
 		fronts: fronts, genDir: genDir, surge: !o.NoSurge, allowDowntime: o.AllowDowntime, interrupted: interrupted}
-	if err := e.run(); err != nil {
+	return e.run()
+}
+
+// abortOps is what deciding how to abort needs besides the record: the
+// containers, and making the previous bundle the active one again.
+type abortOps interface {
+	inspect(service string) (containerInfo, error)
+	restorePrevious(bundle string, migratedAt time.Time) error
+	// oneOffsRunning names the running `compose run` containers of this
+	// project -- a migration (versola-<service>-migrate, or the migrate
+	// service) left running by a CLI that was killed.
+	oneOffsRunning() ([]string, error)
+}
+
+// abortPath is how an abort goes back.
+type abortPath int
+
+const (
+	// abortRestore: nothing was started from the new bundle -- the previous
+	// bundle becomes the active one again; no container is touched.
+	abortRestore abortPath = iota
+	// abortRollBack: the previous version is configured again and rolled
+	// out by the engine.
+	abortRollBack
+)
+
+// chooseAbortPath decides, from the containers, whether a rollout can be
+// cancelled by making its previous bundle the active one again: no
+// container (central's, any slot's) was created from the new bundle, no
+// stand-in is recorded, and every container there is was created from that
+// previous bundle -- the only other one the record keeps mounted, still on
+// disk. Anything else, or anything it can't tell (a container without the
+// working-directory label), is rolled back the long way.
+//
+// missing names the services with no container at all on the restore path:
+// down already (a `down --force`, or a recreate cut off between removing the
+// old container and creating the new one), for the caller to say so.
+//
+// A migration still running (a CLI killed during migrate leaves its `compose
+// run` container behind, still running from the new bundle and still moving
+// the schema) stops it: neither path is safe until it has finished.
+func chooseAbortPath(st *state.State, ops abortOps, activeDir string) (path abortPath, prev string, missing []string, err error) {
+	running, err := ops.oneOffsRunning()
+	if err != nil {
+		return 0, "", nil, err
+	}
+	if len(running) > 0 {
+		return 0, "", nil, fmt.Errorf("%s still running (a `docker compose run` container of this deployment -- most likely a migration a cut-off `versola` left behind) -- wait for it to finish (`docker logs -f %s`), then run `versola rollout --abort` again", strings.Join(running, ", "), running[0])
+	}
+	if st.RollingBack || len(st.Surge) > 0 {
+		return abortRollBack, "", nil, nil
+	}
+	prev = ""
+	for _, d := range st.MountedBundleDirs {
+		if d == st.BundleDir {
+			continue
+		}
+		if prev != "" {
+			return abortRollBack, "", nil, nil // more than one earlier bundle: not a state a rollout leaves
+		}
+		prev = d
+	}
+	if prev == "" {
+		return abortRollBack, "", nil, nil
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, prev, "compose.yml")); err != nil {
+		return abortRollBack, "", nil, nil
+	}
+	services := []string{CentralService}
+	for _, svc := range []string{AuthService, EdgeService} {
+		for _, sl := range st.ActiveSlots(svc) {
+			if sl.Version != st.PreviousVersion {
+				return abortRollBack, "", nil, nil
+			}
+			services = append(services, topology.SlotService(svc, sl.N))
+		}
+	}
+	for _, svc := range services {
+		c, err := ops.inspect(svc)
+		if err != nil {
+			return 0, "", nil, err
+		}
+		if !c.found {
+			missing = append(missing, svc) // down already; the previous record starts it on `up`
+			continue
+		}
+		if c.workDir == "" || filepath.Clean(c.workDir) != filepath.Clean(filepath.Join(activeDir, prev)) {
+			return abortRollBack, "", nil, nil
+		}
+	}
+	return abortRestore, prev, missing, nil
+}
+
+// Abort runs `versola rollout --abort` on st (what CheckAbort passed). The
+// caller holds state.Lock for the whole run.
+func Abort(st *state.State, o RolloutOptions) error {
+	activeDir, err := state.Dir()
+	if err != nil {
 		return err
 	}
-	fmt.Printf("\nVersola %s is rolled out at %s.\n", st.Version, st.AuthURL)
+	ops, _, _, err := newDockerRolloutOps(st)
+	if err != nil {
+		return err
+	}
+	path, prev, missing, err := chooseAbortPath(st, ops, activeDir)
+	if err != nil {
+		return err
+	}
+	if path == abortRestore {
+		back := st.PreviousVersion
+		if err := abortByRestoring(st, ops, prev); err != nil {
+			return err
+		}
+		fmt.Printf("\nThe rollout is cancelled: Versola %s is the active deployment again; nothing running was touched.\n", back)
+		if len(missing) > 0 {
+			fmt.Printf("Not running: %s -- `versola up` starts it again.\n", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+	if err := rolloutPreflight(st, o); err != nil {
+		return err
+	}
+	leaving := st.Version
+	if st.RollingBack {
+		leaving = st.PreviousVersion
+	}
+	if !st.RollingBack {
+		back := st.PreviousVersion
+		fmt.Printf("\nConfiguring Versola %s again to go back to it (nothing running changes in this step)...\n", back)
+		next, err := prepareStaged(st, back, o, &stagedConfigure{from: st, surge: !o.NoSurge, abort: true})
+		if err != nil {
+			return fmt.Errorf("configuring %s again failed -- nothing running was changed: %w", back, err)
+		}
+		st = next
+	}
+	if err := runEngine(st, o); err != nil {
+		return err
+	}
+	fmt.Printf("\nBack on Versola %s at %s. The database keeps the migrations of %s, and OpenBao any secrets it added.\n", st.Version, st.AuthURL, leaving)
 	return nil
+}
+
+// abortByRestoring is the abortRestore path. Migrations the cancelled
+// rollout applied stay: said, not undone.
+func abortByRestoring(st *state.State, ops abortOps, prev string) error {
+	migrated := time.Now().UTC()
+	if st.MigratedAt != nil {
+		migrated = *st.MigratedAt
+		fmt.Printf("Note: the migrations of %s were applied and stay; %s runs on that schema.\n", st.Version, st.PreviousVersion)
+	} else {
+		fmt.Printf("Note: the migrations of %s were not recorded as applied; if a `migrate` was cut off, some of them may be, and they stay.\n", st.Version)
+	}
+	return ops.restorePrevious(prev, migrated)
 }
 
 // watchInterrupts turns the first Ctrl-C (or SIGTERM, or the SIGHUP of a
@@ -393,6 +671,38 @@ func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 		return Migrate(st, MigrateOptions{DryRun: true})
 	}
 	return previewVersion(st, version, o.Secrets)
+}
+
+// AbortDryRun prints what `rollout --abort` would do and changes nothing:
+// the plan, and which way it would go back (from the containers).
+func AbortDryRun(st *state.State, o RolloutOptions) error {
+	fmt.Print(AbortPlan(st, o))
+	fmt.Println()
+	activeDir, err := state.Dir()
+	if err != nil {
+		return err
+	}
+	ops, _, _, err := newDockerRolloutOps(st)
+	if err != nil {
+		return err
+	}
+	path, prev, missing, err := chooseAbortPath(st, ops, activeDir)
+	if err != nil {
+		return err
+	}
+	if path == abortRestore {
+		fmt.Printf("Would make the previous configuration (%s) the active one again; no container would be touched.\n", prev)
+		if len(missing) > 0 {
+			fmt.Printf("Not running now: %s (`versola up` would start it afterwards).\n", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+	if err := rolloutPreflight(st, o); err != nil {
+		fmt.Printf("Would stop before changing anything: %v\n", err)
+		return err
+	}
+	fmt.Println("Would configure the previous version again and move every replica to it (see the steps above).")
+	return nil
 }
 
 // previewVersion runs version's versola-tools into a temporary directory,
@@ -574,6 +884,19 @@ func (o dockerRolloutOps) warm(r replica) error {
 }
 
 func (o dockerRolloutOps) migrate() error { return Migrate(o.st, MigrateOptions{}) }
+func (o dockerRolloutOps) oneOffsRunning() ([]string, error) {
+	out, err := docker.Output("ps", "--format", "{{.Names}}",
+		"--filter", "label=com.docker.compose.project="+o.project,
+		"--filter", "label=com.docker.compose.oneoff=True")
+	if err != nil {
+		return nil, fmt.Errorf("couldn't list the running one-off containers: %w", err)
+	}
+	return strings.Fields(string(out)), nil
+}
+
+func (o dockerRolloutOps) restorePrevious(bundle string, migratedAt time.Time) error {
+	return state.RestorePrevious(bundle, migratedAt, openbaoBundles()...)
+}
 func (o dockerRolloutOps) markStarting() error {
 	return state.MarkStarting()
 }
@@ -646,13 +969,32 @@ func probeReplica(r replica, host string, timeout time.Duration) error {
 	return fmt.Errorf("%s (%s) did not answer %d times in a row within %s: %s", r.Service, u.Path, warmProbesInARow, timeout, last)
 }
 
+// DownBlocked refuses `versola down` while a rolling upgrade is under way,
+// unless forced: it would take the deployment down mid-upgrade, and `up`
+// refuses to start a stack a rollout left half-moved (checkRunnable) -- only
+// `versola rollout` can carry it on.
+func DownBlocked(st *state.State, force bool) error {
+	if !st.RolloutUnderway() || force {
+		return nil
+	}
+	cont := fmt.Sprintf("`versola rollout %s` finishes it, `versola rollout --abort` goes back", st.Version)
+	if st.RollingBack {
+		cont = "`versola rollout --abort` finishes the abort under way"
+	}
+	return fmt.Errorf("a rolling upgrade is under way (%s -> %s) -- %s. To stop everything anyway, `versola down --force`; afterwards only `versola rollout` (or --abort) starts it again, not `up`", st.PreviousVersion, st.Version, cont)
+}
+
 // RolloutSummary is the rollout under way, for `status`, or "" when none is.
 func RolloutSummary(st *state.State) string {
 	if !st.RolloutUnderway() {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Rolling upgrade %s -> %s under way -- `versola rollout %s` continues it\n", st.PreviousVersion, st.Version, st.Version)
+	if st.RollingBack {
+		fmt.Fprintf(&b, "Abort of the rolling upgrade under way: back from %s to %s -- `versola rollout --abort` continues it\n", st.PreviousVersion, st.Version)
+	} else {
+		fmt.Fprintf(&b, "Rolling upgrade %s -> %s under way -- `versola rollout %s` continues it, `versola rollout --abort` goes back\n", st.PreviousVersion, st.Version, st.Version)
+	}
 	if st.MigratedAt == nil {
 		b.WriteString("  migrations: not applied yet\n")
 	}

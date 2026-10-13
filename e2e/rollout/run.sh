@@ -4,7 +4,17 @@
 # runs against the proxy (public port, 8082, 8083), and checks nothing failed.
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
+#                  [--abort-at prepared|central|standin|midway]
 #   ./run.sh clean
+#
+# --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
+# it reaches that phase, then runs `versola rollout --abort` under the same
+# traffic, and checks every container is version A again:
+#   prepared  after the new bundle is prepared, before migrate: the abort only
+#             makes the previous configuration active again (nothing restarts)
+#   central   after central restarted on B, before any stand-in
+#   standin   after the auth stand-in (B) takes traffic
+#   midway    after the first replica was recreated on B
 #
 # Run it ONLY on a throwaway machine (the test stand): it starts containers
 # named versola-*, a real OpenBao and the proxy on 127.0.0.1:2821/8082/8083,
@@ -80,9 +90,10 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2"
+  local replicas=3 surge="" base="0.6.2" abort_at=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --abort-at) abort_at="$2"; shift 2 ;;
       --replicas) replicas="$2"; shift 2 ;;
       --no-surge) surge="--no-surge"; shift ;;
       --base-tools) base="$2"; shift 2 ;;
@@ -90,6 +101,15 @@ run() {
     esac
   done
   [ -x "$cli" ] || die "$cli is not an executable versola binary"
+  local pattern="" versions="$A,$B"
+  case "$abort_at" in
+    "") ;;
+    prepared) pattern="Pulling the images"; versions="$A" ;;
+    central) pattern="Waiting for central to be ready" ;;
+    standin) pattern="takes traffic" ;;
+    midway) pattern="runs $B and takes traffic" ;;
+    *) die "--abort-at: prepared, central, standin or midway" ;;
+  esac
   command -v docker >/dev/null || die "no docker"
 
   local found; found="$(existing)"
@@ -131,14 +151,48 @@ $found"
 
   stop="$work/stop"; rm -f "$stop"
   "$work/traffic" -h >/dev/null 2>&1 || die "cannot execute $work/traffic (is $E2E_HOME on a noexec mount?)"
-  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$A,$B" >"$work/traffic.txt" 2>&1 &
+  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$versions" >"$work/traffic.txt" 2>&1 &
   tpid=$!
-  # A killed or failed script must not leave the client hammering the proxy.
-  trap 'touch "$stop"; kill "$tpid" 2>/dev/null || true' EXIT
+  rpid=""
+  # A killed or failed script must not leave the client hammering the proxy,
+  # nor a rollout running in the background.
+  trap 'touch "$stop"; kill "$tpid" ${rpid:-} 2>/dev/null || true' EXIT
   sleep 8
-  say "rolling out $B ${surge}"
-  local rrc=0
-  "$cli" rollout "$B" --yes $surge || rrc=$?
+  local rrc=0 arc=0
+  if [ -z "$abort_at" ]; then
+    say "rolling out $B ${surge}"
+    "$cli" rollout "$B" --yes --assume-compatible $surge || rrc=$?
+  else
+    say "rolling out $B ${surge}, stopping it at '$abort_at'"
+    local log="$work/rollout.txt"
+    "$cli" rollout "$B" --yes --assume-compatible $surge >"$log" 2>&1 &
+    rpid=$!
+    local sent=""
+    while kill -0 "$rpid" 2>/dev/null; do
+      if [ -z "$sent" ] && grep -qF "$pattern" "$log"; then
+        kill -TERM "$rpid" 2>/dev/null || true; sent=yes
+      fi
+      sleep 0.5
+    done
+    wait "$rpid" || rrc=$?
+    rpid=""
+    cat "$log"
+    [ -n "$sent" ] || die "the rollout never reached '$abort_at' (no \"$pattern\" in its output)"
+    [ "$rrc" -ne 0 ] || die "the rollout finished before it could be stopped at '$abort_at'"
+    rrc=0 # stopped on purpose
+    "$cli" status || true
+    sleep 5
+    say "aborting ${surge}"
+    "$cli" rollout --abort --yes $surge | tee "$work/abort.txt" || arc=$?
+    if [ "$abort_at" = prepared ] && ! grep -q "nothing running was touched" "$work/abort.txt"; then
+      echo "e2e: an abort before migrate must only restore the previous configuration" >&2; arc=1
+    fi
+    local stray
+    stray="$(docker ps --format '{{.Names}} {{.Image}}' | grep -E '^versola-(central|auth|edge)' | grep -v ":$A\$" || true)"
+    if [ -n "$stray" ]; then echo "e2e: still not on $A after the abort:" >&2; echo "$stray" >&2; arc=1; fi
+    local st_out; st_out="$("$cli" status 2>&1 || true)"
+    if grep -q "under way" <<<"$st_out"; then echo "e2e: status still reports a rollout under way" >&2; arc=1; fi
+  fi
   sleep 10
   touch "$stop"
   local trc=0
@@ -152,12 +206,12 @@ $found"
   "$cli" status || true
 
   echo
-  echo "rollout exit: $rrc   traffic exit: $trc   (0 and 0 is a pass)"
-  [ "$rrc" -eq 0 ] && [ "$trc" -eq 0 ]
+  echo "rollout exit: $rrc   abort exit: $arc   traffic exit: $trc   (all 0 is a pass)"
+  [ "$rrc" -eq 0 ] && [ "$arc" -eq 0 ] && [ "$trc" -eq 0 ]
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

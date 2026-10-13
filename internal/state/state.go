@@ -35,7 +35,7 @@ import (
 // guessing from which fields happen to be present.
 //
 // Version 2 added SecretsRevision. Version 3 added PostgresHost,
-// PreviousVersion and Surge (rolling upgrades). Version 4 added
+// PreviousVersion, Surge and RollingBack (rolling upgrades and their abort). Version 4 added
 // PostgresDB and PostgresCA (--postgres-db, --postgres-ca). A CLI refuses a file of a
 // newer layout than its own (see Load) rather than load it and drop the
 // fields it does not know on its next Save; an older layout is read, with
@@ -166,8 +166,8 @@ type State struct {
 	// rolling upgrade (`versola rollout`) moved it to Version. Written when
 	// the rollout prepares the new version's bundle, cleared when it
 	// finishes; while it is set, the rollout is under way (see
-	// RolloutUnderway) and Version is where it is going, not what runs. Kept
-	// so that it can be rolled back to (`rollout --abort`, a later step).
+	// RolloutUnderway) and Version is where it is going, not what runs. It is
+	// what `rollout --abort` goes back to.
 	PreviousVersion string `json:"previousVersion,omitempty"`
 
 	// Surge marks, per scalable service, the slot a rolling upgrade started
@@ -179,6 +179,14 @@ type State struct {
 	// slot itself is in Slots too (replicas.yml defines it from there).
 	// `up` and `replica` refuse to act while it is set (see MixedVersions).
 	Surge map[string]int `json:"surge,omitempty"`
+
+	// RollingBack marks the rollout under way as an abort (`versola rollout
+	// --abort`): Version is the version it is going back to, PreviousVersion
+	// the one it is leaving. Without it, an abort cut off halfway would look
+	// like a rollout to the old version, and a second --abort would turn it
+	// round again. Written with the abort's own bundle, cleared when it
+	// finishes. (Layout 3: added before layout 3 was released.)
+	RollingBack bool `json:"rollingBack,omitempty"`
 
 	// MountedBundleDirs are the bundles containers may currently be
 	// started from, so bind-mount files from: `up` adds the current bundle
@@ -407,6 +415,13 @@ type FinalizeOptions struct {
 	// they run. A plain configure leaves both empty: one replica in slot 1.
 	Slots           map[string][]Slot
 	PreviousVersion string
+	// Surge, MigratedAt and RollingBack are set by an abort preparing the
+	// bundle of the version it goes back to (see deploy's stagedConfigure):
+	// the stand-in a cut-off rollout left, and the migrations already applied
+	// -- an abort never migrates, so the record must not ask for it.
+	Surge       map[string]int
+	MigratedAt  *time.Time
+	RollingBack bool
 }
 
 // Finalize makes the deployment Prepare just built (at bundleDir) the
@@ -463,6 +478,14 @@ func Finalize(o FinalizeOptions) error {
 		PostgresDB:    o.PostgresDB,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,
+		MigratedAt:      o.MigratedAt,
+		RollingBack:     o.RollingBack,
+	}
+	for svc, n := range o.Surge {
+		if s.Surge == nil {
+			s.Surge = map[string]int{}
+		}
+		s.Surge[svc] = n
 	}
 	for svc, slots := range o.Slots {
 		s.SetSlots(svc, slots)
@@ -757,6 +780,53 @@ func MarkRunning(keep ...string) error {
 		return err
 	}
 	pruneBundles(dir, append([]string{s.BundleDir}, keep...)...)
+	return nil
+}
+
+// RestorePrevious makes an earlier bundle the active deployment again: what
+// `versola rollout --abort` does when the rollout it cancels has not started
+// any container from its new bundle yet (see deploy's abort). bundle is the
+// earlier bundle's directory name; it must still be there. The record is
+// rewritten in place -- version, bundle, the slots at that version, no
+// rollout under way -- and every other bundle except those in keep goes.
+// migratedAt is recorded as the time of the last migration: the schema is at
+// least where that version needs it (the cancelled rollout may have migrated
+// it further; migrations are not rolled back).
+func RestorePrevious(bundle string, migratedAt time.Time, keep ...string) error {
+	s, err := Load()
+	if err != nil {
+		return err
+	}
+	if s.PreviousVersion == "" || len(s.Surge) > 0 {
+		return fmt.Errorf("no rollout to cancel this way is recorded")
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, bundle, "compose.yml")); err != nil {
+		return fmt.Errorf("the previous deployment's files (%s) are not there any more: %w", bundle, err)
+	}
+	prev := s.PreviousVersion
+	slots := map[string][]Slot{}
+	for _, svc := range []string{"auth", "edge"} {
+		for _, sl := range s.ActiveSlots(svc) {
+			slots[svc] = append(slots[svc], Slot{N: sl.N, Version: prev})
+		}
+	}
+	s.Version, s.PreviousVersion, s.RollingBack = prev, "", false
+	s.BundleDir = bundle
+	s.MountedBundleDirs = []string{bundle}
+	s.MigratedAt = &migratedAt
+	s.ConfiguredAt = time.Now().UTC()
+	s.Slots = nil
+	for svc, ss := range slots {
+		s.SetSlots(svc, ss)
+	}
+	if err := s.Save(); err != nil {
+		return err
+	}
+	pruneBundles(dir, append([]string{bundle}, keep...)...)
 	return nil
 }
 

@@ -321,7 +321,7 @@ func checkRunnable(st *state.State, bundleDir string) error {
 		why = fmt.Sprintf("a rolling upgrade from %s is recorded as not finished", st.PreviousVersion)
 	}
 	if why != "" {
-		return fmt.Errorf("the recorded replicas are not one version (%s) -- `up` starts what is recorded and can't tell which way an upgrade was going; finish it with `versola rollout %s`", why, st.Version)
+		return fmt.Errorf("the recorded replicas are not one version (%s) -- `up` starts what is recorded and can't tell which way an upgrade was going; finish it with `versola rollout %s`, or go back with `versola rollout --abort`", why, st.Version)
 	}
 	return nil
 }

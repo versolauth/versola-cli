@@ -125,6 +125,13 @@ type rolloutEngine struct {
 	// as the run goes.
 	running map[string]map[int]bool
 	inUp    map[string]map[int]bool
+	// current, per scalable service and slot: whether its container is the
+	// target's -- its image, created from this bundle (isNew). What has to be
+	// replaced is decided by it, not by the version recorded: a container of
+	// the right version from another bundle (an abort's untouched replicas,
+	// which still mount the bundle the end of the run deletes) is recorded
+	// at the version it runs and still has to be recreated.
+	current map[string]map[int]bool
 }
 
 func (e *rolloutEngine) say(format string, args ...any) { e.out(format, args...) }
@@ -206,7 +213,14 @@ func (e *rolloutEngine) isNew(base string, c containerInfo) (bool, error) {
 	if !c.found || c.image != want {
 		return false, nil
 	}
-	return c.workDir == "" || e.bundleDir == "" || filepath.Clean(c.workDir) == filepath.Clean(e.bundleDir), nil
+	if c.workDir == "" || e.bundleDir == "" {
+		// Compose did not say which bundle it came from. Going forward the
+		// image tells versions apart; going back (an abort) the replicas that
+		// never moved have the target's image already, but mount the bundle
+		// the end of the run deletes -- so there it is not taken as new.
+		return !e.st.RollingBack, nil
+	}
+	return filepath.Clean(c.workDir) == filepath.Clean(e.bundleDir), nil
 }
 
 // writeFiles rewrites replicas.yml and overrides.yml from the record: what
@@ -299,8 +313,9 @@ func (e *rolloutEngine) takeOutOfProxy(svc string, n int) error {
 func (e *rolloutEngine) reconcile() error {
 	e.running = map[string]map[int]bool{}
 	e.inUp = map[string]map[int]bool{}
+	e.current = map[string]map[int]bool{}
 	for _, svc := range []string{AuthService, EdgeService} {
-		e.running[svc], e.inUp[svc] = map[int]bool{}, map[int]bool{}
+		e.running[svc], e.inUp[svc], e.current[svc] = map[int]bool{}, map[int]bool{}, map[int]bool{}
 		slots := e.st.ActiveSlots(svc)
 		changed := false
 		for i, sl := range slots {
@@ -313,12 +328,19 @@ func (e *rolloutEngine) reconcile() error {
 				return err
 			}
 			e.running[svc][sl.N] = c.found && c.running
+			e.current[svc][sl.N] = isNew
+			want, err := e.expectedImage(svc)
+			if err != nil {
+				return err
+			}
 			switch {
 			case isNew && sl.Version != e.st.Version:
 				slots[i].Version, changed = e.st.Version, true
-			case c.found && !isNew && sl.Version == e.st.Version && e.st.PreviousVersion != "":
-				// Recorded as moved on, but its container is not the new
-				// version's: it was never recreated.
+			case c.found && c.image != want && sl.Version == e.st.Version && e.st.PreviousVersion != "":
+				// Recorded as moved on, but its container is not of the
+				// target's image: it was never recreated. (One of the target's
+				// image from another bundle keeps its record and is replaced
+				// all the same: current is false.)
 				slots[i].Version, changed = e.st.PreviousVersion, true
 			}
 		}
@@ -460,7 +482,7 @@ func (e *rolloutEngine) service(svc string) error {
 			continue
 		}
 		switch {
-		case sl.Version != target:
+		case !e.current[svc][sl.N]:
 			old = append(old, sl.N)
 		case !e.inUp[svc][sl.N]:
 			// On the new version but not serving: recreated by a run that
@@ -470,6 +492,39 @@ func (e *rolloutEngine) service(svc string) error {
 	}
 	sort.Ints(old)
 	sort.Ints(pending)
+	if hasStandIn && !e.current[svc][standIn] {
+		// A stand-in that is not the target's: the one a rollout started on
+		// the version an abort is leaving. It is not recreated in place (it
+		// takes traffic); it is retired, and a stand-in of the target started
+		// below if one is wanted. The replicas out of the proxy (one recreated
+		// on the version being left that never became ready) are moved
+		// first: nothing serves through them, so they need no stand-in, and
+		// the stand-in may be all that serves right now.
+		var rest []int
+		for _, n := range old {
+			if e.inUp[svc][n] {
+				rest = append(rest, n)
+				continue
+			}
+			if err := e.replace(svc, n); err != nil {
+				return err
+			}
+		}
+		old = rest
+		// Started already by an earlier run but not serving yet: brought
+		// up for the same reason.
+		for _, n := range pending {
+			if err := e.bringUp(svc, n, topology.SlotService(svc, n)); err != nil {
+				return err
+			}
+		}
+		pending = nil
+		e.say("\n%s: the stand-in %s is not on %s -- retiring it.\n", svc, topology.SlotService(svc, standIn), target)
+		if err := e.retireStandIn(svc, standIn); err != nil {
+			return err
+		}
+		hasStandIn = false
+	}
 	if len(old) == 0 && len(pending) == 0 && !hasStandIn {
 		e.say("\n%s: every replica runs %s.\n", svc, target)
 		return nil
@@ -524,7 +579,7 @@ func (e *rolloutEngine) bringUp(svc string, n int, what string) error {
 	if err := e.ops.compose("up", "-d", "--no-deps", r.Service); err != nil {
 		return fmt.Errorf("couldn't start %s: %w", r.Service, err)
 	}
-	e.running[svc][n] = true
+	e.running[svc][n], e.current[svc][n] = true, true
 	if err := e.ops.waitReady(url); err != nil {
 		return fmt.Errorf("%s never became ready on %s: %w -- it is not in the proxy; the other replicas serve. Run the same `versola rollout` again to retry", r.Service, e.st.Version, err)
 	}
@@ -581,7 +636,7 @@ func (e *rolloutEngine) startStandIn(svc string) (int, error) {
 	if err := e.ops.compose("up", "-d", "--no-deps", r.Service); err != nil {
 		return 0, e.dropStandIn(svc, n, fmt.Errorf("couldn't start the stand-in %s: %w", r.Service, err))
 	}
-	e.running[svc][n] = true
+	e.running[svc][n], e.current[svc][n] = true, true
 	url, _ := e.readyURL(r)
 	if err := e.ops.waitReady(url); err != nil {
 		return 0, e.dropStandIn(svc, n, fmt.Errorf("the stand-in %s never became ready on %s: %w -- nothing else was changed", r.Service, target, err))
@@ -608,6 +663,7 @@ func (e *rolloutEngine) dropStandIn(svc string, n int, cause error) error {
 		return fmt.Errorf("%w (and removing %s failed: %v -- it stays recorded as the stand-in; the next `versola rollout` removes it)", cause, name, err)
 	}
 	delete(e.running[svc], n)
+	delete(e.current[svc], n)
 	if err := e.update(func(s *state.State) {
 		s.SetSlots(svc, withoutSlot(s.ActiveSlots(svc), n))
 		delete(s.Surge, svc)
@@ -660,7 +716,7 @@ func (e *rolloutEngine) replace(svc string, n int) error {
 	if err := e.ops.compose("up", "-d", "--no-deps", r.Service); err != nil {
 		return fmt.Errorf("couldn't recreate %s on %s: %w -- the other replicas serve; run the same `versola rollout` again to retry", r.Service, e.st.Version, err)
 	}
-	e.running[svc][n] = true
+	e.running[svc][n], e.current[svc][n] = true, true
 	target := e.st.Version
 	// Recorded as soon as it is recreated, ready or not: its container is the
 	// new version's either way (reconcile would find the same).
@@ -704,6 +760,7 @@ func (e *rolloutEngine) retireStandIn(svc string, n int) error {
 		return fmt.Errorf("couldn't remove the stand-in %s: %w -- it is out of the proxy; run the same `versola rollout` again", name, err)
 	}
 	delete(e.running[svc], n)
+	delete(e.current[svc], n)
 	if err := e.update(func(s *state.State) {
 		s.SetSlots(svc, withoutSlot(s.ActiveSlots(svc), n))
 		delete(s.Surge, svc)
@@ -725,6 +782,11 @@ func (e *rolloutEngine) finish() error {
 			if sl.Version != e.st.Version {
 				return fmt.Errorf("%s slot %d is still recorded at %s -- run the same `versola rollout` again", svc, sl.N, sl.Version)
 			}
+			if !e.current[svc][sl.N] {
+				// MarkRunning deletes every other bundle: not while a
+				// container still mounts one.
+				return fmt.Errorf("%s slot %d was not recreated from this run's configuration -- run the same `versola rollout` again", svc, sl.N)
+			}
 			e.inUp[svc][sl.N] = true
 		}
 	}
@@ -738,7 +800,7 @@ func (e *rolloutEngine) finish() error {
 	if err := e.ops.markRunning(); err != nil {
 		return fmt.Errorf("everything runs %s, but recording that failed: %w -- run the same `versola rollout` again", e.st.Version, err)
 	}
-	return e.update(func(s *state.State) { s.PreviousVersion = "" })
+	return e.update(func(s *state.State) { s.PreviousVersion, s.RollingBack = "", false })
 }
 
 // samePorts refuses a new version whose compose file puts the replicas that

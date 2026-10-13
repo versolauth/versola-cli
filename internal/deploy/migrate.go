@@ -169,13 +169,6 @@ func recordMigrated(st *state.State) error {
 
 	now := time.Now().UTC()
 	fresh.MigratedAt = &now
-	// Stamped explicitly rather than left as whatever Load returned: a
-	// pre-state.json deployment (see state.loadLegacy) comes back with
-	// SchemaVersion 0, and saving that unchanged would write a state.json --
-	// a format that by definition didn't exist then -- still claiming to be
-	// version 0. It's this build writing the file, so it's this build's
-	// layout.
-	fresh.SchemaVersion = state.SchemaVersion
 	if err := fresh.Save(); err != nil {
 		return fmt.Errorf("migrations succeeded but couldn't record it: %w", err)
 	}
@@ -183,7 +176,7 @@ func recordMigrated(st *state.State) error {
 	// succeeds, and only in the branch that matched BundleDir -- st and
 	// fresh are confirmed to describe the same deployment at that point,
 	// so copying just this one field back is safe without also copying
-	// fresh's SchemaVersion or anything else onto a struct the caller may
+	// anything else onto a struct the caller may
 	// still use for other fields (AuthURL, Target, ...).
 	st.MigratedAt = fresh.MigratedAt
 	return nil

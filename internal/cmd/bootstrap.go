@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -143,13 +144,16 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		}
 	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
-	}); err != nil {
+	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state loaded here (if any) describes the record this run is
 		// about to REPLACE, not the deployment Configure below is about to
 		// build -- nothing to hand forward to Migrate/Up the way the state
 		// loaded just below is.
 		return err
 	}
+	// (A record too old to read -- ErrOldInstall -- is a local one: vps
+	// deployments came later. This run replaces it, which is what that
+	// error asks for, so it is not a reason to stop.)
 
 	res, err := deploy.Configure(target, version, authURL, postgresHost, setupOpenBao,
 		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging},

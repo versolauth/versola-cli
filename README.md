@@ -172,9 +172,10 @@ it. Prints the admin login on success.
 The proxy is published on `127.0.0.1` only, so the deployment isn't
 reachable from other machines on the network. Versola releases whose
 `versola-tools` doesn't ship the admin console can't be deployed this way
-(`configure` says so) -- pick a newer version. A local deployment made by
-an older versola-cli keeps its previous gateway until it's configured
-again.
+(`configure` says so) -- pick a newer version. If a local deployment made
+by an older versola-cli still runs its own gateway (`versola-nginx`) on
+that port, `configure` reports the port as taken: remove that container
+first (`docker rm -f versola-nginx`).
 
 `<version>` is a Versola release, which is tagged **without** a leading
 `v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (versola-cli's own
@@ -319,10 +320,25 @@ one may be lost, not new), so the CLI refuses unless you pass this flag.
 
 #### Upgrading the CLI
 
-A CLI that records the schema revision writes its state file in `~/.versola`
-in **layout 2**. An older CLI cannot read it and stops with a "newer schema"
-error: after the first `configure` with this CLI, do not go back to an older
-one on the same machine.
+This CLI writes its state file in `~/.versola` in **layout 3** (layout 2
+added the schema revision; layout 3 the Postgres host and the records a
+rolling upgrade needs). It reads the layouts older CLIs wrote, but an older
+CLI cannot read layout 3 and stops with a "newer schema" error: after the
+first command that saves state with this CLI, do not go back to an older one
+on the same machine.
+
+Deployments made by much older versola-clis -- before `state.json`, before
+bundle directories, before the CLI's own reverse proxy, or before replicas
+(a proxy config without `proxy/conf.d/upstreams.conf`, versola-cli 0.2.7 and
+earlier) -- are no longer started or changed as they are: `up` and
+`replica` stop with "this deployment was made by an older versola-cli
+-- run `versola configure` again". A `configure` (then `migrate` and `up`)
+replaces it; the reverse proxy and the services restart once. The very
+oldest records (no `state.json`, or no bundle directory -- local
+deployments of the first versola-cli releases) can't be read at all, so
+`status`, `down`, `migrate` and `uninstall` stop the same way; stop their
+containers with `docker compose -f ~/.versola/active/compose.yml down`
+and remove `~/.versola/active` by hand, or configure again.
 
 ### Deploying to a VPS: the reverse proxy
 

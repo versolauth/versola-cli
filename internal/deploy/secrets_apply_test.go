@@ -165,7 +165,7 @@ func (h *harness) recordDeployment(revision int) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	if err := state.FinalizeWithRevision(h.target, "1.0.0", b, "https://id.example.com", "nginx", revision); err != nil {
+	if err := state.Finalize(state.FinalizeOptions{Target: h.target, Version: "1.0.0", BundleDir: b, AuthURL: "https://id.example.com", ProxyMode: "nginx", SecretsRevision: revision}); err != nil {
 		h.t.Fatal(err)
 	}
 }

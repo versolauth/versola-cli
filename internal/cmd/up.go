@@ -49,6 +49,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	defer unlock()
 
+	// What `up` would refuse on the record alone is refused before the vps
+	// confirmation: nobody is asked to confirm something that was never
+	// going to run. A state that can't be read is left to the calls below.
+	if recorded, err := state.Load(); err == nil {
+		if err := deploy.CheckUp(recorded); err != nil {
+			return err
+		}
+	}
+
 	st, err := confirmIfVpsState(func(version string) string {
 		return fmt.Sprintf("start Versola %s on the VPS, replacing whatever's currently serving traffic there", version)
 	})

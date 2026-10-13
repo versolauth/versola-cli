@@ -23,47 +23,6 @@ type ProxyOptions struct {
 	ACMEStaging bool
 }
 
-// LegacyGatewayContainer is the gateway local deployments ran on before
-// versola-cli generated their proxy too: versola-tools' "nginx" service,
-// on Versola's own versola-gateway image. Up removes it before starting
-// the proxy, which binds the same port.
-const LegacyGatewayContainer = "versola-nginx"
-
-// LocalPortOwner: the container of this deployment's own that may hold
-// local's proxy port -- the old gateway while one is still running, else
-// the proxy. For checks.PortFree, which accepts the port being held only
-// by "our own" container.
-func LocalPortOwner() (string, error) {
-	// Bounded: callers ask this while checking prerequisites, which have to
-	// report an unresponsive daemon rather than hang on it.
-	running, err := docker.IsRunningWithin(LegacyGatewayContainer, 5*time.Second)
-	if err != nil {
-		return "", err
-	}
-	if running {
-		return LegacyGatewayContainer, nil
-	}
-	return proxy.LocalContainerName, nil
-}
-
-// removeLegacyGateway removes the old gateway container, if a deployment
-// made by an earlier versola-cli left one: it holds the port the proxy is
-// about to bind.
-func removeLegacyGateway() error {
-	_, found, err := docker.Inspect(LegacyGatewayContainer, "{{.Id}}")
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	fmt.Printf("Removing the old gateway (%s)...\n", LegacyGatewayContainer)
-	if err := docker.Run("rm", "-f", LegacyGatewayContainer); err != nil {
-		return fmt.Errorf("couldn't remove the old gateway: %w", err)
-	}
-	return nil
-}
-
 // checkProxyPorts fails early, before anything is generated, when the
 // port(s) the proxy is about to bind are already taken by something
 // else -- typically a web server already installed on the host.
@@ -185,12 +144,8 @@ func startProxy(composePath string, st *state.State) error {
 }
 
 // deployedProxyReservations are the host ports the proxy of an existing
-// deployment holds, for `up`'s port-clash check: none for a deployment made
-// before this CLI generated the proxy (no ProxyMode).
+// deployment holds, for the port-clash check of `up` and `replica`.
 func deployedProxyReservations(st *state.State) []reservation {
-	if st.ProxyMode == "" {
-		return nil
-	}
 	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
 	if err != nil {
 		// The proxy step reports an unusable auth URL itself, but until

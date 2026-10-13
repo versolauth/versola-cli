@@ -45,18 +45,6 @@ func TestSecretsRevisionIsReadFromStateJSON(t *testing.T) {
 			t.Fatalf("%+v %v", s, err)
 		}
 	})
-	t.Run("a legacy version-file deployment is revision 1 too", func(t *testing.T) {
-		if err := os.Remove(filepath.Join(dir, "state.json")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "version"), []byte("0.1.0\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		s, err := Load()
-		if err != nil || s.EffectiveSecretsRevision() != 1 {
-			t.Fatalf("%+v %v", s, err)
-		}
-	})
 }
 
 // omitempty keeps the file as it was for a deployment that has no revision

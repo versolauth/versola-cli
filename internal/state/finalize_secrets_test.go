@@ -13,7 +13,7 @@ func finalizeRev(t *testing.T, target string, rev int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := FinalizeWithRevision(target, "1.0.0", b, "https://id.example.com", "nginx", rev); err != nil {
+	if err := Finalize(FinalizeOptions{Target: target, Version: "1.0.0", BundleDir: b, AuthURL: "https://id.example.com", ProxyMode: "nginx", SecretsRevision: rev}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -64,7 +64,7 @@ func TestFinalizeRecordsTheSecretsRevision(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Finalize("vps", "1.0.0", b, "https://id.example.com", "nginx"); err != nil {
+		if err := Finalize(FinalizeOptions{Target: "vps", Version: "1.0.0", BundleDir: b, AuthURL: "https://id.example.com", ProxyMode: "nginx"}); err != nil {
 			t.Fatal(err)
 		}
 		s, err := Load()

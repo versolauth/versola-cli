@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,31 +33,32 @@ import (
 // older deployment's state can tell what it's looking at instead of
 // guessing from which fields happen to be present.
 //
-// Version 0 is reserved for deployments made before state.json existed at
-// all, which recorded only a bare "version" file — see Load.
-//
-// Version 2 added SecretsRevision. A CLI that reads only version 1 refuses a
-// version 2 file (see Load) rather than load it and drop the field on its next
-// Save.
-const SchemaVersion = 2
+// Version 2 added SecretsRevision. Version 3 added PostgresHost,
+// PreviousVersion and Surge (rolling upgrades). A CLI refuses a file of a
+// newer layout than its own (see Load) rather than load it and drop the
+// fields it does not know on its next Save; an older layout is read, with
+// the fields it lacks left empty.
+const SchemaVersion = 3
 
 const stateFileName = "state.json"
 
-// legacyVersionFileName is what deployments made by earlier builds of
-// this CLI wrote instead of state.json. It still gets read (see Load)
-// because `versola upgrade` replaces the binary in place: someone can
-// deploy with an old CLI, upgrade, and then run status against state that
-// predates this file format. Refusing to read it would turn a working
-// deployment into an invisible one.
-const legacyVersionFileName = "version"
+// oldVersionFileName is what the first builds of this CLI wrote instead of
+// state.json. It is no longer read: its presence only tells such a
+// deployment apart from no deployment at all (see ErrOldInstall).
+const oldVersionFileName = "version"
 
-// ErrNotConfigured means nothing has been deployed on this machine yet —
-// no state.json, and no legacy version file either.
+// ErrNotConfigured means nothing has been deployed on this machine yet.
 var ErrNotConfigured = errors.New("no deployment configured yet")
 
 // ErrNewerSchema means state.json was written by a newer versola, whose
 // records this one would drop on its next Save.
 var ErrNewerSchema = errors.New("state written by a newer versola")
+
+// ErrOldInstall means the deployment on this machine was made by a
+// versola-cli old enough that this one no longer carries the code to run
+// it as it is (no state.json, no bundle directory, or no reverse proxy of
+// the CLI's own). A new configure replaces it with one this CLI runs.
+var ErrOldInstall = errors.New("this deployment was made by an older versola-cli -- run `versola configure` again")
 
 // State is what the CLI records about the current deployment.
 type State struct {
@@ -77,8 +79,7 @@ type State struct {
 
 	// MigratedAt records when `versola migrate` last ran successfully
 	// against this deployment, or nil if it hasn't yet (e.g. configure
-	// just ran and migrate hasn't, or this state predates the field --
-	// see loadLegacy). A pointer rather than a zero time.Time so "not
+	// just ran and migrate hasn't). A pointer rather than a zero time.Time so "not
 	// migrated" is unambiguous in the JSON (the field is simply absent)
 	// instead of being represented by year 1. Set by deploy.Migrate,
 	// after every service's own migration has actually finished -- not
@@ -88,8 +89,9 @@ type State struct {
 
 	// BundleDir is the name (not a full path — join it onto Dir()) of the
 	// subdirectory holding the compose file and configs versola-tools
-	// generated for this deployment. Empty means "Dir() itself", which is
-	// how a pre-BundleDir deployment (see loadLegacy) is represented.
+	// generated for this deployment. Empty only in records of a CLI from
+	// before bundle directories, which this one no longer runs
+	// (ErrOldInstall).
 	//
 	// This exists because of a bug observed in the wild on Docker Desktop
 	// for Windows: bind-mounting the *same path* into a container twice —
@@ -131,9 +133,32 @@ type State struct {
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
-	// next. Empty for deployments configured before versola-cli generated
-	// the proxy itself.
+	// next. Empty only in records of a CLI from before it generated the
+	// proxy itself, which this one no longer runs (RequireCurrent).
 	ProxyMode string `json:"proxyMode,omitempty"`
+
+	// PostgresHost is the host:port the services reach Postgres at, as
+	// --postgres-host gave it to configure (vps only; empty for local, whose
+	// Postgres is a service of the compose file). Recorded so that a later
+	// step that runs versola-tools again -- a rolling upgrade -- does not
+	// have to be told it once more. Empty in records written before layout
+	// 3: then it is not known, and such a step has to ask for it.
+	PostgresHost string `json:"postgresHost,omitempty"`
+
+	// PreviousVersion is the Versola version this deployment ran before a
+	// rolling upgrade moved it to Version, kept until the upgrade is
+	// finished so that it can be rolled back to. Empty when no upgrade is
+	// under way. Only recorded so far: the rolling upgrade itself is not
+	// part of this CLI yet.
+	PreviousVersion string `json:"previousVersion,omitempty"`
+
+	// Surge marks, per scalable service, the slot a rolling upgrade started
+	// as a stand-in while it replaces that service's replicas one by one: a
+	// replica beyond the ones the operator asked for, to be removed when the
+	// upgrade finishes. Absent when no upgrade is under way. Only recorded
+	// so far, like PreviousVersion; `up` and `replica` refuse to act while
+	// it is set (see MixedVersions).
+	Surge map[string]int `json:"surge,omitempty"`
 
 	// MountedBundleDirs are the bundles containers may currently be
 	// started from, so bind-mount files from: `up` adds the current bundle
@@ -203,17 +228,59 @@ func (s *State) ActiveSlots(service string) []Slot {
 	return []Slot{{N: 1, Version: s.Version}}
 }
 
-// bundlePath resolves where this state's compose file and configs
-// actually live, honoring BundleDir when set.
+// bundlePath resolves where this state's compose file and configs live.
 func (s *State) bundlePath() (string, error) {
+	if s.BundleDir == "" {
+		return "", ErrOldInstall
+	}
 	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	if s.BundleDir == "" {
-		return dir, nil
-	}
 	return filepath.Join(dir, s.BundleDir), nil
+}
+
+// RequireCurrent is ErrOldInstall for a record this CLI can no longer run
+// as it is: one from before bundle directories or before the CLI generated
+// the reverse proxy itself. Commands that start, change or migrate the
+// deployment ask it first; `configure` does not, since it is what replaces
+// such a record.
+func (s *State) RequireCurrent() error {
+	if s.BundleDir == "" || s.ProxyMode == "" {
+		return ErrOldInstall
+	}
+	return nil
+}
+
+// MixedVersions explains why the recorded replicas are not one plain
+// deployment of Version -- a replica of auth or edge recorded at another
+// version, or a stand-in slot (Surge) -- or returns "" when they are. That
+// is the state a rolling upgrade leaves while it is under way (or after it
+// was cut off), and only the rolling upgrade can carry it on: `up` and
+// `replica` would start every slot at its recorded version without knowing
+// which way the upgrade was going.
+func (s *State) MixedVersions() string {
+	var why []string
+	for _, svc := range []string{"auth", "edge"} {
+		var other []string
+		for _, sl := range s.ActiveSlots(svc) {
+			if sl.Version != s.Version {
+				other = append(other, fmt.Sprintf("slot %d at %s", sl.N, sl.Version))
+			}
+		}
+		if len(other) > 0 {
+			why = append(why, fmt.Sprintf("%s has %s while the deployment is at %s", svc, strings.Join(other, ", "), s.Version))
+		}
+	}
+	var surge []string
+	for svc, n := range s.Surge {
+		surge = append(surge, fmt.Sprintf("%s slot %d", svc, n))
+	}
+	if len(surge) > 0 {
+		sort.Strings(surge)
+		why = append(why, "a rolling upgrade's stand-in replica is recorded ("+strings.Join(surge, ", ")+")")
+	}
+	return strings.Join(why, "; ")
 }
 
 // Dir returns ~/.versola/active, the directory for the current
@@ -284,6 +351,23 @@ func Prepare() (string, error) {
 	return bundleDir, nil
 }
 
+// FinalizeOptions describe the deployment a configure just prepared, for
+// Finalize to record.
+type FinalizeOptions struct {
+	Target, Version string
+	// BundleDir is the full path Prepare returned.
+	BundleDir string
+	AuthURL   string
+	ProxyMode string
+	// PostgresHost is --postgres-host (vps), "" for local.
+	PostgresHost string
+	// SecretsRevision is the schema revision secrets were settled against,
+	// 0 when the release has no schema.
+	SecretsRevision int
+	// Keep are further bundles to leave in place (see Finalize).
+	Keep []string
+}
+
 // Finalize makes the deployment Prepare just built (at bundleDir) the
 // active one: it writes state.json describing it, then -- only once that
 // succeeds -- removes whatever the previous deployment's bundle directory
@@ -296,25 +380,18 @@ func Prepare() (string, error) {
 // existed a moment ago -- never at a bundle directory that's only
 // half-written, and never at nothing.
 //
-// secretsRevision (FinalizeWithRevision) is the revision of the secrets schema this configure settled
-// secrets against, 0 when the release has none. It is recorded as the larger of
-// that and the previous record's for the same target: deploying an older
-// release must not make secrets that a newer one added look "new" again, and a
-// release without a schema says nothing, so the record keeps what it had.
+// o.SecretsRevision is the revision of the secrets schema this configure
+// settled secrets against, 0 when the release has none. It is recorded as the
+// larger of that and the previous record's for the same target: deploying an
+// older release must not make secrets that a newer one added look "new" again,
+// and a release without a schema says nothing, so the record keeps what it had.
 //
-// bundleDir is the full path Prepare returned; only its base name ends up
-// stored (see State.BundleDir's own comment on why). keep names further
+// o.BundleDir is the full path Prepare returned; only its base name ends up
+// stored (see State.BundleDir's own comment on why). o.Keep names further
 // bundles to leave in place: containers this record doesn't track, like
 // OpenBao, which outlives the deployments and keeps mounting its
 // openbao.hcl from the bundle it was started from.
-func Finalize(target, version, bundleDir, authURL, proxyMode string, keep ...string) error {
-	return FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode, 0, keep...)
-}
-
-// FinalizeWithRevision is Finalize for a configure that settled secrets
-// against a schema: secretsRevision is that schema's revision, 0 when the
-// release has none (then the previous record's is kept). Finalize is this with 0.
-func FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode string, secretsRevision int, keep ...string) error {
+func Finalize(o FinalizeOptions) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -332,21 +409,23 @@ func FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode string,
 		return prevErr
 	}
 
+	target := o.Target
 	s := &State{
 		SchemaVersion: SchemaVersion,
 		Target:        target,
-		Version:       version,
+		Version:       o.Version,
 		ConfiguredAt:  time.Now().UTC(),
-		BundleDir:     filepath.Base(bundleDir),
-		AuthURL:       authURL,
-		ProxyMode:     proxyMode,
+		BundleDir:     filepath.Base(o.BundleDir),
+		AuthURL:       o.AuthURL,
+		ProxyMode:     o.ProxyMode,
+		PostgresHost:  o.PostgresHost,
 	}
 	// The bundles containers may still mount carry over: they keep using
 	// them until a successful `up` has replaced them all. A previous record
 	// without MountedBundleDirs (written before that field existed) can't
 	// tell whether its bundle is in use, so it's assumed to be -- keeping
 	// one extra directory is harmless, deleting a mounted one isn't.
-	s.SecretsRevision = secretsRevision
+	s.SecretsRevision = o.SecretsRevision
 	if prevErr == nil && prev.Target == target && prev.SecretsRevision > s.SecretsRevision {
 		s.SecretsRevision = prev.SecretsRevision
 	}
@@ -371,12 +450,15 @@ func FinalizeWithRevision(target, version, bundleDir, authURL, proxyMode string,
 
 	// Everything else goes: the previous configure's bundle if it was never
 	// started, and any left behind by a configure that failed halfway.
-	pruneBundles(dir, append(append([]string{s.BundleDir}, s.MountedBundleDirs...), keep...)...)
+	pruneBundles(dir, append(append([]string{s.BundleDir}, s.MountedBundleDirs...), o.Keep...)...)
 	return nil
 }
 
-// Save writes the state record, replacing whatever was there.
+// Save writes the state record, replacing whatever was there. It is written
+// in this build's layout, whatever layout it was read in: it is this build
+// writing the file.
 func (s *State) Save() error {
+	s.SchemaVersion = SchemaVersion
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -429,7 +511,7 @@ func Load() (*State, error) {
 	b, err := os.ReadFile(filepath.Join(dir, stateFileName))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return loadLegacy(dir)
+			return nil, notConfigured(dir)
 		}
 		return nil, fmt.Errorf("couldn't read deployment state: %w", err)
 	}
@@ -446,25 +528,14 @@ func Load() (*State, error) {
 	return &s, nil
 }
 
-// loadLegacy reads a pre-state.json deployment, which recorded nothing
-// but the version string in a file of its own. Anything that file didn't
-// record is filled in with what was true of every deployment that could
-// have written it: the only target that existed then was "local", and
-// there was no separate migration step, so ConfiguredAt/MigratedAt stay
-// zero rather than being invented.
-func loadLegacy(dir string) (*State, error) {
-	b, err := os.ReadFile(filepath.Join(dir, legacyVersionFileName))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrNotConfigured
-		}
-		return nil, fmt.Errorf("couldn't read deployment state: %w", err)
+// notConfigured is what a missing state.json means: nothing deployed, or a
+// deployment by the first builds of this CLI, which recorded only a bare
+// version file. Those are not read any more -- configure replaces them.
+func notConfigured(dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, oldVersionFileName)); err == nil {
+		return ErrOldInstall
 	}
-	return &State{
-		SchemaVersion: 0,
-		Target:        "local",
-		Version:       strings.TrimSpace(string(b)),
-	}, nil
+	return ErrNotConfigured
 }
 
 // ComposeFile returns the path to the compose file configure generates,
@@ -559,7 +630,7 @@ func MarkStarting() error {
 		return err
 	}
 	if s.BundleDir == "" {
-		return nil // legacy layout: files live directly in Dir, nothing to track
+		return ErrOldInstall
 	}
 	for _, d := range s.MountedBundleDirs {
 		if d == s.BundleDir {
@@ -580,7 +651,7 @@ func MarkRunning(keep ...string) error {
 		return err
 	}
 	if s.BundleDir == "" {
-		return nil
+		return ErrOldInstall
 	}
 	s.MountedBundleDirs = []string{s.BundleDir}
 	if err := s.Save(); err != nil {
@@ -595,8 +666,8 @@ func MarkRunning(keep ...string) error {
 }
 
 // pruneBundles removes every bundle-* directory in dir except those named
-// in keep. Only bundle-* directories: in the legacy layout (see
-// loadLegacy) a deployment's files sit directly in dir itself. Failures
+// in keep. Only bundle-* directories: dir also holds state.json, the lock
+// and the install note, which are not a deployment's files. Failures
 // are reported, not fatal -- a leftover directory is only disk space.
 func pruneBundles(dir string, keep ...string) {
 	entries, err := os.ReadDir(dir)

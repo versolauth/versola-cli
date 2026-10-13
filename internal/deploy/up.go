@@ -52,6 +52,9 @@ func Up(opts UpOptions, st *state.State) error {
 	}
 	dir := filepath.Dir(composePath)
 	isVps := st.Target == "vps"
+	if err := checkRunnable(st, dir); err != nil {
+		return err
+	}
 
 	// Where each service listens -- and so where it reports readiness --
 	// comes from the compose file, with the replica slots recorded in
@@ -91,7 +94,7 @@ func Up(opts UpOptions, st *state.State) error {
 	if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
 		return err
 	}
-	steps := appStartSteps(authReplicas, edgeReplicas, !(isVps || st.ProxyMode != ""))
+	steps := appStartSteps(authReplicas, edgeReplicas)
 
 	// A warning, not a hard failure: the services themselves are the real
 	// check (they validate their schema at startup now rather than silently
@@ -192,38 +195,15 @@ func Up(opts UpOptions, st *state.State) error {
 
 	// The reverse proxy versola-cli generated at configure time (see
 	// package proxy) -- started last, once what it routes to is ready, so
-	// it never serves traffic to a backend that isn't. Deployments
-	// configured before versola-cli generated it have no ProxyMode: vps
-	// ones keep relying on a proxy set up by hand, local ones on the
-	// gateway started above. A local one moving to the proxy first loses
-	// that gateway, which holds the same port.
-	if st.ProxyMode != "" {
-		if !isVps {
-			if err := removeLegacyGateway(); err != nil {
-				return err
-			}
-		}
-		// The upstreams follow the replicas recorded in state, whatever
-		// configure or the last `replica add|remove` wrote.
-		if proxy.HasUpstreamsFile(dir) {
-			cfg := proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
-			// A migration of an older bundle that was cut off between its two
-			// writes left the upstreams defined twice: finish it, or the
-			// proxy cannot start.
-			if _, err := proxy.MigrateLegacyUpstreams(dir, cfg, nil); err != nil {
-				return fmt.Errorf("couldn't repair the reverse proxy's config: %w", err)
-			}
-			if err := proxy.WriteUpstreams(dir, cfg); err != nil {
-				return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
-			}
-		} else if len(authReplicas) > 1 || len(edgeReplicas) > 1 {
-			// Configured by an older versola-cli: upstreams inline in
-			// versola.conf, for one replica each.
-			return fmt.Errorf("this deployment's reverse proxy config predates replicas -- run `versola configure` again")
-		}
-		if err := startProxy(composePath, st); err != nil {
-			return err
-		}
+	// it never serves traffic to a backend that isn't. Its upstreams follow
+	// the replicas recorded in state, whatever configure or the last
+	// `replica add|remove` wrote.
+	cfg := proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
+	if err := proxy.WriteUpstreams(dir, cfg); err != nil {
+		return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
+	}
+	if err := startProxy(composePath, st); err != nil {
+		return err
 	}
 
 	// Everything is up and serving: the stack now runs from this
@@ -300,6 +280,53 @@ func ConfirmVpsDeploy(action string) error {
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
 		return fmt.Errorf("aborted")
+	}
+	return nil
+}
+
+// CheckUp is what Up refuses on the record alone (see checkRunnable), for a
+// caller to ask before it asks the operator to confirm. Nothing configured,
+// or no compose file, is left to Up, which explains those itself.
+func CheckUp(st *state.State) error {
+	if st == nil {
+		return nil
+	}
+	composePath, exists, err := st.ComposeFilePath()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	return checkRunnable(st, filepath.Dir(composePath))
+}
+
+// checkRunnable refuses, before anything is started, a deployment `up`
+// cannot bring to what is recorded: one from an older versola-cli, or one a
+// rolling upgrade left with replicas of two versions.
+func checkRunnable(st *state.State, bundleDir string) error {
+	if err := requireCurrentBundle(st, bundleDir); err != nil {
+		return err
+	}
+	if why := st.MixedVersions(); why != "" {
+		// TODO(0d PR-2): `versola rollout` lands with the rolling upgrade
+		// itself; until then this state only comes from a hand-edited
+		// state.json.
+		return fmt.Errorf("the recorded replicas are not one version (%s) -- `up` starts what is recorded and can't tell which way an upgrade was going; finish or abort it with `versola rollout`", why)
+	}
+	return nil
+}
+
+// requireCurrentBundle is ErrOldInstall for a record, or a bundle, this
+// CLI no longer runs as it is: see State.RequireCurrent, and a proxy config
+// from a versola-cli before replicas, which keeps the upstreams inside
+// versola.conf -- this one only rewrites upstreams.conf.
+func requireCurrentBundle(st *state.State, bundleDir string) error {
+	if err := st.RequireCurrent(); err != nil {
+		return err
+	}
+	if !proxy.HasUpstreamsFile(bundleDir) {
+		return fmt.Errorf("%w (its reverse proxy config predates %s)", state.ErrOldInstall, proxy.UpstreamsFile)
 	}
 	return nil
 }

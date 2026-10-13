@@ -134,9 +134,10 @@ func (c Config) Upstreams() ([]byte, error) {
 }
 
 // HasUpstreamsFile reports whether the bundle keeps its upstreams in
-// UpstreamsFile. A bundle configured by an older versola-cli has them inline
-// in versola.conf instead, and a second definition next to it would make
-// nginx refuse the config.
+// UpstreamsFile. A bundle configured by a versola-cli from before replicas
+// has them inline in versola.conf instead; this CLI does not run those (a
+// new configure replaces them), since a second definition next to the
+// inline ones would make nginx refuse the config.
 func HasUpstreamsFile(bundleDir string) bool {
 	_, err := os.Stat(filepath.Join(bundleDir, UpstreamsFile))
 	return err == nil

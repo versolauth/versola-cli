@@ -37,9 +37,6 @@ type replicaOps interface {
 	waitReady(url string) error
 	// reload makes the running proxy route to c's backends.
 	reload(c proxy.Config) error
-	// migrateProxy moves a proxy config written before upstreams had a file of
-	// their own to the current layout; false when it already is.
-	migrateProxy(c proxy.Config) (bool, error)
 	// writeUpstreams only rewrites the file, when there is no proxy to reload.
 	writeUpstreams(c proxy.Config) error
 	waitDrained()
@@ -247,19 +244,6 @@ func (s *replicaScaler) add(service string, count int) error {
 		}
 	}
 
-	// A bundle from a versola-cli that kept the upstreams inside versola.conf
-	// is moved to the current layout: replicas are routed through
-	// upstreams.conf, which is what the proxy reloads.
-	_, a0, e0, err := s.layout(s.slots)
-	if err != nil {
-		return err
-	}
-	if migrated, err := s.ops.migrateProxy(s.proxyConfig(a0, e0)); err != nil {
-		return fmt.Errorf("couldn't move the reverse proxy config to the layout replicas need: %w", err)
-	} else if migrated {
-		s.out("Moved the reverse proxy's upstreams to their own file (upstreams.conf).\n")
-	}
-
 	added := 0
 	for _, n := range numbers {
 		svc := topology.SlotService(service, n)
@@ -407,17 +391,6 @@ func (o dockerReplicaOps) compose(args ...string) error {
 }
 func (o dockerReplicaOps) waitReady(url string) error  { return wait.ForReady(url, 60*time.Second) }
 func (o dockerReplicaOps) reload(c proxy.Config) error { return proxy.Reload(o.dir, c) }
-func (o dockerReplicaOps) migrateProxy(c proxy.Config) (bool, error) {
-	var check func() error
-	// With the proxy up the result is tried by nginx itself; down, the next
-	// start of it does that.
-	if running, err := docker.IsRunning(proxy.ContainerFor(o.mode)); err != nil {
-		return false, err
-	} else if running {
-		check = func() error { return proxy.TestRunning(o.mode) }
-	}
-	return proxy.MigrateLegacyUpstreams(o.dir, c, check)
-}
 func (o dockerReplicaOps) writeUpstreams(c proxy.Config) error {
 	return proxy.WriteUpstreams(o.dir, c)
 }
@@ -455,8 +428,12 @@ func CheckReplicaRequest(st *state.State, service string, count int, adding bool
 	if !exists {
 		return fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file) -- configure it again")
 	}
-	if st.ProxyMode == "" {
-		return fmt.Errorf("this deployment has no reverse proxy to route replicas -- run `versola configure` again")
+	if err := requireCurrentBundle(st, filepath.Dir(composePath)); err != nil {
+		return err
+	}
+	if why := st.MixedVersions(); why != "" {
+		// TODO(0d PR-2): `versola rollout` lands with the rolling upgrade.
+		return fmt.Errorf("the recorded replicas are not one version (%s) -- replicas can't be added or removed in the middle of an upgrade; finish or abort it with `versola rollout`", why)
 	}
 	if !st.RunsFromCurrentBundle() {
 		// The containers still run from an earlier bundle: files written
@@ -471,11 +448,6 @@ func CheckReplicaRequest(st *state.State, service string, count int, adding bool
 	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", service, err)
-	}
-	// A bundle from before upstreams.conf is moved by `replica add`; a
-	// remove has nothing to remove from one (it runs a single replica).
-	if !adding && !proxy.HasUpstreamsFile(filepath.Dir(composePath)) {
-		return fmt.Errorf("this deployment's reverse proxy config predates replicas -- run `versola configure` again")
 	}
 	return nil
 }

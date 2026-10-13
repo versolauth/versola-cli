@@ -19,10 +19,7 @@ type startStep struct {
 // (central is already up, and without it Compose would also try to
 // recreate whatever the replica depends on) and awaited before the next,
 // so a replica that does not come up stops the rollout there.
-//
-// legacyGateway adds versola-tools' own nginx to the first call -- local
-// deployments from before this CLI generated the proxy.
-func appStartSteps(auth, edge []replica, legacyGateway bool) []startStep {
+func appStartSteps(auth, edge []replica) []startStep {
 	var first []replica
 	var rest []replica
 	for _, group := range [][]replica{auth, edge} {
@@ -38,16 +35,12 @@ func appStartSteps(auth, edge []replica, legacyGateway bool) []startStep {
 	sort.SliceStable(rest, func(i, j int) bool { return rest[i].Slot < rest[j].Slot })
 
 	var steps []startStep
-	if len(first) > 0 || legacyGateway {
+	if len(first) > 0 {
 		names := serviceNames(first)
-		msg := "Starting auth and edge..."
-		if legacyGateway {
-			msg = "Starting auth, edge, and the gateway..."
-		}
 		steps = append(steps, startStep{
-			Message: msg,
+			Message: "Starting auth and edge...",
 			Name:    "auth/edge",
-			Args:    appUpArgs(names, legacyGateway),
+			Args:    append([]string{"up", "-d"}, names...),
 			Ready:   names,
 		})
 	}

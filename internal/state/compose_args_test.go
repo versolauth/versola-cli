@@ -58,3 +58,28 @@ func TestComposeArgsWithReplicas(t *testing.T) {
 		t.Errorf("without proxy.yml: got %v, want %v", got, want)
 	}
 }
+
+// overrides.yml comes right after compose.yml in every compose call, and
+// is left out of what the ports are read from.
+func TestComposeArgsWithOverrides(t *testing.T) {
+	dir := t.TempDir()
+	compose := filepath.Join(dir, "compose.yml")
+	overrides := filepath.Join(dir, OverridesFile)
+	replicas := filepath.Join(dir, ReplicasFile)
+	proxyFile := filepath.Join(dir, proxy.ComposeFile)
+	for _, f := range []string{overrides, replicas, proxyFile} {
+		if err := os.WriteFile(f, []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := ComposeArgs(compose, "up")
+	want := []string{"compose", "-f", compose, "-f", overrides, "-f", replicas, "-f", proxyFile, "up"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ComposeArgs: got %v, want %v", got, want)
+	}
+	got = TopologyComposeArgs(compose, "config")
+	want = []string{"compose", "-f", compose, "-f", replicas, "-f", proxyFile, "config"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("TopologyComposeArgs: got %v, want %v", got, want)
+	}
+}

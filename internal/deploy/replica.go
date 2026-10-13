@@ -37,7 +37,11 @@ type replicaOps interface {
 	waitReady(url string) error
 	// reload makes the running proxy route to c's backends.
 	reload(c proxy.Config) error
-	// writeUpstreams only rewrites the file, when there is no proxy to reload.
+	// waitFronts waits until the proxy serves its fronts of auth's
+	// APORT/MPORT (vps), after a reload.
+	waitFronts(f proxy.Fronts) error
+	// writeUpstreams only stages the config (proxy.Stage), when there is no
+	// proxy to reload: the next start of it uses it.
 	writeUpstreams(c proxy.Config) error
 	waitDrained()
 	// portFree says whether nothing on this machine listens on the port.
@@ -59,6 +63,11 @@ type replicaScaler struct {
 	// slots are the slots each scalable service has now, kept in step with
 	// state.json as the run goes.
 	slots map[string][]state.Slot
+
+	// fronts and genDir: the proxy's routing beyond the replicas (see
+	// proxyRouting); zero locally.
+	fronts proxy.Fronts
+	genDir string
 }
 
 func newReplicaScaler(st *state.State, topo topology.Topology, ops replicaOps) *replicaScaler {
@@ -79,12 +88,15 @@ func (s *replicaScaler) layout(slots map[string][]state.Slot) (central, auth, ed
 	if auth, err = replicasOf(s.topo, AuthService, slots[AuthService]); err != nil {
 		return
 	}
+	if auth, err = frontAuth(auth, s.hostNetwork); err != nil {
+		return
+	}
 	edge, err = replicasOf(s.topo, EdgeService, slots[EdgeService])
 	return
 }
 
 func (s *replicaScaler) proxyConfig(auth, edge []replica) proxy.Config {
-	return proxy.Config{Mode: s.st.ProxyMode, Auth: proxyBackends(auth), Edge: proxyBackends(edge)}
+	return routedConfig(s.st.ProxyMode, s.fronts, s.genDir, auth, edge)
 }
 
 // record makes slots the service's slots, in state.json and replicas.yml
@@ -319,7 +331,18 @@ func (s *replicaScaler) route(c proxy.Config) error {
 	if !running {
 		return s.ops.writeUpstreams(c)
 	}
-	return s.ops.reload(c)
+	if err := s.ops.reload(c); err != nil {
+		return err
+	}
+	// `nginx -s reload` only signals nginx: a config it then fails to apply
+	// (a port it can't bind, say) is only in its log. The fronts answering
+	// is what shows the reload took.
+	if c.Fronts != (proxy.Fronts{}) {
+		if err := s.ops.waitFronts(c.Fronts); err != nil {
+			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(s.st.ProxyMode))
+		}
+	}
+	return nil
 }
 
 // remove stops count replicas of service, the highest slots first, one at
@@ -391,8 +414,11 @@ func (o dockerReplicaOps) compose(args ...string) error {
 }
 func (o dockerReplicaOps) waitReady(url string) error  { return wait.ForReady(url, 60*time.Second) }
 func (o dockerReplicaOps) reload(c proxy.Config) error { return proxy.Reload(o.dir, c) }
+func (o dockerReplicaOps) waitFronts(f proxy.Fronts) error {
+	return proxy.WaitFronts(f, 15*time.Second)
+}
 func (o dockerReplicaOps) writeUpstreams(c proxy.Config) error {
-	return proxy.WriteUpstreams(o.dir, c)
+	return proxy.Stage(o.dir, c)
 }
 func (o dockerReplicaOps) portFree(port int) error {
 	if res := checks.PortFree(port, ""); !res.OK {
@@ -484,7 +510,11 @@ func openReplicaScaler(st *state.State, service string, needRunning bool) (*repl
 		return nil, err
 	}
 	ops := dockerReplicaOps{dir: filepath.Dir(composePath), composePath: composePath, mode: st.ProxyMode}
-	return newReplicaScaler(st, topo, ops), nil
+	s := newReplicaScaler(st, topo, ops)
+	if s.fronts, s.genDir, err = proxyRouting(topo, s.hostNetwork); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // AddReplicas starts count more replicas of auth or edge. The caller holds

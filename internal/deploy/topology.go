@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -29,6 +30,9 @@ type replica struct {
 	Base    string           // the service it is a copy of: "auth", "edge", "central"
 	Service string           // compose service name: "auth", "auth-2", ...
 	Ports   topology.Service // this replica's own ports (shifted for its slot)
+	// Fronted: auth's APORT/MPORT moved behind the reverse proxy (frontAuth),
+	// so even slot 1 listens elsewhere than the compose file says.
+	Fronted bool
 }
 
 // loadTopology reads the ports out of the deployment's compose file
@@ -37,7 +41,9 @@ type replica struct {
 // dropped; it is not logged or stored, since Compose inlines env_file
 // values into it.
 func loadTopology(composePath string) (topology.Topology, error) {
-	out, err := docker.Output(state.ComposeArgs(composePath, "config", "--format", "json")...)
+	// Without overrides.yml: the ports are compose.yml's own, before the CLI
+	// moves any (see frontAuth).
+	out, err := docker.Output(state.TopologyComposeArgs(composePath, "config", "--format", "json")...)
 	if err != nil {
 		return topology.Topology{}, composeConfigError(composePath, err)
 	}
@@ -90,16 +96,103 @@ type listener struct {
 }
 
 // listeners are the ports a replica's process binds: PORT and DPORT
-// everywhere, and APORT for auth, the only service with an additional
-// listener. (topology.Service carries a default APORT for every service, but
-// edge and central never bind it; counting it would report auth's APORT as
-// clashing with them.)
+// everywhere, and APORT and MPORT for auth, the only service with an
+// additional and a mutual-TLS listener. (topology.Service carries default
+// APORT/MPORT for every service, but edge and central never bind them;
+// counting them would report auth's as clashing with them.)
 func (r replica) listeners() []listener {
 	ls := []listener{{"PORT", r.Ports.Port}, {"DPORT", r.Ports.DiagnosticsPort}}
 	if r.Base == AuthService {
-		ls = append(ls, listener{"APORT", r.Ports.AdditionalPort})
+		ls = append(ls, listener{"APORT", r.Ports.AdditionalPort}, listener{"MPORT", r.Ports.MutualTLSPort})
 	}
 	return ls
+}
+
+// frontOffset is how far auth's APORT and MPORT move on a host network
+// (vps) for the reverse proxy to listen where the compose file puts them.
+//
+// edge and central reach those two listeners at fixed addresses
+// (127.0.0.1:8082 for auth-additional-url, 127.0.0.1:8083 for
+// auth-mutual-tls-url, written by versola-tools): the first replica's own
+// ports, which made every other replica unreachable there. The proxy now
+// holds those addresses and balances over every replica, and each replica,
+// the first included, listens 1000 higher (9082/9083, then +100 a slot).
+// Like slotStride this is the CLI's own placement, not Versola's topology.
+const frontOffset = 1000
+
+// frontAuth moves auth's APORT and MPORT behind the reverse proxy (see
+// frontOffset) on a host network; on a bridge network (local) every
+// container has its own ports, so nothing moves. Out of range is an error.
+func frontAuth(auth []replica, hostNetwork bool) ([]replica, error) {
+	if !hostNetwork {
+		return auth, nil
+	}
+	out := make([]replica, len(auth))
+	for i, r := range auth {
+		r.Ports = r.Ports.ShiftAuthListeners(frontOffset, r.Slot)
+		if err := r.Ports.CheckAdditional(r.Service); err != nil {
+			return nil, err
+		}
+		r.Fronted = true
+		out[i] = r
+	}
+	return out, nil
+}
+
+// proxyFronts are the addresses the reverse proxy takes over in front of
+// auth on a host network: auth's APORT and MPORT as the compose file sets
+// them, on loopback (where auth binds and edge and central connect).
+func proxyFronts(topo topology.Topology) (proxy.Fronts, error) {
+	auth, err := topo.Service(AuthService)
+	if err != nil {
+		return proxy.Fronts{}, err
+	}
+	if err := auth.CheckAdditional(AuthService); err != nil {
+		return proxy.Fronts{}, err
+	}
+	return proxy.Fronts{Additional: auth.AdditionalPort, MutualTLS: auth.MutualTLSPort}, nil
+}
+
+// proxyGenerationsDir is the vps proxy's own configuration directory (see
+// proxy.Config.GenerationsDir): next to the bundles, never one of them, so
+// it survives every configure and is not pruned with them.
+func proxyGenerationsDir() (string, error) {
+	dir, err := state.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "proxy-vps"), nil
+}
+
+// proxyRouting is what the proxy config of a deployment needs beyond its
+// replicas: on a host network (vps) the fronts of auth's APORT/MPORT and
+// the generations directory; nothing locally.
+func proxyRouting(topo topology.Topology, hostNetwork bool) (proxy.Fronts, string, error) {
+	if !hostNetwork {
+		return proxy.Fronts{}, "", nil
+	}
+	fronts, err := proxyFronts(topo)
+	if err != nil {
+		return proxy.Fronts{}, "", err
+	}
+	dir, err := proxyGenerationsDir()
+	if err != nil {
+		return proxy.Fronts{}, "", err
+	}
+	return fronts, dir, nil
+}
+
+// routedConfig is the proxy config that routes to these replicas.
+func routedConfig(mode string, fronts proxy.Fronts, genDir string, auth, edge []replica) proxy.Config {
+	return proxy.Config{Mode: mode, Auth: proxyBackends(auth), Edge: proxyBackends(edge), Fronts: fronts, GenerationsDir: genDir}
+}
+
+// frontReservations are proxyFronts as ports nothing else may take.
+func frontReservations(f proxy.Fronts) []reservation {
+	return []reservation{
+		{Name: proxyHolder + " (in front of auth's APORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.Additional}},
+		{Name: proxyHolder + " (in front of auth's MPORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.MutualTLS}},
+	}
 }
 
 // reservation is a host port something other than the replicas holds, the
@@ -243,7 +336,7 @@ func checkNoPortClash(hostNetwork bool, reserved []reservation, groups ...[]repl
 						publication = publication || !cl.onHost
 					}
 					if listener {
-						hints = append(hints, "PORT/DPORT/APORT")
+						hints = append(hints, "PORT/DPORT/APORT/MPORT")
 					}
 					if publication {
 						hints = append(hints, "`ports:`")
@@ -483,6 +576,13 @@ func checkTopology(topo topology.Topology, hostNetwork bool, reserved []reservat
 	for _, p := range topo.PublicationsReachedFrom(roots, own...) {
 		reserved = append(reserved, reservation{Name: fmt.Sprintf("the compose file's %q service", p.Service), Binding: p.Binding})
 	}
+	if hostNetwork {
+		fronts, err := proxyFronts(topo)
+		if err != nil {
+			return nil, err
+		}
+		reserved = append(reserved, frontReservations(fronts)...)
+	}
 	if err := checkNoPortClash(hostNetwork, reserved, central, auth, edge); err != nil {
 		return nil, err
 	}
@@ -500,12 +600,16 @@ func serviceNames(replicas ...[]replica) []string {
 	return names
 }
 
-// proxyBackends is what the proxy's upstream routes to: each replica's
-// main port.
+// proxyBackends is what the proxy's upstreams route to: each replica's
+// main port, and for a fronted auth replica its APORT and MPORT too.
 func proxyBackends(replicas []replica) []proxy.Backend {
 	backends := make([]proxy.Backend, len(replicas))
 	for i, r := range replicas {
 		backends[i] = proxy.Backend{Service: r.Service, Port: r.Ports.Port}
+		if r.Fronted {
+			backends[i].AdditionalPort = r.Ports.AdditionalPort
+			backends[i].MutualTLSPort = r.Ports.MutualTLSPort
+		}
 	}
 	return backends
 }

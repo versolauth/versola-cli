@@ -34,6 +34,11 @@ func guardBundle(t *testing.T, withUpstreams bool) (*state.State, string) {
 		if err := os.WriteFile(filepath.Join(bundle, proxy.UpstreamsFile), []byte("# upstreams\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// What configure writes on vps since config generations.
+		yml := "services:\n  proxy:\n    volumes:\n      - type: bind\n        source: \"/home/v/.versola/active/proxy-vps\"\n        target: " + proxy.GenerationMount + "\n        read_only: true\n"
+		if err := os.WriteFile(filepath.Join(bundle, proxy.ComposeFile), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	st := &state.State{Target: "vps", Version: "0.7.0", BundleDir: "bundle-1", ProxyMode: proxy.ModeExternal,
 		AuthURL: "https://id.example.com", MountedBundleDirs: []string{"bundle-1"}}
@@ -76,6 +81,29 @@ func TestCheckRunnable(t *testing.T) {
 	surge.Surge = map[string]int{"edge": 2}
 	if err := checkRunnable(&surge, bundle); err == nil || !strings.Contains(err.Error(), "versola rollout") {
 		t.Errorf("a stand-in slot: got %v", err)
+	}
+}
+
+// A vps bundle from a versola-cli with replicas but before config
+// generations (0.2.8 and the releases up to this one): refused before
+// anything moves auth's ports, by up and by replica alike.
+func TestRequireGenerationsOnVps(t *testing.T) {
+	st, bundle := guardBundle(t, true)
+	old := "services:\n  proxy:\n    volumes:\n      - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro\n"
+	if err := os.WriteFile(filepath.Join(bundle, proxy.ComposeFile), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRunnable(st, bundle); !errors.Is(err, state.ErrOldInstall) || !strings.Contains(err.Error(), "generations") {
+		t.Errorf("up: %v", err)
+	}
+	if err := CheckReplicaRequest(st, AuthService, 1, true); !errors.Is(err, state.ErrOldInstall) {
+		t.Errorf("replica: %v", err)
+	}
+	// local has no generations and needs none.
+	local := *st
+	local.Target, local.ProxyMode = "local", proxy.ModeLocal
+	if err := checkRunnable(&local, bundle); err != nil {
+		t.Errorf("local: %v", err)
 	}
 }
 

@@ -592,27 +592,49 @@ func (s *State) ComposeFilePath() (path string, exists bool, err error) {
 // from then on (ComposeArgs).
 const ReplicasFile = "replicas.yml"
 
+// OverridesFile is written into the deployment bundle by `up` when the
+// CLI changes a service of compose.yml itself -- auth's APORT/MPORT on
+// vps, moved behind the reverse proxy -- and passed right after compose.yml
+// (ComposeArgs). It is not part of what the CLI reads the ports from
+// (TopologyComposeArgs): those are the compose file's own.
+const OverridesFile = "overrides.yml"
+
 // ComposeArgs builds the arguments for a `docker compose` call against the
 // deployment whose compose.yml is at composePath: "compose -f
-// compose.yml", plus "-f proxy.yml" when versola-cli generated a reverse
-// proxy next to it (vps and local), then rest.
+// compose.yml", plus overrides.yml, replicas.yml and proxy.yml when each
+// is there (proxy.yml when versola-cli generated a reverse proxy next to
+// it -- vps and local), then rest.
 //
 // Every compose call goes through this, so the proxy is always part of
 // the same compose project as auth/edge/central (proxy.yml declares the
 // same project name): `down` stops it too instead of leaving it holding
 // 80/443, `status` lists it, `down --volumes` treats it like the rest.
 func ComposeArgs(composePath string, rest ...string) []string {
+	return composeArgs(composePath, true, rest...)
+}
+
+// TopologyComposeArgs is ComposeArgs without OverridesFile: the compose
+// configuration as versola-tools wrote it, which is where the CLI reads the
+// ports it then moves (an override read back as the base would be moved
+// again on every `up`).
+func TopologyComposeArgs(composePath string, rest ...string) []string {
+	return composeArgs(composePath, false, rest...)
+}
+
+func composeArgs(composePath string, overrides bool, rest ...string) []string {
 	args := []string{"compose", "-f", composePath}
-	// The replicas of auth and edge beyond the first, when there are any
-	// (see ReplicasFile): before the proxy's file, which names no service
-	// of theirs.
-	replicasFile := filepath.Join(filepath.Dir(composePath), ReplicasFile)
-	if _, err := os.Stat(replicasFile); err == nil {
-		args = append(args, "-f", replicasFile)
+	dir := filepath.Dir(composePath)
+	files := []string{ReplicasFile, proxy.ComposeFile}
+	if overrides {
+		files = append([]string{OverridesFile}, files...)
 	}
-	proxyFile := filepath.Join(filepath.Dir(composePath), proxy.ComposeFile)
-	if _, err := os.Stat(proxyFile); err == nil {
-		args = append(args, "-f", proxyFile)
+	// The replicas of auth and edge beyond the first (see ReplicasFile) go
+	// before the proxy's file, which names no service of theirs.
+	for _, f := range files {
+		path := filepath.Join(dir, f)
+		if _, err := os.Stat(path); err == nil {
+			args = append(args, "-f", path)
+		}
 	}
 	return append(args, rest...)
 }

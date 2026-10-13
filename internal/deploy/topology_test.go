@@ -368,7 +368,7 @@ func TestCheckNoPortClashMessages(t *testing.T) {
 	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081"}},
 	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8096,"host_ip":"127.0.0.1","published":"8080"}]}}}`, one)
 	err := checkNoPortClash(false, nil, a, e)
-	want := "auth (PORT) listens on 8080 and edge (DPORT) publishes 127.0.0.1:8080, which is the same port on the host -- check PORT/DPORT/APORT and `ports:` in the compose file"
+	want := "auth (PORT) listens on 8080 and edge (DPORT) publishes 127.0.0.1:8080, which is the same port on the host -- check PORT/DPORT/APORT/MPORT and `ports:` in the compose file"
 	if err == nil || err.Error() != want {
 		t.Errorf("listener against publication:\n got %v\nwant %s", err, want)
 	}
@@ -378,7 +378,7 @@ func TestCheckNoPortClashMessages(t *testing.T) {
 	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"}},
 	  "edge":{"environment":{"PORT":"8080","DPORT":"8096"}}}}`, one)
 	err = checkNoPortClash(true, nil, a, e)
-	want = "auth (PORT) and edge (PORT) would both use port 8080 on the host -- check PORT/DPORT/APORT in the compose file"
+	want = "auth (PORT) and edge (PORT) would both use port 8080 on the host -- check PORT/DPORT/APORT/MPORT in the compose file"
 	if err == nil || err.Error() != want {
 		t.Errorf("two listeners:\n got %v\nwant %s", err, want)
 	}
@@ -399,10 +399,10 @@ func TestCheckNoPortClashMessages(t *testing.T) {
 
 	// Ports that are none of the listeners: only `ports:` to check.
 	a, e = build(`{"services":{
-	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]},
-	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8083,"host_ip":"127.0.0.1","published":"8083"}]}}}`, one)
+	  "auth":{"environment":{"PORT":"8080","DPORT":"8081"},"ports":[{"target":8084,"host_ip":"127.0.0.1","published":"8084"}]},
+	  "edge":{"environment":{"PORT":"8095","DPORT":"8096"},"ports":[{"target":8084,"host_ip":"127.0.0.1","published":"8084"}]}}}`, one)
 	err = checkNoPortClash(false, nil, a, e)
-	if err == nil || !strings.HasSuffix(err.Error(), "-- check `ports:` in the compose file") || !strings.Contains(err.Error(), "auth (port 8083)") {
+	if err == nil || !strings.HasSuffix(err.Error(), "-- check `ports:` in the compose file") || !strings.Contains(err.Error(), "auth (port 8084)") {
 		t.Errorf("non-listener ports: got %v", err)
 	}
 }
@@ -550,7 +550,7 @@ func TestCheckNoPortClashProxy(t *testing.T) {
 	}
 	// A reservation against a host-network listener: PORT/DPORT/APORT to
 	// check, no `ports:`.
-	if err == nil || strings.Contains(err.Error(), "`ports:`") || !strings.Contains(err.Error(), "check PORT/DPORT/APORT in the compose file") {
+	if err == nil || strings.Contains(err.Error(), "`ports:`") || !strings.Contains(err.Error(), "check PORT/DPORT/APORT/MPORT in the compose file") {
 		t.Errorf("hint for a listener against the proxy: %v", err)
 	}
 	// A reservation against a wildcard publication on a bridge.
@@ -866,11 +866,22 @@ func replicasFor(t *testing.T, topo topology.Topology) (central, auth, edge []re
 	return
 }
 
+// fronted is auth's replicas with APORT/MPORT behind the proxy, as up and
+// configure have them on vps.
+func fronted(t *testing.T, auth []replica) []replica {
+	t.Helper()
+	out, err := frontAuth(auth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // What up and configure both ask: ports, then readiness URLs, by service.
 func TestCheckTopology(t *testing.T) {
 	topo := testTopology(t)
 	c, a, e := replicasFor(t, topo)
-	urls, err := checkTopology(topo, true, nil, c, a, e)
+	urls, err := checkTopology(topo, true, nil, c, fronted(t, a), e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +938,7 @@ func TestCheckTopologyReservesOtherServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, a, e = replicasFor(t, topo3)
-	if _, err := checkTopology(topo3, true, nil, c, a, e); err != nil {
+	if _, err := checkTopology(topo3, true, nil, c, fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 }
@@ -947,7 +958,7 @@ func TestCheckTopologyRefusesHostNetworkOnLocal(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "auth has `network_mode: host`") {
 		t.Errorf("local: got %v", err)
 	}
-	if _, err := checkTopology(topo, true, nil, c, a, e); err != nil {
+	if _, err := checkTopology(topo, true, nil, c, fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 }
@@ -1012,7 +1023,7 @@ func TestCheckTopologyOnRealComposeOutput(t *testing.T) {
 
 	vps := load("compose-vps.json")
 	c, a, e = replicasFor(t, vps)
-	if _, err := checkTopology(vps, true, nil, c, a, e); err != nil {
+	if _, err := checkTopology(vps, true, nil, c, fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 	// The same compose file is no local one: its services are on the host.

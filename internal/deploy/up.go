@@ -72,6 +72,14 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
+	// vps: APORT/MPORT behind the proxy, slot 1's included (frontAuth).
+	if authReplicas, err = frontAuth(authReplicas, isVps); err != nil {
+		return err
+	}
+	fronts, genDir, err := proxyRouting(topo, isVps)
+	if err != nil {
+		return err
+	}
 	edgeReplicas, err := replicasOf(topo, EdgeService, st.ActiveSlots(EdgeService))
 	if err != nil {
 		return err
@@ -92,6 +100,10 @@ func Up(opts UpOptions, st *state.State) error {
 	// file (see replicasYAML); written before anything is started so the
 	// compose commands below see them.
 	if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
+		return err
+	}
+	// Slot 1's moved ports, merged over compose.yml (see overridesYAML).
+	if err := writeOverridesFile(dir, authReplicas); err != nil {
 		return err
 	}
 	steps := appStartSteps(authReplicas, edgeReplicas)
@@ -198,11 +210,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// it never serves traffic to a backend that isn't. Its upstreams follow
 	// the replicas recorded in state, whatever configure or the last
 	// `replica add|remove` wrote.
-	cfg := proxy.Config{Mode: st.ProxyMode, Auth: proxyBackends(authReplicas), Edge: proxyBackends(edgeReplicas)}
-	if err := proxy.WriteUpstreams(dir, cfg); err != nil {
-		return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
-	}
-	if err := startProxy(composePath, st); err != nil {
+	if err := startProxy(composePath, st, routedConfig(st.ProxyMode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
 		return err
 	}
 
@@ -318,15 +326,22 @@ func checkRunnable(st *state.State, bundleDir string) error {
 }
 
 // requireCurrentBundle is ErrOldInstall for a record, or a bundle, this
-// CLI no longer runs as it is: see State.RequireCurrent, and a proxy config
+// CLI no longer runs as it is: see State.RequireCurrent; a proxy config
 // from a versola-cli before replicas, which keeps the upstreams inside
-// versola.conf -- this one only rewrites upstreams.conf.
+// versola.conf -- this one only rewrites upstreams.conf; and on vps a proxy
+// from before config generations.
 func requireCurrentBundle(st *state.State, bundleDir string) error {
 	if err := st.RequireCurrent(); err != nil {
 		return err
 	}
 	if !proxy.HasUpstreamsFile(bundleDir) {
 		return fmt.Errorf("%w (its reverse proxy config predates %s)", state.ErrOldInstall, proxy.UpstreamsFile)
+	}
+	// vps: a bundle whose proxy still mounts the bundle's own files. Starting
+	// it would move auth's APORT/MPORT behind a proxy that can't take them
+	// over (its container has no config generations to reload into).
+	if st.Target == "vps" && !proxy.UsesGenerations(bundleDir) {
+		return fmt.Errorf("%w (its reverse proxy config predates the proxy's config generations)", state.ErrOldInstall)
 	}
 	return nil
 }

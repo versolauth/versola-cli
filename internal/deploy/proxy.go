@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -70,16 +71,12 @@ func requireAdminConsole(dir, version string) error {
 	return nil
 }
 
-// proxyUpstreams are the replicas the proxy routes to.
-type proxyUpstreams struct {
-	Auth []proxy.Backend
-	Edge []proxy.Backend
-}
-
 // setUpProxy writes the proxy's files into the bundle and, for TLS,
-// prepares the volume the ACME module keeps its state in.
-func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, upstreams proxyUpstreams) error {
-	cfg := proxy.Config{Mode: opts.Mode, AuthURL: auth, ACMEDirectory: proxy.ACMEProduction, Auth: upstreams.Auth, Edge: upstreams.Edge}
+// prepares the volume the ACME module keeps its state in. routed is the
+// routing part of the config (routedConfig); the rest is filled in here.
+func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, routed proxy.Config) error {
+	cfg := routed
+	cfg.Mode, cfg.AuthURL, cfg.ACMEDirectory = opts.Mode, auth, proxy.ACMEProduction
 	if opts.ACMEStaging {
 		cfg.ACMEDirectory = proxy.ACMEStaging
 	}
@@ -118,27 +115,107 @@ func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, upstreams pro
 	return nil
 }
 
-// startProxy (re)starts the proxy and waits until it actually serves
-// Versola. --force-recreate: the proxy's config lives in bind-mounted
-// files, and Compose only recreates a container when its service
-// definition changes, not when the content of a mounted file does.
-func startProxy(composePath string, st *state.State) error {
+// proxyOps are the docker calls startProxy makes, replaceable in tests.
+var proxyOps = struct {
+	containerID func(name string) (string, bool, error) // id, running
+	compose     func(composePath string, args ...string) error
+	apply       func(bundleDir string, c proxy.Config) (string, error)
+	writeLocal  func(bundleDir string, c proxy.Config) error
+	reload      func(mode string) error
+	rollBack    func(dir, previous string) error
+	waitReady   func(mode string, a proxy.AuthURL) error
+	waitFronts  func(f proxy.Fronts) error
+}{
+	containerID: func(name string) (string, bool, error) {
+		out, found, err := docker.Inspect(name, "{{.Id}} {{.State.Running}}")
+		if err != nil || !found {
+			return "", false, err
+		}
+		id, running, _ := strings.Cut(strings.TrimSpace(out), " ")
+		return id, running == "true", nil
+	},
+	compose: func(composePath string, args ...string) error {
+		return docker.Run(state.ComposeArgs(composePath, args...)...)
+	},
+	apply:      proxy.Apply,
+	writeLocal: proxy.WriteUpstreams,
+	reload:     proxy.ReloadCurrent,
+	rollBack:   proxy.RollBack,
+	waitReady: func(mode string, a proxy.AuthURL) error {
+		return proxy.WaitReady(mode, a, 60*time.Second, 120*time.Second)
+	},
+	waitFronts: func(f proxy.Fronts) error { return proxy.WaitFronts(f, 30*time.Second) },
+}
+
+// startProxy makes the proxy route as routed says and waits until it
+// actually serves Versola.
+//
+// vps (routed.GenerationsDir set): the new configuration is built and
+// checked as a generation of its own and `current` switched to it (Apply)
+// -- nothing the running nginx uses changes before that check passes. Then
+// `compose up -d proxy`, without --force-recreate: Compose recreates the
+// container only when its definition changed (the image, the mounts --
+// once, when a deployment moves to config generations), and otherwise
+// leaves it running, in which case nginx reloads into `current`. A reload
+// nginx refuses puts `current` back.
+//
+// local: the bundle's files are bind-mounted one by one, which a rewrite
+// does not reach, so the container is recreated (--force-recreate).
+func startProxy(composePath string, st *state.State, routed proxy.Config) error {
 	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
 	if err != nil {
 		return fmt.Errorf("the recorded auth URL is no longer valid -- configure again: %w", err)
 	}
+	dir := filepath.Dir(composePath)
 	fmt.Println("Starting the reverse proxy...")
-	if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "--force-recreate", proxy.ServiceName)...); err != nil {
-		return fmt.Errorf("couldn't start the reverse proxy: %w", err)
+	if routed.GenerationsDir == "" {
+		if err := proxyOps.writeLocal(dir, routed); err != nil {
+			return fmt.Errorf("couldn't write the reverse proxy's upstreams: %w", err)
+		}
+		if err := proxyOps.compose(composePath, "up", "-d", "--force-recreate", proxy.ServiceName); err != nil {
+			return fmt.Errorf("couldn't start the reverse proxy: %w", err)
+		}
+	} else {
+		name := proxy.ContainerFor(st.ProxyMode)
+		before, wasRunning, err := proxyOps.containerID(name)
+		if err != nil {
+			return err
+		}
+		previous, err := proxyOps.apply(dir, routed)
+		if err != nil {
+			return fmt.Errorf("couldn't prepare the reverse proxy's config: %w", err)
+		}
+		if err := proxyOps.compose(composePath, "up", "-d", proxy.ServiceName); err != nil {
+			return fmt.Errorf("couldn't start the reverse proxy: %w", err)
+		}
+		after, _, err := proxyOps.containerID(name)
+		if err != nil {
+			return err
+		}
+		// The same container, already running: it still has the config it
+		// read last, so it reloads into `current`. A new or restarted one
+		// read `current` as it started.
+		if wasRunning && after == before {
+			fmt.Println("Reloading it (no restart)...")
+			if err := proxyOps.reload(st.ProxyMode); err != nil {
+				if rerr := proxyOps.rollBack(routed.GenerationsDir, previous); rerr != nil {
+					return fmt.Errorf("%w (and pointing the config back at %s failed: %v)", err, previous, rerr)
+				}
+				return err
+			}
+		}
 	}
 	fmt.Println("Waiting for it to serve Versola...")
-	err = proxy.WaitReady(st.ProxyMode, auth, 60*time.Second, 120*time.Second)
+	err = proxyOps.waitReady(st.ProxyMode, auth)
 	if errors.Is(err, proxy.ErrTLSPending) {
 		fmt.Printf("\nWarning: %v.\nThat's usually the certificate still being issued -- nginx keeps retrying on its own. Check that %s's DNS points at this server and that ports 80/443 are reachable from the internet; see `docker logs %s` for the ACME module's progress.\n", err, auth.Host, proxy.ContainerFor(st.ProxyMode))
-		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return fmt.Errorf("the reverse proxy isn't serving Versola: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+	}
+	if routed.Fronts != (proxy.Fronts{}) {
+		if err := proxyOps.waitFronts(routed.Fronts); err != nil {
+			return fmt.Errorf("the reverse proxy isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+		}
 	}
 	return nil
 }

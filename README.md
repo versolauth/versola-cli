@@ -328,9 +328,11 @@ first command that saves state with this CLI, do not go back to an older one
 on the same machine.
 
 Deployments made by much older versola-clis -- before `state.json`, before
-bundle directories, before the CLI's own reverse proxy, or before replicas
+bundle directories, before the CLI's own reverse proxy, before replicas
 (a proxy config without `proxy/conf.d/upstreams.conf`, versola-cli 0.2.7 and
-earlier) -- are no longer started or changed as they are: `up` and
+earlier), or -- on `vps` -- before the proxy's config generations (see
+"Deploying to a VPS: the reverse proxy") -- are no longer started or
+changed as they are: `up` and
 `replica` stop with "this deployment was made by an older versola-cli
 -- run `versola configure` again". A `configure` (then `migrate` and `up`)
 replaces it; the reverse proxy and the services restart once. The very
@@ -399,6 +401,30 @@ deployment, so `status`, `down` and `uninstall` include it. Its
 certificates live in the `versola-acme-vps` Docker volume, which
 survives `down --volumes` and `uninstall`, so a redeploy doesn't request
 a new certificate.
+
+The proxy also stands in front of auth's two internal listeners, so that
+every auth replica is reached, not just the first: it listens on
+`127.0.0.1:8082` (auth's APORT, which edge and central call) and
+`127.0.0.1:8083` (auth's mutual-TLS listener, MPORT, which edge calls --
+passed through as TCP, TLS stays between edge and auth), and balances both
+over the replicas. The replicas themselves listen 1000 higher: the first
+on 9082/9083 (set in `overrides.yml` next to the compose file), the next
+on 9182/9183, and so on. Those numbers follow the compose file's APORT and
+MPORT; versola-tools' configs are unchanged.
+
+Its configuration lives outside the deployment bundles, in
+`~/.versola/active/proxy-vps/`, as generations (`gen-000001/`, ...) with
+`current` pointing at the one in use. `up` and `replica add|remove` build
+a new generation, have nginx check it in a throwaway container, switch
+`current` and reload nginx -- the container is not restarted, so requests
+in flight finish. Compose recreates it only when its definition changes:
+once, the first time a deployment moves to this layout, and after that for
+a new proxy image or a change of `--proxy` mode or TLS.
+
+A reload ends the TCP connections passed through to auth's MPORT once the
+old nginx workers stop (after up to 30 seconds), and a connection idle for
+an hour is closed; edge reconnects. A replica added later gets new
+connections only.
 
 This needs a Versola release whose versola-tools ships the admin console;
 `configure vps` says so clearly when pointed at an older one.

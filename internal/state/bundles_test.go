@@ -42,7 +42,7 @@ func configure(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Finalize("vps", "1.0.0", b, "https://id.example.com", "nginx"); err != nil {
+	if err := Finalize(FinalizeOptions{Target: "vps", Version: "1.0.0", BundleDir: b, AuthURL: "https://id.example.com", ProxyMode: "nginx"}); err != nil {
 		t.Fatal(err)
 	}
 	return filepath.Base(b)
@@ -183,7 +183,7 @@ func TestBundleKeptForOpenbao(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Finalize("vps", "1.0.0", b2, "https://id.example.com", "nginx", b1); err != nil {
+	if err := Finalize(FinalizeOptions{Target: "vps", Version: "1.0.0", BundleDir: b2, AuthURL: "https://id.example.com", ProxyMode: "nginx", Keep: []string{b1}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := MarkStarting(); err != nil {
@@ -198,7 +198,7 @@ func TestBundleKeptForOpenbao(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Finalize("vps", "1.0.0", b3, "https://id.example.com", "nginx", b1); err != nil {
+	if err := Finalize(FinalizeOptions{Target: "vps", Version: "1.0.0", BundleDir: b3, AuthURL: "https://id.example.com", ProxyMode: "nginx", Keep: []string{b1}}); err != nil {
 		t.Fatal(err)
 	}
 	expectBundles(t, dir, "configure while OpenBao still mounts b1", b1, filepath.Base(b2), filepath.Base(b3))

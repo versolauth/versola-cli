@@ -122,7 +122,7 @@ func TestFinalizeRefusesNewerSchema(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte(written), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = Finalize("vps", "0.6.3", filepath.Join(dir, "bundle-new"), "https://id.example.com", "external")
+	err = Finalize(FinalizeOptions{Target: "vps", Version: "0.6.3", BundleDir: filepath.Join(dir, "bundle-new"), AuthURL: "https://id.example.com", ProxyMode: "external"})
 	if !errors.Is(err, ErrNewerSchema) {
 		t.Fatalf("got %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRunsFromCurrentBundle(t *testing.T) {
 		st   State
 		want bool
 	}{
-		"legacy layout":            {State{}, true},
+		"no bundle directory":      {State{}, false},
 		"after a finished up":      {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-2"}}, true},
 		"configured, not yet up":   {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-1"}}, false},
 		"up started, not finished": {State{BundleDir: "bundle-2", MountedBundleDirs: []string{"bundle-1", "bundle-2"}}, false},

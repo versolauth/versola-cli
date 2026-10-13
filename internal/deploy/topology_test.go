@@ -630,9 +630,6 @@ func TestReadinessURLWithZone(t *testing.T) {
 }
 
 func TestDeployedProxyReservations(t *testing.T) {
-	if got := deployedProxyReservations(&state.State{Target: "local"}); got != nil {
-		t.Errorf("a deployment from before the CLI's proxy holds nothing: %+v", got)
-	}
 	ports := func(st state.State) string {
 		var out []string
 		for _, r := range deployedProxyReservations(&st) {
@@ -679,22 +676,6 @@ func TestShellJoin(t *testing.T) {
 	}
 	if got := shellJoin([]string{"compose", "-f", "/home/me/c.yml"}); got != "compose -f /home/me/c.yml" {
 		t.Errorf("plain args stay bare: %s", got)
-	}
-}
-
-func TestAppUpArgs(t *testing.T) {
-	if got := appUpArgs([]string{"auth", "edge"}, false); !reflect.DeepEqual(got, []string{"up", "-d", "auth", "edge"}) {
-		t.Errorf("got %v", got)
-	}
-	if got := appUpArgs([]string{"auth", "auth-2", "edge"}, true); !reflect.DeepEqual(got, []string{"up", "-d", "auth", "auth-2", "edge", "nginx"}) {
-		t.Errorf("got %v", got)
-	}
-	// Must not write through the caller's slice.
-	in := make([]string, 2, 10)
-	in[0], in[1] = "auth", "edge"
-	_ = appUpArgs(in, true)
-	if in[:3][2] != "" {
-		t.Error("appUpArgs wrote into the caller's backing array")
 	}
 }
 

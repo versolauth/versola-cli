@@ -134,6 +134,9 @@ func loadPrevious(target string) (prev *secrets.Previous, installing bool, err e
 	case err == nil:
 		prev = &secrets.Previous{Target: st.Target, Revision: st.EffectiveSecretsRevision()}
 	case errors.Is(err, state.ErrNotConfigured):
+	// The bare version file of the first builds of this CLI: a local
+	// deployment from before OpenBao, which says nothing about secrets.
+	case errors.Is(err, state.ErrOldInstall):
 	default:
 		return nil, false, err
 	}

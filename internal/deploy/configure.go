@@ -112,20 +112,10 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 	}
 	// local's proxy port. vps's ports are checked separately, by
 	// checkProxyPorts below, once --proxy and --auth-url say which ones.
-	// Held by a container of this deployment's own from a previous run --
-	// the proxy, or the old gateway Up replaces -- it isn't a conflict (see
-	// PortFree's own comment).
-	// Docker is only asked about the owner when it answered the daemon
-	// check: an unreachable or hung daemon is reported by that check, and
-	// asking again here would only delay the report.
+	// Held by this deployment's own proxy from a previous run, it isn't a
+	// conflict (see PortFree's own comment).
 	if target == "local" {
-		owner := proxy.LocalContainerName
-		if daemon.OK {
-			if o, err := LocalPortOwner(); err == nil {
-				owner = o
-			}
-		}
-		checksToRun = append(checksToRun, checks.PortFree(proxy.LocalPort, owner))
+		checksToRun = append(checksToRun, checks.PortFree(proxy.LocalPort, proxy.LocalContainerName))
 	}
 	for _, r := range checksToRun {
 		fmt.Println(r.String())
@@ -369,7 +359,17 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, err
 	}
 
-	if err := state.FinalizeWithRevision(target, version, dir, authURL, proxyOpts.Mode, secretsOut.Revision, openbaoBundles()...); err != nil {
+	// --postgres-host is recorded for vps only: local's Postgres is a service
+	// of its own compose file, and the flag is ignored there.
+	recordedPostgres := ""
+	if target == "vps" {
+		recordedPostgres = postgresHost
+	}
+	if err := state.Finalize(state.FinalizeOptions{
+		Target: target, Version: version, BundleDir: dir,
+		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
+	}); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

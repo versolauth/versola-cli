@@ -370,18 +370,6 @@ func (r replica) labelOf(containerPort int) string {
 	return fmt.Sprintf("port %d", containerPort)
 }
 
-// appUpArgs are the arguments of the `compose up` that starts the app
-// services (every auth and edge replica). legacyGateway adds versola-tools'
-// own nginx, for a local deployment made before this CLI generated the
-// proxy.
-func appUpArgs(services []string, legacyGateway bool) []string {
-	args := append([]string{"up", "-d"}, services...)
-	if legacyGateway {
-		args = append(args, "nginx")
-	}
-	return args
-}
-
 // replicasOf returns the replicas of one service for the given slots, in
 // slot order. Slots come from state.json: a slot recorded twice is that
 // file's mistake, and is reported as that, not as a clash of ports.

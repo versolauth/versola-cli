@@ -37,6 +37,7 @@ func init() {
 	rootCmd.AddCommand(migrateCmd)
 	rootCmd.AddCommand(upCmd)
 	rootCmd.AddCommand(replicaCmd)
+	rootCmd.AddCommand(rolloutCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)

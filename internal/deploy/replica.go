@@ -324,22 +324,27 @@ func (s *replicaScaler) partial(service string, added int, err error) error {
 // route makes the proxy use c's upstreams: reloaded when it is running,
 // otherwise only the file changes and the next `up` starts it with it.
 func (s *replicaScaler) route(c proxy.Config) error {
-	running, err := s.ops.isRunning(proxy.ContainerFor(s.st.ProxyMode))
+	return routeVia(s.ops, s.st.ProxyMode, c)
+}
+
+// routeVia is route for any caller with replicaOps (replica, rollout).
+func routeVia(ops replicaOps, mode string, c proxy.Config) error {
+	running, err := ops.isRunning(proxy.ContainerFor(mode))
 	if err != nil {
 		return err
 	}
 	if !running {
-		return s.ops.writeUpstreams(c)
+		return ops.writeUpstreams(c)
 	}
-	if err := s.ops.reload(c); err != nil {
+	if err := ops.reload(c); err != nil {
 		return err
 	}
 	// `nginx -s reload` only signals nginx: a config it then fails to apply
 	// (a port it can't bind, say) is only in its log. The fronts answering
 	// is what shows the reload took.
 	if c.Fronts != (proxy.Fronts{}) {
-		if err := s.ops.waitFronts(c.Fronts); err != nil {
-			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(s.st.ProxyMode))
+		if err := ops.waitFronts(c.Fronts); err != nil {
+			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(mode))
 		}
 	}
 	return nil
@@ -458,8 +463,7 @@ func CheckReplicaRequest(st *state.State, service string, count int, adding bool
 		return err
 	}
 	if why := st.MixedVersions(); why != "" {
-		// TODO(0d PR-2): `versola rollout` lands with the rolling upgrade.
-		return fmt.Errorf("the recorded replicas are not one version (%s) -- replicas can't be added or removed in the middle of an upgrade; finish or abort it with `versola rollout`", why)
+		return fmt.Errorf("the recorded replicas are not one version (%s) -- replicas can't be added or removed in the middle of a rolling upgrade; finish it with `versola rollout %s`", why, st.Version)
 	}
 	if !st.RunsFromCurrentBundle() {
 		// The containers still run from an earlier bundle: files written
@@ -559,6 +563,12 @@ func refuseWithReplicas() error {
 }
 
 func replicasBlockConfigure(st *state.State) error {
+	// A rolling upgrade under way: a configure would record one replica of
+	// the new version and forget the ones that run -- a stand-in among them
+	// -- and the version they run.
+	if st.RolloutUnderway() || st.MixedVersions() != "" {
+		return fmt.Errorf("a rolling upgrade to %s is under way -- finish it with `versola rollout %s` before configuring again (`versola status` shows where it stands)", st.Version, st.Version)
+	}
 	var extra []string
 	for _, svc := range []string{AuthService, EdgeService} {
 		if n := len(st.ActiveSlots(svc)); n > 1 {

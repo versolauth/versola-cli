@@ -40,7 +40,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// and refusing to print any status at all over that would be worse
 	// than printing it without a header.
 	if st, err := state.Load(); err == nil {
-		fmt.Printf("Deployed version: %s (target: %s)\n", st.Version, st.Target)
+		if st.RolloutUnderway() {
+			// Version is where the rollout is going, not what runs.
+			fmt.Printf("Configured version: %s (target: %s) -- not all of it runs yet:\n", st.Version, st.Target)
+			fmt.Println(deploy.RolloutSummary(st))
+		} else {
+			fmt.Printf("Deployed version: %s (target: %s)\n", st.Version, st.Target)
+		}
 		// Printed rather than kept purely internal: with configure/migrate/up
 		// available separately, "did the migrate step actually run for what's
 		// deployed here" is a real question someone asks when something looks

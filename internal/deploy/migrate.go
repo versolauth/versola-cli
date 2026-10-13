@@ -53,6 +53,12 @@ type MigrateOptions struct {
 	// caller (cmd/migrate.go's own --service flag) before this ever sees
 	// it -- an invalid value fails before Docker gets involved at all.
 	Service string
+
+	// noDeps runs the migrate container with --no-deps: a rollout's dry run
+	// runs it from a temporary directory under the live project's name, where
+	// starting a dependency would recreate a live container from files that
+	// are about to be deleted.
+	noDeps bool
 }
 
 func Migrate(st *state.State, opts MigrateOptions) error {
@@ -235,7 +241,11 @@ func migrateViaService(composePath string, opts MigrateOptions) error {
 	// run` always creates a fresh one-off container, so unlike
 	// migrateViaLegacyContainers below, there's no orphaned-container or
 	// concurrent-run guard to reimplement here.
-	args := state.ComposeArgs(composePath, "run", "--rm", "-T", "migrate")
+	runArgs := []string{"run", "--rm", "-T"}
+	if opts.noDeps {
+		runArgs = append(runArgs, "--no-deps")
+	}
+	args := state.ComposeArgs(composePath, append(runArgs, "migrate")...)
 	if opts.DryRun || opts.Service != "" {
 		// `docker compose run <service> <command...>` -- once anything
 		// follows the service name, it REPLACES that service's own

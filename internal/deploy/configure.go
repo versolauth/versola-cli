@@ -55,6 +55,41 @@ import (
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
 func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
+	return configure(target, version, authURL, postgresHost, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
+}
+
+// stagedConfigure is what a rolling upgrade (`versola rollout`) changes about
+// a configure: the deployment it prepares the new version for keeps running
+// while it does.
+type stagedConfigure struct {
+	// from is the deployment being upgraded, as recorded before this run.
+	from *state.State
+	// surge: the rollout will start a stand-in replica of auth and of edge
+	// in the lowest free slot, so their ports are checked now as well.
+	surge bool
+}
+
+// configure is Configure, or with staged set the preparation step of a
+// rolling upgrade. The differences, all in staged's favour of the running
+// deployment:
+//
+//   - replicas beyond slot 1 do not stop it (refuseWithReplicas): they are
+//     what keeps serving while the new version is rolled out;
+//   - the replicas are recorded as they are, each slot at the version it
+//     runs, with PreviousVersion -- not as a fresh slot 1 at the new version,
+//     which `up` would then start everywhere at once;
+//   - replicas.yml and overrides.yml go into the new bundle now (a plain
+//     configure leaves them to `up`): the rollout recreates containers from
+//     this bundle one at a time, and Compose has to know every replica, and
+//     auth's APORT/MPORT moved behind the proxy, from the first of them on;
+//   - nothing that runs is touched: the proxy's files are written into the
+//     bundle only, as with every configure, and no container is started
+//     except OpenBao when it is not running (as configure always does).
+//
+// The secrets plan (0f) is applied here, before any container of the new
+// version starts: a secret new in that version is in OpenBao, and in the new
+// bundle's *.secrets.env, by the time the first one reads it.
+func configure(target, version, authURL, postgresHost string, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -69,8 +104,10 @@ func Configure(target, version, authURL, postgresHost string, setupOpenBaoByHand
 		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
 	}
 
-	if err := refuseWithReplicas(); err != nil {
-		return ConfigureResult{}, err
+	if staged == nil {
+		if err := refuseWithReplicas(); err != nil {
+			return ConfigureResult{}, err
+		}
 	}
 
 	// vps: the reverse proxy's mode, and --auth-url validated and
@@ -334,19 +371,24 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fmt.Println("Generating the reverse proxy's config...")
 	// A newly configured deployment starts with one replica of auth and of
 	// edge, in slot 1; where they listen is whatever its compose file says.
+	// A rollout's keeps the replicas that run, at the versions they run.
 	topo, err := loadTopology(composePath)
 	if err != nil {
 		return ConfigureResult{}, err
 	}
 	slotOne := []state.Slot{{N: 1, Version: version}}
-	authReplicas, err := replicasOf(topo, AuthService, slotOne)
+	authSlots, edgeSlots := slotOne, slotOne
+	if staged != nil {
+		authSlots, edgeSlots = staged.from.ActiveSlots(AuthService), staged.from.ActiveSlots(EdgeService)
+	}
+	authReplicas, err := replicasOf(topo, AuthService, authSlots)
 	if err != nil {
 		return ConfigureResult{}, err
 	}
 	if authReplicas, err = frontAuth(authReplicas, target == "vps"); err != nil {
 		return ConfigureResult{}, err
 	}
-	edgeReplicas, err := replicasOf(topo, EdgeService, slotOne)
+	edgeReplicas, err := replicasOf(topo, EdgeService, edgeSlots)
 	if err != nil {
 		return ConfigureResult{}, err
 	}
@@ -354,7 +396,31 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, authReplicas, edgeReplicas); err != nil {
+	if staged != nil {
+		oldCompose, _, err := staged.from.ComposeFilePath()
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		oldTopo, err := loadTopology(oldCompose)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		if err := samePorts(oldTopo, topo, map[string][]state.Slot{AuthService: authSlots, EdgeService: edgeSlots}); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
+	// A rollout's stand-ins are checked too: a port the new version's compose
+	// file puts a stand-in on is found clashing now, before anything changes.
+	checkAuth, checkEdge := authReplicas, edgeReplicas
+	if staged != nil && staged.surge {
+		if checkAuth, err = withStandIn(topo, AuthService, authSlots, version, target == "vps"); err != nil {
+			return ConfigureResult{}, err
+		}
+		if checkEdge, err = withStandIn(topo, EdgeService, edgeSlots, version, target == "vps"); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
+	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, checkAuth, checkEdge); err != nil {
 		return ConfigureResult{}, err
 	}
 	fronts, genDir, err := proxyRouting(topo, target == "vps")
@@ -364,6 +430,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
 		return ConfigureResult{}, err
 	}
+	if staged != nil {
+		// What `up` writes before it starts anything, written now: the
+		// rollout starts containers from this bundle one at a time.
+		if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
+			return ConfigureResult{}, err
+		}
+		if err := writeOverridesFile(dir, authReplicas); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
 
 	// --postgres-host is recorded for vps only: local's Postgres is a service
 	// of its own compose file, and the flag is ignored there.
@@ -371,11 +447,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if target == "vps" {
 		recordedPostgres = postgresHost
 	}
-	if err := state.Finalize(state.FinalizeOptions{
+	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
-	}); err != nil {
+	}
+	if staged != nil {
+		fin.Slots = map[string][]state.Slot{AuthService: authSlots, EdgeService: edgeSlots}
+		fin.PreviousVersion = staged.from.Version
+	}
+	if err := state.Finalize(fin); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 

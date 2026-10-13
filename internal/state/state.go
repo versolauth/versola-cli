@@ -146,18 +146,21 @@ type State struct {
 	PostgresHost string `json:"postgresHost,omitempty"`
 
 	// PreviousVersion is the Versola version this deployment ran before a
-	// rolling upgrade moved it to Version, kept until the upgrade is
-	// finished so that it can be rolled back to. Empty when no upgrade is
-	// under way. Only recorded so far: the rolling upgrade itself is not
-	// part of this CLI yet.
+	// rolling upgrade (`versola rollout`) moved it to Version. Written when
+	// the rollout prepares the new version's bundle, cleared when it
+	// finishes; while it is set, the rollout is under way (see
+	// RolloutUnderway) and Version is where it is going, not what runs. Kept
+	// so that it can be rolled back to (`rollout --abort`, a later step).
 	PreviousVersion string `json:"previousVersion,omitempty"`
 
 	// Surge marks, per scalable service, the slot a rolling upgrade started
 	// as a stand-in while it replaces that service's replicas one by one: a
 	// replica beyond the ones the operator asked for, to be removed when the
-	// upgrade finishes. Absent when no upgrade is under way. Only recorded
-	// so far, like PreviousVersion; `up` and `replica` refuse to act while
-	// it is set (see MixedVersions).
+	// rollout is done with the service. Written before the stand-in is
+	// started and removed only once its container is gone, so a rollout cut
+	// off at any point knows the slot is not one of the operator's. The
+	// slot itself is in Slots too (replicas.yml defines it from there).
+	// `up` and `replica` refuse to act while it is set (see MixedVersions).
 	Surge map[string]int `json:"surge,omitempty"`
 
 	// MountedBundleDirs are the bundles containers may currently be
@@ -283,6 +286,13 @@ func (s *State) MixedVersions() string {
 	return strings.Join(why, "; ")
 }
 
+// RolloutUnderway reports whether a rolling upgrade has begun and not
+// finished: its new bundle is prepared (PreviousVersion), or a stand-in
+// replica is recorded.
+func (s *State) RolloutUnderway() bool {
+	return s.PreviousVersion != "" || len(s.Surge) > 0
+}
+
 // Dir returns ~/.versola/active, the directory for the current
 // deployment.
 func Dir() (string, error) {
@@ -366,6 +376,14 @@ type FinalizeOptions struct {
 	SecretsRevision int
 	// Keep are further bundles to leave in place (see Finalize).
 	Keep []string
+
+	// Slots and PreviousVersion are set by a rolling upgrade preparing its
+	// new bundle (see deploy's staged configure): the replicas that keep
+	// running, each recorded at the version it runs (otherwise, with
+	// Version moved on, they would read as the new one), and the version
+	// they run. A plain configure leaves both empty: one replica in slot 1.
+	Slots           map[string][]Slot
+	PreviousVersion string
 }
 
 // Finalize makes the deployment Prepare just built (at bundleDir) the
@@ -419,6 +437,11 @@ func Finalize(o FinalizeOptions) error {
 		AuthURL:       o.AuthURL,
 		ProxyMode:     o.ProxyMode,
 		PostgresHost:  o.PostgresHost,
+		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
+		PreviousVersion: o.PreviousVersion,
+	}
+	for svc, slots := range o.Slots {
+		s.SetSlots(svc, slots)
 	}
 	// The bundles containers may still mount carry over: they keep using
 	// them until a successful `up` has replaced them all. A previous record

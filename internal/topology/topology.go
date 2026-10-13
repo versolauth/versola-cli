@@ -103,7 +103,15 @@ type Service struct {
 
 	// containerName is the compose service's `container_name`, or "".
 	containerName string
+
+	// image is the compose service's `image` reference, or "".
+	image string
 }
+
+// Image is the image reference the compose file gives the service
+// ("ghcr.io/versolauth/auth:0.7.0"), or "" when it names none. A rolling
+// upgrade compares it with what a running container was created from.
+func (s Service) Image() string { return s.image }
 
 // ContainerName is the service's fixed container name, or "" when compose
 // names it. A replica in slot n is "<name>-n" (see SlotContainerName).
@@ -375,6 +383,7 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		mutualBad:       s.mutualBad,
 		hostNetwork:     s.hostNetwork,
 		containerName:   s.containerName,
+		image:           s.image,
 	}
 	// Only a port some process listens on moves with the slot: the replica
 	// is told its own PORT/DPORT/APORT/MPORT, but whatever else the base
@@ -506,7 +515,13 @@ func (t Topology) PublicationsReachedFrom(roots []string, except ...string) []Se
 // Topology is the services of one compose configuration.
 type Topology struct {
 	services map[string]rawService
+	// project is the compose project's name (`name:`), or "".
+	project string
 }
+
+// Project is the compose project's name, as Compose labels its containers
+// with (com.docker.compose.project), or "" when the configuration has none.
+func (t Topology) Project() string { return t.project }
 
 // rawService is all that is kept of one compose service: its port
 // variables and its published ports. Nothing else from the configuration
@@ -522,6 +537,7 @@ type rawService struct {
 	hostNetwork bool
 	// disabled: scale or deploy.replicas is 0, so nothing publishes its ports.
 	containerName string
+	image         string
 	disabled      bool
 	count         int      // containers `up` starts: scale or deploy.replicas, else 1
 	dependsOn     []string // the services it needs started first
@@ -583,6 +599,7 @@ type serviceJSON struct {
 	Ports       json.RawMessage `json:"ports"`
 	Scale       json.RawMessage `json:"scale"`
 	Container   json.RawMessage `json:"container_name"`
+	Image       json.RawMessage `json:"image"`
 	DependsOn   json.RawMessage `json:"depends_on"`
 	Deploy      struct {
 		Replicas json.RawMessage `json:"replicas"`
@@ -646,6 +663,7 @@ func jsonString(raw json.RawMessage) string {
 // deployment.
 func Parse(data []byte) (Topology, error) {
 	var cfg struct {
+		Name     string                     `json:"name"`
 		Services map[string]json.RawMessage `json:"services"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -654,7 +672,7 @@ func Parse(data []byte) (Topology, error) {
 	if len(cfg.Services) == 0 {
 		return Topology{}, fmt.Errorf("the compose configuration declares no services")
 	}
-	t := Topology{services: make(map[string]rawService, len(cfg.Services))}
+	t := Topology{services: make(map[string]rawService, len(cfg.Services)), project: cfg.Name}
 	for name, body := range cfg.Services {
 		var s serviceJSON
 		if string(body) == "null" || json.Unmarshal(body, &s) != nil {
@@ -668,6 +686,7 @@ func Parse(data []byte) (Topology, error) {
 			disabled:      zero(s.Scale) || zero(s.Deploy.Replicas),
 			count:         containers(s.Scale, s.Deploy.Replicas),
 			containerName: jsonString(s.Container),
+			image:         jsonString(s.Image),
 			dependsOn:     dependencies(s.DependsOn),
 		}
 		var entries []json.RawMessage
@@ -722,7 +741,7 @@ func (t Topology) Service(name string) (Service, error) {
 // still at their defaults. It reads nothing from the environment, so one
 // service's bad PORT cannot hide what it publishes.
 func (raw rawService) service() Service {
-	svc := Service{hostNetwork: raw.hostNetwork, containerName: raw.containerName}
+	svc := Service{hostNetwork: raw.hostNetwork, containerName: raw.containerName, image: raw.image}
 	for _, p := range raw.ports {
 		if raw.hostNetwork {
 			continue

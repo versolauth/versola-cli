@@ -160,6 +160,14 @@ const pgMargin = 3
 // read from the bundle: no secret among it.
 type pgTarget struct {
 	host, port, db, user, sslmode string
+	// rootCert is the CA file the service verifies Postgres against, as a
+	// path inside its container: the URL's sslrootcert, else the config's
+	// ssl-root-cert (what versola-tools writes for --postgres-ca), else
+	// empty (the JVM's trust store).
+	rootCert string
+	// caFile is rootCert on this host, found in the bundle by
+	// checkPgConnections; empty when there is none.
+	caFile string
 	// pool is the service's connection pool size (maximum-pool-size;
 	// minimum-idle equals it in Versola's configs, so a replica holds all
 	// of it from its start).
@@ -172,6 +180,15 @@ var (
 	pgURLRe  = regexp.MustCompile(`(?m)^\s*url\s*[=:]\s*"([^"]*)"`)
 	pgUserRe = regexp.MustCompile(`(?m)^\s*user\s*[=:]\s*"([^"]*)"`)
 	pgPoolRe = regexp.MustCompile(`(?m)^\s*maximum-pool-size\s*[=:]\s*(\d+)`)
+	pgCARe   = regexp.MustCompile(`(?m)^\s*ssl-root-cert\s*[=:]\s*"([^"]*)"`)
+)
+
+// pgCAContainerDir is where every service sees the bundle's postgres-ca
+// directory (versola-tools' compose template mounts ./postgres-ca there
+// read-only); --postgres-ca's file is ca.crt in it.
+const (
+	pgCAContainerDir = "/etc/versola/postgres-ca"
+	pgCABundleDir    = "postgres-ca"
 )
 
 // parsePgTarget reads the postgres block of a service's HOCON config as
@@ -191,7 +208,13 @@ func parsePgTarget(conf string) (pgTarget, error) {
 	if err != nil || parsed.Hostname() == "" {
 		return pgTarget{}, fmt.Errorf("can't read the postgres url")
 	}
-	t := pgTarget{host: parsed.Hostname(), port: parsed.Port(), db: strings.TrimPrefix(parsed.Path, "/"), sslmode: parsed.Query().Get("sslmode")}
+	q := parsed.Query()
+	t := pgTarget{host: parsed.Hostname(), port: parsed.Port(), db: strings.TrimPrefix(parsed.Path, "/"), sslmode: q.Get("sslmode"), rootCert: q.Get("sslrootcert")}
+	if t.rootCert == "" {
+		if c := pgCARe.FindStringSubmatch(block); c != nil {
+			t.rootCert = c[1]
+		}
+	}
 	if t.port == "" {
 		t.port = "5432"
 	}
@@ -245,19 +268,43 @@ func pgHeadroomWithin(timeout time.Duration) pgRunner {
 	return func(t pgTarget, secretsFile string) (int, error) { return runPgHeadroom(t, secretsFile, timeout) }
 }
 
-func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
+// pgVerifies reports whether sslmode makes the client check the server's
+// certificate. Empty is the services' default, verify-full.
+func pgVerifies(sslmode string) bool {
+	return sslmode == "" || sslmode == "verify-ca" || sslmode == "verify-full"
+}
+
+// pgHeadroomArgs is the docker command line of the check. TLS is set up as
+// the services connect: sslmode from the URL, else verify-full; verified
+// against the service's own CA file (mounted read-only at the path the
+// service sees it at) when it has one, else against the system's CAs (the
+// services: the JVM's trust store). No root certificate is passed for the
+// modes that do not verify: libpq, unlike the services' JDBC driver, would
+// turn require into verify-ca once it has one.
+func pgHeadroomArgs(t pgTarget, secretsFile string) []string {
 	args := []string{"run", "--rm", "--pull", "missing", "--network", "host", "--env-file", secretsFile,
 		"-e", "PGHOST=" + t.host, "-e", "PGPORT=" + t.port, "-e", "PGDATABASE=" + t.db, "-e", "PGUSER=" + t.user,
 		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-rollout-preflight"}
-	if t.sslmode != "" {
-		args = append(args, "-e", "PGSSLMODE="+t.sslmode)
-	} else {
-		// What the services do without sslmode in the URL: verify the
-		// server. Against the system's CAs here; a database behind a CA of
-		// its own fails this check, which then only warns.
-		args = append(args, "-e", "PGSSLMODE=verify-full", "-e", "PGSSLROOTCERT=system")
+	mode := t.sslmode
+	if mode == "" {
+		mode = "verify-full"
 	}
-	args = append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
+	args = append(args, "-e", "PGSSLMODE="+mode)
+	switch {
+	case !pgVerifies(mode):
+	case t.caFile != "":
+		in := pgCAContainerDir + "/ca.crt"
+		args = append(args, "-v", t.caFile+":"+in+":ro", "-e", "PGSSLROOTCERT="+in)
+	case mode == "verify-full":
+		// libpq accepts "system" only with verify-full; verify-ca
+		// without a CA file of its own fails the check, which then warns.
+		args = append(args, "-e", "PGSSLROOTCERT=system")
+	}
+	return append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
+}
+
+func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
+	args := pgHeadroomArgs(t, secretsFile)
 	out, stderr, err := docker.OutputWithin(timeout, args...)
 	if err != nil {
 		var exit *exec.ExitError
@@ -318,6 +365,14 @@ func checkPgConnections(bundleDir string, services []string, run pgRunner, warn 
 			need, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
 		}
 	}
+	if target.rootCert != "" && pgVerifies(target.sslmode) {
+		ca, err := pgCAOnHost(bundleDir, target.rootCert)
+		if err != nil {
+			warn("Warning: %v -- the Postgres connections a stand-in needs are not checked.\n", err)
+			return nil
+		}
+		target.caFile = ca
+	}
 	fmt.Println("Checking that Postgres has the connections for a stand-in replica...")
 	headroom, err := run(target, secrets)
 	if err != nil {
@@ -329,6 +384,23 @@ func checkPgConnections(bundleDir string, services []string, run pgRunner, warn 
 			headroom, needFor, need, pgMargin)
 	}
 	return nil
+}
+
+// pgCAOnHost maps the CA file a service names (a path in its container) to
+// the file in the bundle it is mounted from.
+func pgCAOnHost(bundleDir, inContainer string) (string, error) {
+	rel, ok := strings.CutPrefix(inContainer, pgCAContainerDir+"/")
+	if !ok || rel == "" || strings.Contains(rel, "..") {
+		return "", fmt.Errorf("the Postgres CA file %s is not one versola-cli mounts (%s/...)", inContainer, pgCAContainerDir)
+	}
+	abs, err := filepath.Abs(filepath.Join(bundleDir, pgCABundleDir, filepath.FromSlash(rel)))
+	if err != nil {
+		return "", err
+	}
+	if fi, err := os.Stat(abs); err != nil || !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("the Postgres CA file %s is not in the bundle (%s)", inContainer, abs)
+	}
+	return abs, nil
 }
 
 // ---- the real probes ----

@@ -513,11 +513,17 @@ neither):
   takes (counting other roles' sessions too); fewer than the pool plus 3 is
   a refusal. The connection uses the `sslmode` of the service's URL
   (versola-tools writes `disable` for a Postgres on loopback; without one,
-  `verify-full` against the system's CAs, as the services do). The check
-  runs again before each stand-in, with the new version's pool size. The password goes from
+  `verify-full`, as the services do), verified against the same CA as the
+  services: the `--postgres-ca` file from the bundle (mounted read-only),
+  else the system's CAs. libpq needs a chain up to a self-signed root in
+  that file: with only an intermediate CA in it the check fails and warns.
+  As in the services, the URL's `sslrootcert` wins over `ssl-root-cert`, and
+  `disable`/`require` ignore the CA; a CA outside `/etc/versola/postgres-ca`
+  or `verify-ca` without a CA file can't be checked and only warns. The
+  check runs again before each stand-in, with the new version's pool size. The password goes from
   the service's `*.secrets.env` into that container's environment only --
   never onto a command line or the screen. If the check can't run (no
-  image, a database behind a CA of its own, a login failure) it only
+  image, a TLS error, a login failure) it only
   warns: a stand-in that can't connect never becomes ready and is removed
   again.
 

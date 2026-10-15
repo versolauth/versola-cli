@@ -8,6 +8,8 @@ RUN CGO_ENABLED=0 go build -trimpath -o /stub .
 FROM scratch
 ARG ROLE
 ARG VERSION
-ENV STUB_ROLE=${ROLE} STUB_VERSION=${VERSION}
+# Seconds /readiness answers 503 after start (the stub's own default is 2).
+ARG READY_DELAY=2
+ENV STUB_ROLE=${ROLE} STUB_VERSION=${VERSION} STUB_READY_DELAY=${READY_DELAY}
 COPY --from=build /stub /stub
 ENTRYPOINT ["/stub"]

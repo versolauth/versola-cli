@@ -525,7 +525,11 @@ neither):
 
 - central is stopped and started (it is not replicated): the admin console
   and self-registration are down until it is ready -- usually under a
-  minute, not yet measured on a loaded server. auth and edge keep serving.
+  minute, not yet measured on a loaded server; the rollout prints how long
+  it was. It waits up to 5 minutes (a replica: 2 minutes); if central is still not
+  ready it stops, leaving auth and edge untouched: run the same command
+  again once central is up (it only waits again). `--abort` also works but
+  recreates every auth and edge replica. auth and edge keep serving.
 - auth's mutual-TLS port (8083) is passed through as TCP: every proxy
   reload (each replica taken out or put back) ends the connections the old
   nginx workers hold, 30 s later. Idle ones are simply reopened by edge; a

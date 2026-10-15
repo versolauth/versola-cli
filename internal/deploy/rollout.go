@@ -61,6 +61,8 @@ type rolloutOps interface {
 	// containerInfo). It finds the container by its compose labels, so it
 	// works for a service no compose file names any more.
 	inspect(service string) (containerInfo, error)
+	// waitReadyWithin is waitReady with a limit of its own.
+	waitReadyWithin(url string, timeout time.Duration) error
 	// readyNow asks a readiness URL up to three times (about 11 s at worst): one
 	// slow answer (a GC pause) must not take a healthy replica out.
 	readyNow(url string) bool
@@ -441,7 +443,11 @@ func (e *rolloutEngine) run() error {
 
 // central restarts central on the new version unless its container already
 // is, and waits until it is ready: auth and edge wait for central when they
-// start, and hang rather than fail if it is not there.
+// start, and hang rather than fail if it is not there. It is the one step
+// where something is down (the admin console, self-registration), so it says
+// how long that lasted, and waits longer than for a replica
+// (centralReadyTimeout): a rollout stopped here costs more to undo than to
+// wait out.
 func (e *rolloutEngine) central() error {
 	c, err := e.ops.inspect(CentralService)
 	if err != nil {
@@ -459,18 +465,29 @@ func (e *rolloutEngine) central() error {
 	if err != nil {
 		return err
 	}
-	if !isNew || !c.running {
+	restarted := !isNew || !c.running
+	var stoppedAt time.Time
+	if restarted {
 		if err := e.checkpoint(); err != nil {
 			return err
 		}
 		e.say("\nRestarting central on %s -- the admin console and self-registration are unavailable until it is ready; auth and edge keep serving...\n", e.st.Version)
+		stoppedAt = time.Now() // the old container is stopped inside this call
 		if err := e.ops.compose("up", "-d", "--no-deps", CentralService); err != nil {
 			return fmt.Errorf("couldn't start central on %s: %w", e.st.Version, err)
 		}
 	}
-	e.say("Waiting for central to be ready...\n")
-	if err := e.ops.waitReady(url); err != nil {
-		return fmt.Errorf("central never became ready on %s: %w -- auth and edge still run; see `docker logs` of central, then run the same `versola rollout` again", e.st.Version, err)
+	e.say("Waiting for central to be ready (up to %s)...\n", centralReadyTimeout)
+	if err := e.ops.waitReadyWithin(url, centralReadyTimeout); err != nil {
+		hint := "run the same `versola rollout` again: it only waits for central again and carries on. `versola rollout --abort` goes back as well, but recreates every auth and edge replica"
+		if e.st.RollingBack {
+			hint = "run `versola rollout --abort` again: it only waits for central again and carries on"
+		}
+		return fmt.Errorf("central never became ready on %s (waited %s): %w -- auth and edge still run from their caches. Look at the logs of central (`docker logs`); once it is up, or if it was only slow, %s",
+			e.st.Version, centralReadyTimeout, err, hint)
+	}
+	if restarted {
+		e.say("central is ready on %s: the admin console and self-registration were unavailable for about %s.\n", e.st.Version, time.Since(stoppedAt).Round(time.Second))
 	}
 	return nil
 }

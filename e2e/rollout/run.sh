@@ -5,6 +5,7 @@
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 #                  [--abort-at prepared|central|standin|midway] [--strict]
+#                  [--slow-central SECONDS]
 #   ./run.sh clean
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -15,6 +16,10 @@
 #   central   after central restarted on B, before any stand-in
 #   standin   after the auth stand-in (B) takes traffic
 #   midway    after the first replica was recreated on B
+#
+# --slow-central makes central of version B answer /readiness with 503 for that
+# many seconds after it starts (default 2), to see the rollout wait for it and
+# report how long central was unavailable; auth and edge must keep serving.
 #
 # Cuts of the long-lived 8083 connections (nginx closes a retired worker's
 # connections 30 s after each reload) are the known limitation: reported, not
@@ -72,12 +77,14 @@ clean() {
 }
 
 build() {
-  local base="$1"
+  local base="$1" slow_central="${2:-}"
   say "building stub images ($A, $B) and the wrapped versola-tools (base $base)"
   for v in "$A" "$B"; do
     for s in central auth edge; do
+      local delay=()
+      [ "$s" = central ] && [ "$v" = "$B" ] && [ -n "$slow_central" ] && delay=(--build-arg READY_DELAY="$slow_central")
       docker build -q --platform linux/amd64 --build-arg ROLE="$s" --build-arg VERSION="$v" \
-        -t "versola-e2e/$s:$v" "$HERE/stub" >/dev/null
+        ${delay[@]+"${delay[@]}"} -t "versola-e2e/$s:$v" "$HERE/stub" >/dev/null
     done
     docker build -q --platform linux/amd64 --build-arg BASE="ghcr.io/versolauth/versola-tools:$base" \
       --build-arg VERSION="$v" -t "ghcr.io/versolauth/versola-tools:$v" "$HERE/tools" >/dev/null
@@ -94,7 +101,7 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --abort-at) abort_at="$2"; shift 2 ;;
@@ -102,6 +109,7 @@ run() {
       --no-surge) surge="--no-surge"; shift ;;
       --base-tools) base="$2"; shift 2 ;;
       --strict) strict=yes; shift ;;
+      --slow-central) slow_central="$2"; shift 2 ;;
       *) die "unknown argument $1" ;;
     esac
   done
@@ -132,7 +140,8 @@ $found"
     if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use"; fi
   done
 
-  build "$base"
+  [ -z "$slow_central" ] || [[ "$slow_central" =~ ^[0-9]+$ ]] || die "--slow-central: a number of seconds"
+  build "$base" "$slow_central"
 
   # The CLI keeps its state under $HOME; the docker CLI's own config stays where it is.
   export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
@@ -216,7 +225,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

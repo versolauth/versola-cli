@@ -246,6 +246,13 @@ func (r readyAfterStart) waitReady(u string) error {
 	return r.world.waitReady(u)
 }
 
+func (r readyAfterStart) waitReadyWithin(u string, limit time.Duration) error {
+	if c := r.containers[r.urls[u]]; c != nil {
+		c.ready = true
+	}
+	return r.world.waitReadyWithin(u, limit)
+}
+
 // Going back, a container Compose did not label with its bundle is not taken
 // for the target's, though it has the target's image: it may mount the
 // bundle the end of the run deletes.

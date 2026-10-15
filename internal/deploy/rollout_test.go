@@ -64,6 +64,7 @@ type world struct {
 
 	minUp        map[string]int // with a stand-in: never fewer in the upstream
 	never        map[string]bool
+	waits        map[string]time.Duration // the last limit a service was waited for with
 	coldOnce     map[string]bool // fails warm once
 	calls        int
 	crashAt      int
@@ -198,8 +199,15 @@ func (w *world) compose(args ...string) error {
 	})
 }
 
-func (w *world) waitReady(u string) error {
+func (w *world) waitReady(u string) error { return w.waitReadyWithin(u, readyTimeout) }
+
+// waitReadyWithin records the limit each service was waited for with.
+func (w *world) waitReadyWithin(u string, limit time.Duration) error {
 	svc := w.urls[u]
+	if w.waits == nil {
+		w.waits = map[string]time.Duration{}
+	}
+	w.waits[svc] = limit
 	return w.step("ready "+svc, func() error {
 		if c := w.containers[svc]; c != nil && c.running && c.ready {
 			return nil
@@ -563,6 +571,75 @@ func TestRolloutDropsAStandInThatDoesNotComeUp(t *testing.T) {
 	}
 	if len(w.violations) > 0 {
 		t.Errorf("violations: %v", w.violations)
+	}
+}
+
+// central is a single instance, so its restart is the longest unavailable
+// window of a rollout: it gets its own, longer limit; replicas keep the
+// normal one.
+func TestRolloutWaitsForCentralLongerThanForReplicas(t *testing.T) {
+	w := newWorld(t, preparedState(old(1, 2), old(1)))
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.waits[CentralService]; got != centralReadyTimeout {
+		t.Errorf("central waited for %s, want %s", got, centralReadyTimeout)
+	}
+	if centralReadyTimeout <= readyTimeout {
+		t.Errorf("centralReadyTimeout %s must exceed readyTimeout %s", centralReadyTimeout, readyTimeout)
+	}
+	for _, svc := range []string{"auth-3", "auth", "auth-2", "edge-2", "edge"} {
+		if got := w.waits[svc]; got != readyTimeout {
+			t.Errorf("%s waited for %s, want %s", svc, got, readyTimeout)
+		}
+	}
+}
+
+// central that never comes up stops the rollout before auth or edge are
+// touched, tells how to go on, and a rerun only waits for central again.
+func TestRolloutCentralNeverReadyThenRetried(t *testing.T) {
+	w := newWorld(t, preparedState(old(1, 2), old(1)))
+	w.never[CentralService] = true
+	err := engineFor(w, true, false).run()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"central never became ready", "waited 5m0s", "versola rollout --abort", "run the same `versola rollout` again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	for _, e := range w.events {
+		if strings.Contains(e, "auth") || strings.Contains(e, "edge") {
+			if strings.HasPrefix(e, "compose") || strings.HasPrefix(e, "surge") {
+				t.Fatalf("auth/edge touched while central is down: %s", e)
+			}
+		}
+	}
+	// Fixed (or it was only slow); the same command again.
+	w.containers[CentralService].ready = true
+	w.events = nil
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	w.done(t, []int{1, 2}, []int{1})
+	if i := indexOf(w.events, "compose up -d --no-deps central"); i >= 0 {
+		t.Errorf("central was restarted again on the rerun")
+	}
+}
+
+// During an abort the hint must point at --abort, not at a new rollout.
+func TestRolloutCentralNeverReadyDuringAbortHint(t *testing.T) {
+	st := preparedState(old(1, 2), old(1))
+	st.RollingBack = true
+	w := newWorld(t, st)
+	w.never[CentralService] = true
+	err := engineFor(w, true, false).run()
+	if err == nil || !strings.Contains(err.Error(), "central never became ready") {
+		t.Fatalf("error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "run `versola rollout --abort` again") || strings.Contains(err.Error(), "goes back as well") {
+		t.Errorf("wrong hint during an abort: %v", err)
 	}
 }
 

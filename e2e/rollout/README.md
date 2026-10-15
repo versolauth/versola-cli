@@ -71,6 +71,7 @@ The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
 ./run.sh run /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 ./run.sh run /path/to/versola --abort-at prepared|central|standin|midway
 ./run.sh run /path/to/versola --strict      # cuts on 8083 fail the run
+./run.sh run /path/to/versola --slow-central 40   # central B needs 40 s to become ready
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
 
@@ -89,6 +90,11 @@ stops after the first replaced replica, like `midway`. What stubs can't
 show: the old version on a really migrated schema, edge registering its
 client certificate with central, real start times -- those need the real
 images (the `0.7.0` -> `0.7.0-rt1` run on the stand).
+
+`--slow-central N` makes the stub central of version B answer `/readiness` with
+503 for N seconds after it starts. The rollout must wait for it, print how long
+central was unavailable (about N s plus the 1 s poll), keep auth and edge serving
+and finish with no failures. The real central's start time is not measured here.
 
 Linux only, needs more than 3.25 GiB of available memory and 4 GiB of disk (the
 CLI's own prerequisite checks) and free ports 2821, 8082, 8083 and 8200. It

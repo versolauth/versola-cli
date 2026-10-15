@@ -51,6 +51,16 @@ type RolloutOptions struct {
 // is not measured yet.
 const readyTimeout = 120 * time.Second
 
+// centralReadyTimeout bounds the wait for central after a rollout restarted it
+// on the new version. Longer than readyTimeout on purpose: central is not
+// replicated, so while it starts the admin console and self-registration are
+// down whatever the wait is, and giving up early buys nothing -- a rollout
+// that stops here is finished by running it again (which only waits for
+// central again), while `--abort` recreates every auth and edge replica.
+// Its start on a loaded server is not measured yet (the rollout prints how
+// long it took); on an idle stand 0.7.1 was ready well within a minute.
+const centralReadyTimeout = 5 * time.Minute
+
 // CheckRollout is everything about `rollout <version>` that can be refused
 // on the record alone, before the operator is asked to confirm. done is true
 // when the deployment already runs version and no rollout is under way.
@@ -788,7 +798,11 @@ type dockerRolloutOps struct {
 	host string
 }
 
-func (o dockerRolloutOps) waitReady(u string) error { return wait.ForReady(u, readyTimeout) }
+func (o dockerRolloutOps) waitReady(u string) error { return o.waitReadyWithin(u, readyTimeout) }
+
+func (o dockerRolloutOps) waitReadyWithin(u string, timeout time.Duration) error {
+	return wait.ForReady(u, timeout)
+}
 
 // writeReplicas writes overrides.yml along with replicas.yml: the rollout
 // recreates auth's slot 1 from this bundle, and without the override it

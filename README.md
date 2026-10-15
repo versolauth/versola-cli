@@ -431,9 +431,11 @@ once, the first time a deployment moves to this layout, and after that for
 a new proxy image or a change of `--proxy` mode or TLS.
 
 A reload ends the TCP connections passed through to auth's MPORT once the
-old nginx workers stop (after up to 30 seconds), and a connection idle for
-an hour is closed; edge reconnects. A replica added later gets new
-connections only.
+old nginx workers stop, 30 seconds later -- all of them, idle or not: a TCP
+pass-through can't tell where a request ends. A connection idle for an hour
+is closed too. edge opens new ones for its next requests; a request that is
+in flight on such a connection at that moment fails (edge's HTTP client
+does not retry it). A replica added later gets new connections only.
 
 This needs a Versola release whose versola-tools ships the admin console;
 `configure vps` says so clearly when pointed at an older one.
@@ -524,10 +526,15 @@ neither):
 - central is stopped and started (it is not replicated): the admin console
   and self-registration are down until it is ready -- usually under a
   minute, not yet measured on a loaded server. auth and edge keep serving.
-- auth's mutual-TLS port (8083) is passed through as TCP: taking a replica
-  out of the proxy ends the connections through it once the old nginx
-  workers stop (up to 30 s); clients reconnect. The listener is on by
-  default; nothing on id.versola.kz uses it today.
+- auth's mutual-TLS port (8083) is passed through as TCP: every proxy
+  reload (each replica taken out or put back) ends the connections the old
+  nginx workers hold, 30 s later. Idle ones are simply reopened by edge; a
+  request in flight at that moment fails. On vps the only caller is edge's
+  native-app back channel (`/par`, `/token`, `/revoke`), so a native app
+  would have to try again. Not measured with the real edge yet; in a local
+  run of the e2e client (`e2e/rollout`, three reloads) it saw one per reload
+  on a request kept always in flight and none on short ones. The listener
+  is on by default; nothing on id.versola.kz uses it today.
 - every edge replica the rollout starts (the stand-in, each recreated
   slot, again on an abort) gets its own client certificate through
   central.

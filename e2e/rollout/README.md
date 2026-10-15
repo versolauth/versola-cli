@@ -12,27 +12,65 @@ tools/    wraps the real versola-tools image: runs its real entrypoint, then
           is a no-op (no Postgres needed)
 traffic/  GET+POST client for the proxy's public port (127.0.0.1:2821),
           8082 and 8083 (new and long-lived connections); counts every
-          transport error and unexpected status
+          transport error and unexpected status, and on the long-lived 8083
+          connections tells cuts and reconnects apart (below)
 run.sh    builds the images, deploys version A, rolls out version B under
           traffic, prints the report
 ```
 
 **Pass** = `versola rollout` exits 0, the traffic client reports zero
 failures, and every target was served by both versions (`-expect-versions`).
+Cuts (below) are reported but do not fail the run; `--strict` makes them
+failures.
 
-Connections to 8083 are the known risk (nginx cuts stream connections of a
-retired worker after `worker_shutdown_timeout`, 30 s). The client therefore
-keeps pooled connections there and counts every re-dial after the first as a
-failure (net/http would otherwise reconnect quietly), and keeps one request
-(`/slow?ms=1500`) always in flight so a cut is an error. Plain POSTs send
-`Connection: close`: a keep-alive connection that a reload closes at the very
-moment a POST is written fails whatever the CLI did.
+Connections to 8083 are the known limitation. 8083 is a TCP pass-through
+(nginx `stream`): after every reload the retired workers keep the connections
+they had, and nginx closes all of them at `worker_shutdown_timeout` (30 s),
+idle or not -- a stream proxy can't tell where a request ends. edge keeps
+pooled connections there (zio-http; Versola's default pool is `Fixed(128)`
+per target, with no maximum age), so each reload ends edge's pooled
+connections to 8083 30 s later. The client keeps three pooled connections
+there, one per pooled target -- one of them (`/slow?ms=1500`) always has a
+request in flight -- and counts two things apart:
+
+- **reconnect**: the pooled connection was closed while idle and the next
+  request opened a new one. zio-http does the same (it drops a closed channel
+  it takes from its pool and opens another), so no request of edge's fails.
+  Counted, harmless.
+- **cut**: the connection died under a request -- in flight, or between
+  taking it from the pool and writing. net/http retries a GET on a dead reused
+  connection by itself, which would hide it, so a request answered only after
+  a second connection was taken counts too. A timeout, a retry that finds no
+  new connection, or a failure on the retry's new connection is a failure,
+  not a cut. zio-http does not retry: edge's request fails (on vps, 8083
+  carries the native-app back channel: `/par`, `/token`, `/revoke`).
+  `/token` with an authorization code is single-use, so a blind retry would
+  not be safe either.
+
+A local run of this client through nginx 1.24 `stream` with two stub
+upstreams and three reloads (`worker_shutdown_timeout` 5 s) gave 3 cuts, all
+on `/slow`, 0 on the short requests and 6 reconnects -- the old counting
+reported the same run as 9 failures. Not yet re-run on the stand.
+
+Because cuts are expected, a default run no longer fails on them -- so it
+does not catch a regression that only cuts established 8083 connections
+(say, the proxy being restarted instead of reloaded). Run with `--strict`
+to look for exactly that; the plain targets still catch any outage of new
+connections.
+
+Plain POSTs send `Connection: close`: a keep-alive connection that a reload
+closes at the very moment a POST is written fails whatever the CLI did.
+
+The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
+`go test ./...` at the repository root does not run its tests: run
+`go test -race ./...` in `traffic/` by hand.
 
 ## Run (only on a throwaway machine)
 
 ```
 ./run.sh run /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 ./run.sh run /path/to/versola --abort-at prepared|central|standin|midway
+./run.sh run /path/to/versola --strict      # cuts on 8083 fail the run
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
 

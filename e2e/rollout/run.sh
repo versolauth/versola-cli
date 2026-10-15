@@ -4,7 +4,7 @@
 # runs against the proxy (public port, 8082, 8083), and checks nothing failed.
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
-#                  [--abort-at prepared|central|standin|midway]
+#                  [--abort-at prepared|central|standin|midway] [--strict]
 #   ./run.sh clean
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -15,6 +15,10 @@
 #   central   after central restarted on B, before any stand-in
 #   standin   after the auth stand-in (B) takes traffic
 #   midway    after the first replica was recreated on B
+#
+# Cuts of the long-lived 8083 connections (nginx closes a retired worker's
+# connections 30 s after each reload) are the known limitation: reported, not
+# a failure. --strict counts them as failures (see README.md).
 #
 # Run it ONLY on a throwaway machine (the test stand): it starts containers
 # named versola-*, a real OpenBao and the proxy on 127.0.0.1:2821/8082/8083,
@@ -90,13 +94,14 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --abort-at) abort_at="$2"; shift 2 ;;
       --replicas) replicas="$2"; shift 2 ;;
       --no-surge) surge="--no-surge"; shift ;;
       --base-tools) base="$2"; shift 2 ;;
+      --strict) strict=yes; shift ;;
       *) die "unknown argument $1" ;;
     esac
   done
@@ -151,7 +156,7 @@ $found"
 
   stop="$work/stop"; rm -f "$stop"
   "$work/traffic" -h >/dev/null 2>&1 || die "cannot execute $work/traffic (is $E2E_HOME on a noexec mount?)"
-  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$versions" >"$work/traffic.txt" 2>&1 &
+  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
   rpid=""
   # A killed or failed script must not leave the client hammering the proxy,
@@ -211,7 +216,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

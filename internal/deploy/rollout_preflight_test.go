@@ -297,3 +297,138 @@ func TestPgHeadroomQueryShape(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePgTargetRootCert(t *testing.T) {
+	remote := strings.Replace(authConf, "127.0.0.1:5432/auth?currentSchema=auth&sslmode=disable", "db.example.com:6432/auth?currentSchema=auth", 1)
+	withCA := strings.Replace(remote, `  user = "versola_app"`, "  user = \"versola_app\"\n  ssl-root-cert = \"/etc/versola/postgres-ca/ca.crt\"", 1)
+	if got, err := parsePgTarget(withCA); err != nil || got.rootCert != "/etc/versola/postgres-ca/ca.crt" || got.sslmode != "" {
+		t.Errorf("ssl-root-cert: %+v %v", got, err)
+	}
+	// The URL's sslrootcert wins, as in the services.
+	inURL := strings.Replace(withCA, "currentSchema=auth\"", "currentSchema=auth&sslrootcert=/etc/versola/postgres-ca/other.pem\"", 1)
+	if got, err := parsePgTarget(inURL); err != nil || got.rootCert != "/etc/versola/postgres-ca/other.pem" {
+		t.Errorf("sslrootcert in the url: %+v %v", got, err)
+	}
+	if got, err := parsePgTarget(remote); err != nil || got.rootCert != "" {
+		t.Errorf("no CA: %+v %v", got, err)
+	}
+}
+
+// envOf returns the value of -e NAME=... in docker args, and whether it is set.
+func envOf(args []string, name string) (string, bool) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" && strings.HasPrefix(args[i+1], name+"=") {
+			return strings.TrimPrefix(args[i+1], name+"="), true
+		}
+	}
+	return "", false
+}
+
+func mountsOf(args []string) []string {
+	var m []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-v" {
+			m = append(m, args[i+1])
+		}
+	}
+	return m
+}
+
+func TestPgHeadroomArgs(t *testing.T) {
+	base := pgTarget{host: "db.example.com", port: "6432", db: "auth", user: "versola_app", pool: 10}
+	ca := "/home/v/.versola/active/bundle/postgres-ca/ca.crt"
+	for name, c := range map[string]struct {
+		sslmode, caFile string
+		mode, root      string // root "" = PGSSLROOTCERT not set
+		mount           string
+	}{
+		"default, no CA":     {"", "", "verify-full", "system", ""},
+		"default, own CA":    {"", ca, "verify-full", "/etc/versola/postgres-ca/ca.crt", ca + ":/etc/versola/postgres-ca/ca.crt:ro"},
+		"verify-full, no CA": {"verify-full", "", "verify-full", "system", ""},
+		"verify-ca, own CA":  {"verify-ca", ca, "verify-ca", "/etc/versola/postgres-ca/ca.crt", ca + ":/etc/versola/postgres-ca/ca.crt:ro"},
+		"verify-ca, no CA":   {"verify-ca", "", "verify-ca", "", ""},
+		"require, own CA":    {"require", ca, "require", "", ""},
+		"disable":            {"disable", "", "disable", "", ""},
+	} {
+		tg := base
+		tg.sslmode, tg.caFile = c.sslmode, c.caFile
+		args := pgHeadroomArgs(tg, "/b/auth.secrets.env")
+		if got, _ := envOf(args, "PGSSLMODE"); got != c.mode {
+			t.Errorf("%s: PGSSLMODE %q, want %q", name, got, c.mode)
+		}
+		got, set := envOf(args, "PGSSLROOTCERT")
+		if c.root == "" && set || c.root != "" && got != c.root {
+			t.Errorf("%s: PGSSLROOTCERT %q (set %v), want %q", name, got, set, c.root)
+		}
+		mounts := mountsOf(args)
+		if c.mount == "" && len(mounts) > 0 || c.mount != "" && (len(mounts) != 1 || mounts[0] != c.mount) {
+			t.Errorf("%s: mounts %v, want %q", name, mounts, c.mount)
+		}
+		// The image and the script come last, after every option.
+		if i := indexOf(args, pgCheckImage); i < 0 || i != len(args)-5 {
+			t.Errorf("%s: image at %d of %v", name, i, args)
+		}
+	}
+}
+
+func TestPgConnectionsFindsTheBundleCA(t *testing.T) {
+	dir := t.TempDir()
+	remote := strings.Replace(authConf, "127.0.0.1:5432/auth?currentSchema=auth&sslmode=disable", "db.example.com:6432/auth?currentSchema=auth", 1)
+	withCA := strings.Replace(remote, `  user = "versola_app"`, "  user = \"versola_app\"\n  ssl-root-cert = \"/etc/versola/postgres-ca/ca.crt\"", 1)
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asked pgTarget
+	run := func(tg pgTarget, _ string) (int, error) { asked = tg; return 100, nil }
+	warnedWith := func(msg *string) func(string, ...any) {
+		return func(f string, a ...any) { *msg = fmt.Sprintf(f, a...) }
+	}
+
+	// The CA is not in the bundle: warned, not asked, not refused.
+	write("auth.conf", withCA)
+	var msg string
+	asked = pgTarget{}
+	if err := checkPgConnections(dir, []string{AuthService}, run, warnedWith(&msg)); err != nil || !strings.Contains(msg, "not in the bundle") || asked.host != "" {
+		t.Errorf("missing CA: err %v, warning %q, asked %+v", err, msg, asked)
+	}
+
+	write("postgres-ca/ca.crt", "-----BEGIN CERTIFICATE-----\n")
+	if err := checkPgConnections(dir, []string{AuthService}, run, noWarn(t)); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "postgres-ca", "ca.crt"); asked.caFile != want {
+		t.Errorf("caFile %q, want %q", asked.caFile, want)
+	}
+
+	// A CA path versola-cli does not mount: warned.
+	write("auth.conf", strings.Replace(withCA, "/etc/versola/postgres-ca/ca.crt", "/opt/ca.pem", 1))
+	msg = ""
+	if err := checkPgConnections(dir, []string{AuthService}, run, warnedWith(&msg)); err != nil || !strings.Contains(msg, "not one versola-cli mounts") {
+		t.Errorf("foreign CA path: err %v, warning %q", err, msg)
+	}
+	write("auth.conf", strings.Replace(withCA, "/etc/versola/postgres-ca/ca.crt", "/etc/versola/postgres-ca/../../../etc/shadow", 1))
+	msg = ""
+	if err := checkPgConnections(dir, []string{AuthService}, run, warnedWith(&msg)); err != nil || !strings.Contains(msg, "not one versola-cli mounts") {
+		t.Errorf("dot-dot CA path: err %v, warning %q", err, msg)
+	}
+
+	// Modes that do not verify: the CA is not looked for at all; verify-ca
+	// looks for it like verify-full.
+	for mode, wantCA := range map[string]bool{"disable": false, "require": false, "verify-ca": true} {
+		conf := strings.Replace(withCA, "currentSchema=auth\"", "currentSchema=auth&sslmode="+mode+"\"", 1)
+		if !wantCA {
+			conf = strings.Replace(conf, "/etc/versola/postgres-ca/ca.crt", "/opt/ca.pem", 1)
+		}
+		write("auth.conf", conf)
+		asked = pgTarget{}
+		if err := checkPgConnections(dir, []string{AuthService}, run, noWarn(t)); err != nil || (asked.caFile != "") != wantCA || asked.host == "" {
+			t.Errorf("%s: err %v, asked %+v", mode, err, asked)
+		}
+	}
+}

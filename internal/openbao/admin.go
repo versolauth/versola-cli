@@ -15,7 +15,14 @@ import (
 // calls below -- separate from Client's own *http.Client (which is scoped
 // to one target's AppRole session) since these calls happen before any
 // AppRole exists yet, authenticated with the root token instead.
-var adminHTTP = &http.Client{Timeout: 10 * time.Second}
+//
+// It never follows redirects: Unseal sends the unseal key in a PUT body, and
+// Go re-sends a PUT body to wherever a 307/308 points, so a listener that
+// merely sits on the local OpenBao port could redirect the key elsewhere.
+var adminHTTP = &http.Client{
+	Timeout:       10 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // Health reports whether address's OpenBao has been through `sys/init` at
 // all, and if so, whether it's currently sealed (true on every fresh
@@ -24,28 +31,40 @@ var adminHTTP = &http.Client{Timeout: 10 * time.Second}
 // Init/Unseal below it actually needs to run, rather than assuming a
 // fresh container every time.
 func Health(ctx context.Context, address string) (initialized, sealed bool, err error) {
+	h, err := healthStatus(ctx, address)
+	return h.Initialized, h.Sealed, err
+}
+
+// healthState is OpenBao's /sys/health body, the fields this CLI reads.
+type healthState struct {
+	Initialized bool `json:"initialized"`
+	Sealed      bool `json:"sealed"`
+	// Standby is true for a node that is unsealed but has not (yet) become
+	// the active one: right after an unseal a single node needs a moment.
+	Standby bool `json:"standby"`
+}
+
+// healthStatus is Health with the whole answer.
+func healthStatus(ctx context.Context, address string) (healthState, error) {
 	// OpenBao's own /sys/health intentionally answers with a non-200
 	// status for every "not fully up" case (501 uninitialized, 503
 	// sealed, ...) -- the body is still valid JSON either way, so this
 	// reads it regardless of status rather than treating those as errors.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address+"/v1/sys/health", nil)
 	if err != nil {
-		return false, false, fmt.Errorf("couldn't build health request: %w", err)
+		return healthState{}, fmt.Errorf("couldn't build health request: %w", err)
 	}
 	resp, err := adminHTTP.Do(req)
 	if err != nil {
-		return false, false, fmt.Errorf("couldn't reach OpenBao at %s: %w", address, err)
+		return healthState{}, fmt.Errorf("couldn't reach OpenBao at %s: %w", address, err)
 	}
 	defer resp.Body.Close()
 
-	var h struct {
-		Initialized bool `json:"initialized"`
-		Sealed      bool `json:"sealed"`
-	}
+	var h healthState
 	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
-		return false, false, fmt.Errorf("couldn't parse OpenBao's health response: %w", err)
+		return healthState{}, fmt.Errorf("couldn't parse OpenBao's health response: %w", err)
 	}
-	return h.Initialized, h.Sealed, nil
+	return h, nil
 }
 
 // Init runs OpenBao's one-time initialization with a single key share

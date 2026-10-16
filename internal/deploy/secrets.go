@@ -136,6 +136,9 @@ func resolveSecrets(dir, target, version string, opts SecretOptions) (secretsOut
 
 	client := openbao.NewClient(creds)
 	ctx := context.Background()
+	if err := openbao.EnsureUnsealed(ctx, target, creds.Address, os.Stdout); err != nil {
+		return secretsOutcome{}, err
+	}
 	if err := client.Login(ctx); err != nil {
 		return secretsOutcome{}, err
 	}

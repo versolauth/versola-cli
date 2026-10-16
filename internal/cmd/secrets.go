@@ -84,6 +84,9 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 	// mode (surfaces later, inside configure/migrate) than rejecting it
 	// here, at the moment it was typed in.
 	fmt.Printf("Verifying credentials against %s...\n", address)
+	if err := openbao.EnsureUnsealed(context.Background(), target, address, os.Stdout); err != nil {
+		return err
+	}
 	if err := openbao.NewClient(creds).Login(context.Background()); err != nil {
 		return fmt.Errorf("couldn't log in with these credentials: %w", err)
 	}
@@ -147,6 +150,9 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 	client := openbao.NewClient(creds)
 	ctx := context.Background()
 
+	if err := openbao.EnsureUnsealed(ctx, target, creds.Address, os.Stdout); err != nil {
+		return err
+	}
 	fmt.Printf("Logging into OpenBao at %s...\n", creds.Address)
 	if err := client.Login(ctx); err != nil {
 		return err

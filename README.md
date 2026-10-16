@@ -252,10 +252,35 @@ machine last deployed (recorded in `~/.versola`). If the plan has a problem,
 | `unknown` | no record here, OpenBao not empty | stops: it cannot tell a new secret from a lost one |
 | `local` | `local` target (throwaway) | generates anything missing |
 
-Versola's secret **values are never printed** by `configure`, `bootstrap`, or
-`secrets plan` — only names and decisions. The one thing `configure` does
-print is the AppRole `role-id`/`secret-id` of OpenBao itself (also saved in
-`~/.versola/openbao/<target>.json`), by the team lead's decision.
+Secret **values are never printed** by `configure`, `bootstrap`, `rollout`, or
+`secrets plan` — only names, decisions and where a value is kept:
+
+- OpenBao's own AppRole `role-id`/`secret-id`: `configure` prints the path,
+  `~/.versola/openbao/<target>.json` (readable only by you).
+- The Postgres password generated on the first `configure` against a new
+  OpenBao: `configure` writes the SQL that sets it on Versola's role to
+  `~/.versola/openbao/<target>-postgres-role.sql` (readable only by you; it
+  creates the role if it doesn't exist and sets the password and allows login if it does)
+  and prints the command to run it:
+
+  ```sh
+  sudo -u postgres psql < ~/.versola/openbao/vps-postgres-role.sql
+  ```
+
+  The file holds the password's SCRAM-SHA-256 verifier, which Postgres stores
+  as is, not the password (the password itself only if it isn't ASCII;
+  generated ones are), so it doesn't end up in Postgres' server log either.
+  It needs `psql` 10 or newer and a POSIX shell (the server's, not
+  PowerShell).
+
+  Use `<`, not `psql -f`: the `postgres` user can't open your file, your
+  shell can. For managed or remote Postgres, feed the same file to `psql`
+  connected as an admin role. You don't need to know the password itself;
+  it is stored in OpenBao and in the deployment's `auth.secrets.env`.
+
+The one exception: on `local` (a throwaway OpenBao), if the CLI can't save
+OpenBao's root token and unseal key right after initializing it, it prints
+them once so they aren't lost; on `vps` it stops with an error instead.
 
 #### `versola secrets plan <target> <version>`
 

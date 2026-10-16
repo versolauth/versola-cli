@@ -100,7 +100,8 @@ func (o SecretOptions) generateSet() map[string]bool {
 // secretsOutcome is what resolveSecrets reports back to Configure.
 type secretsOutcome struct {
 	// NewPostgresPassword is the Postgres password this run stored for the first
-	// time ("" if none); Configure prints the SQL that sets it on the role.
+	// time ("" if none); Configure writes the SQL that sets it on the role
+	// (announcePostgresRole) -- never prints it.
 	NewPostgresPassword string
 	// Revision is the revision of the schema the secrets were settled against;
 	// 0 when the release has no schema.

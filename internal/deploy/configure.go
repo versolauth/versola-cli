@@ -348,16 +348,21 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		// Stored but configure failed after that: the next configure
 		// sees the password as already stored and won't mention it, so
-		// this is the one chance to show it.
+		// this is the one chance to hand it over.
 		if newPgPassword != "" {
-			printPostgresRoleSetup(dir, newPgPassword)
+			if _, aerr := announcePostgresRole(os.Stdout, dir, target, newPgPassword); aerr != nil {
+				return ConfigureResult{}, errors.Join(err, aerr)
+			}
 		}
 		return ConfigureResult{}, err
 	}
-	// Printed right away rather than at the end: any later step failing
-	// would otherwise swallow it for good (see above).
+	// Right away rather than at the end: any later step failing would
+	// otherwise swallow it for good (see above).
+	var pgRoleScript string
 	if newPgPassword != "" {
-		printPostgresRoleSetup(dir, newPgPassword)
+		if pgRoleScript, err = announcePostgresRole(os.Stdout, dir, target, newPgPassword); err != nil {
+			return ConfigureResult{}, err
+		}
 	}
 
 	// versola-tools writes the compose file under a "fragment" name and
@@ -490,5 +495,5 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 
-	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != ""}, nil
+	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != "", PostgresRoleScript: pgRoleScript}, nil
 }

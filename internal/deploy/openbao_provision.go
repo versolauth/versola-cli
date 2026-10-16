@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/versolauth/versola-cli/internal/openbao"
 )
@@ -117,7 +119,8 @@ func ProvisionOpenBao(target, address string) error {
 			//
 			// vps: Bekezhan's own call (23.09.2026, after already
 			// deciding the REST of this function's UX -- console
-			// printing of role-id/secret-id, single key-share -- should
+			// printing of role-id/secret-id (since dropped, see
+			// printOpenBaoInfo), single key-share -- should
 			// match local one-to-one): a failed write here on a real
 			// prod secret store shouldn't fall back to printing the
 			// root token into a terminal that's presumably open on a
@@ -151,7 +154,7 @@ func ProvisionOpenBao(target, address string) error {
 
 	if sealed {
 		if !haveAdmin {
-			return fmt.Errorf(`%s's OpenBao is initialized and sealed, but this machine has no saved unseal key -- this happens if it was set up by hand before this automation existed (see develop.md's OpenBao section for the manual "bao operator unseal" step), if ~/.versola/openbao/%s-admin.json was deleted, or if saving it failed right after a previous Init (in which case the root token and unseal key were printed to the console at the time -- check scrollback/logs from that run). Unseal it by hand once and re-run`, target, target)
+			return fmt.Errorf(`%s's OpenBao is initialized and sealed, but this machine has no saved unseal key -- this happens if it was set up by hand before this automation existed (see develop.md's OpenBao section for the manual "bao operator unseal" step), if ~/.versola/openbao/%s-admin.json was deleted, or if saving it failed right after a previous Init (on local the root token and unseal key were then printed to the console -- check scrollback/logs from that run; on vps they are never printed). Unseal it by hand once and re-run`, target, target)
 		}
 		fmt.Printf("Unsealing %s OpenBao...\n", target)
 		if err := openbao.Unseal(ctx, address, admin.UnsealKey); err != nil {
@@ -162,10 +165,8 @@ func ProvisionOpenBao(target, address string) error {
 	if haveCreds && !justInitialized {
 		// Already fully set up by a previous run (or by hand, following
 		// develop.md's old manual steps) -- nothing left to provision, but
-		// still print the same info a fresh provisioning run would, every
-		// time (see printOpenBaoInfo's own comment for why): the point is
-		// that nobody has to go find and cat a JSON file to get these,
-		// whether this is the first `bootstrap <target>` or the fiftieth.
+		// still say where the credentials are, as a fresh provisioning run
+		// would (never the values -- see printOpenBaoInfo).
 		//
 		// The justInitialized exception: existingCreds here can be a
 		// LEFTOVER from a previous OpenBao volume that just got destroyed
@@ -175,7 +176,7 @@ func ProvisionOpenBao(target, address string) error {
 		// through instead of returning here means the provisioning block
 		// below re-runs for real against the new instance and overwrites
 		// <target>.json with credentials that actually work.
-		printOpenBaoInfo(target, existingCreds)
+		printOpenBaoInfo(os.Stdout, target, existingCreds)
 		return nil
 	}
 
@@ -225,26 +226,22 @@ func ProvisionOpenBao(target, address string) error {
 	}
 
 	fmt.Printf("%s's OpenBao is ready:\n", target)
-	printOpenBaoInfo(target, creds)
+	printOpenBaoInfo(os.Stdout, target, creds)
 	return nil
 }
 
-// printOpenBaoInfo prints the AppRole credentials ProvisionOpenBao either
-// just created or found already stored -- Georgy's own ask, originally
-// for local: someone who needs to poke at OpenBao directly (the `bao`
-// CLI, a debugging session, handing it to another tool) shouldn't have to
-// go find and cat a JSON file first.
+// printOpenBaoInfo says where the AppRole credentials ProvisionOpenBao either
+// just created or found already stored are -- so whoever needs to poke at
+// OpenBao directly (the `bao` CLI, a debugging session) knows where to look.
 //
-// Printing role-id AND secret-id in plain text used to be justified here
-// as "fine for local specifically -- it's a throwaway container", with
-// vps deliberately excluded. That distinction is gone now that
-// ProvisionOpenBao runs for vps by default too (see its own doc comment)
-// -- Georgy's call, not an oversight: matching local's UX one-to-one, on
-// the same reasoning that decided the rest of this function, rather than
-// inventing a quieter vps-only path nobody asked for.
-func printOpenBaoInfo(target string, creds *openbao.Credentials) {
-	fmt.Printf("  address:   %s\n", creds.Address)
-	fmt.Printf("  role-id:   %s\n", creds.RoleID)
-	fmt.Printf("  secret-id: %s\n", creds.SecretID)
-	fmt.Printf("(also saved to ~/.versola/openbao/%s.json)\n", target)
+// It names the file and never prints the values. It used to print role-id
+// and secret-id (Georgy's ask, 23.09.2026, so nobody has to go find a JSON
+// file), but configure runs on every step of a rollout and abort, so the
+// secret-id went to the terminal again and again -- into scrollback, SSH
+// session logs, CI logs and chats -- while nothing reads it from there: this
+// CLI reads the file. The secret-id logs in to every Versola secret of
+// target, so it stays in that file (0600) only.
+func printOpenBaoInfo(out io.Writer, target string, creds *openbao.Credentials) {
+	fmt.Fprintf(out, "  address:     %s\n", creds.Address)
+	fmt.Fprintf(out, "  credentials: ~/.versola/openbao/%s.json (AppRole role-id and secret-id, readable only by you)\n", target)
 }

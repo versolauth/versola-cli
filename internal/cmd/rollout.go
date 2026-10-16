@@ -72,7 +72,9 @@ the new one is ready.
 
 --dry-run prints the plan, and from the new version's versola-tools (run
 into a temporary directory) its secrets plan and the migrations it would
-apply. It changes nothing.
+apply. It changes nothing in the deployment (a sealed OpenBao -- it is after
+every reboot of the server -- is unsealed first with the key saved on this
+machine, same as the rollout itself does).
 
 Only for vps deployments made by this versola-cli; a local one is configured
 and started again instead.`,

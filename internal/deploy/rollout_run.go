@@ -740,6 +740,12 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	}
 	client := openbao.NewClient(creds)
 	ctx := context.Background()
+	// A dry run changes nothing in the deployment, but a sealed OpenBao (the
+	// state it is in after every reboot) is unsealed first, same as the real
+	// rollout would: the unseal key is saved on this machine for that.
+	if err := openbao.EnsureUnsealed(ctx, st.Target, creds.Address, os.Stdout); err != nil {
+		return err
+	}
 	if err := client.Login(ctx); err != nil {
 		return err
 	}

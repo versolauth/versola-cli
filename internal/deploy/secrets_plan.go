@@ -33,7 +33,7 @@ const (
 // of its last deployment (see secrets.Plan for the rules).
 //
 // Read-only: nothing is written to OpenBao, to the deployment's state, or to its
-// bundle. The candidates are real random values, so the temporary directory is
+// bundle (a sealed OpenBao is unsealed first, see openbao.EnsureUnsealed). The candidates are real random values, so the temporary directory is
 // created 0700 under ~/.versola, and removed before this returns whatever
 // happens (except a kill -9, which leaves it behind: its name starts with
 // "plan-" and it is safe to delete by hand).
@@ -57,6 +57,9 @@ func PlanSecrets(ctx context.Context, target, version string, generateMissing []
 	}
 	client := openbao.NewClient(creds)
 	fmt.Fprintf(log, "Reading what OpenBao holds for %s...\n", target)
+	if err := openbao.EnsureUnsealed(ctx, target, creds.Address, log); err != nil {
+		return secrets.Result{}, err
+	}
 	if err := client.Login(ctx); err != nil {
 		return secrets.Result{}, err
 	}

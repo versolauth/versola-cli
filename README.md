@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/wordmark-white.svg">
+    <img alt="Versola" src="docs/brand/wordmark-ink.svg" height="36">
+  </picture>
+</p>
+
 # versola-cli
 
 Command-line tool for deploying and managing Versola. Deliberately thin: it

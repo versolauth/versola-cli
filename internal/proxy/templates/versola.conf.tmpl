@@ -96,6 +96,17 @@ server {
     set_real_ip_from 127.0.0.1;
     real_ip_header X-Forwarded-For;
 {{- end }}
+{{- if .ProxyProtocol }}
+
+    # Reached only through the stream server on 443 (central-mtls.conf),
+    # which sends a PROXY protocol header first: $remote_addr is the
+    # client's real address again, not 127.0.0.1 -- auth reads the client
+    # IP from X-Real-IP for per-IP throttling. Only that loopback peer is
+    # trusted to say so, and every connection to this listener has to
+    # carry the header, so nothing else can get here with a made-up one.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+{{- end }}
 
 {{ .Routes -}}
 }

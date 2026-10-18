@@ -22,12 +22,15 @@ type ProxyOptions struct {
 	// ACMEStaging requests the certificate from Let's Encrypt's staging
 	// environment: untrusted, but without production's rate limits.
 	ACMEStaging bool
+	// CentralURL is --central-url: how edge reaches central's mutual-TLS
+	// listener. Empty: central.<domain> of the auth URL where there is one.
+	CentralURL string
 }
 
 // checkProxyPorts fails early, before anything is generated, when the
 // port(s) the proxy is about to bind are already taken by something
 // else -- typically a web server already installed on the host.
-func checkProxyPorts(auth proxy.AuthURL, mode string) error {
+func checkProxyPorts(auth proxy.AuthURL, mode string, routesCentral bool) error {
 	// Ports our own proxy from the current deployment holds are fine --
 	// `up` replaces it. Only those: if this configure switches mode (say
 	// external -> nginx), the ports the new mode needs must still be free
@@ -48,7 +51,12 @@ func checkProxyPorts(auth proxy.AuthURL, mode string) error {
 		}
 	}
 
-	for _, port := range proxy.Ports(auth, mode) {
+	ports := proxy.Ports(auth, mode)
+	if routesCentral {
+		// Loopback ports of the stream server on 443 and its relay.
+		ports = append(ports, proxy.CentralFrontPort, proxy.CentralRelayPort)
+	}
+	for _, port := range ports {
 		if ours[port] || !proxy.PortInUse(port) {
 			continue
 		}
@@ -82,6 +90,11 @@ func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, routed proxy.
 	}
 	if opts.Mode == proxy.ModeNginx {
 		cfg.IPv6 = proxy.HostHasGlobalIPv6()
+	}
+	if central, ok, err := proxy.ParseCentralURL(opts.CentralURL, auth); err != nil {
+		return err
+	} else if ok {
+		cfg.CentralHost = central.RoutedHost(auth, opts.Mode)
 	}
 	tls := auth.TLS(opts.Mode)
 	if tls {

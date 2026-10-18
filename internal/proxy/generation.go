@@ -129,6 +129,14 @@ func fillGeneration(gen, bundleDir string, dynamic map[string][]byte) error {
 			return err
 		}
 	}
+	// Only a routed central name has one (see Config.CentralHost).
+	if b, err := os.ReadFile(filepath.Join(bundleDir, CentralStreamFile)); err == nil {
+		if err := write(CentralStreamFile, b); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("couldn't read the bundle's %s: %w", CentralStreamFile, err)
+	}
 	for rel, b := range dynamic {
 		if err := write(rel, b); err != nil {
 			return err

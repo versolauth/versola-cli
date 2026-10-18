@@ -131,6 +131,11 @@ an install page in your browser, and only after you confirm:
 - Port 2821 free on localhost (`local` only — for `vps`, `configure`
   itself checks the ports its reverse proxy needs, which depend on
   `--proxy` and `--auth-url`: see "Deploying to a VPS" below)
+- With `--target vps` and `--auth-url` and/or `--central-url`: central's
+  second public name (see "Central's second name" below) resolves, to
+  this server, and answers a TLS handshake on its port 8093 and, if the
+  URL has no port, on 443. Meant for a server where central already runs
+  (after `versola up`): before that there is nothing to answer
 - Enough free memory (differs by target, see below)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
@@ -414,6 +419,10 @@ serves the admin console at `/central/admin/`.
   without production's rate limits (a handful of certificates per domain
   per week).
 
+  The name central is reached at (see "Central's second name" below) also
+  needs a DNS record pointing at this server: `central.<domain>`, next to
+  `--auth-url`'s name.
+
 - **`external`** — this server already runs its own web server on 80/443
   (other sites, its own TLS). Versola's proxy then listens only on
   `127.0.0.1:2821`, plain HTTP, and your web server forwards the domain
@@ -436,6 +445,87 @@ serves the admin console at `/central/admin/`.
   The forwarding web server has to run on this same host (natively, or
   in a container with host networking): 127.0.0.1:2821 isn't reachable
   from anywhere else.
+
+  Versola's proxy doesn't hold 443 here, so it can't route central's
+  second name; your web server has to (see "Central's second name").
+
+### Central's second name: `--central-url`
+
+A deployment is addressed by two host names: `id.<domain>` (auth,
+`--auth-url`) and `central.<domain>` (central's edge surface, which edges
+reach over mutual TLS). `--central-url` (on `configure` and `bootstrap`,
+vps only) is that second one, as `https://<name>[:<port>]`. Left out, it is
+`https://central.<domain>`: `--auth-url`'s host with its first label
+replaced (`id.example.com` and `example.com` both give
+`central.example.com`); `configure` passes it to versola-tools as
+gen-env's `--central-mutual-tls-url`, so it is what an edge's
+`central.url` is generated with, and records it. Nothing is derived from
+an `http://` or IP `--auth-url`: versola-tools keeps its own default
+(`https://127.0.0.1:8093`, the host itself). Pass the flag to override
+the name or to point at central's own port instead
+(`https://203.0.113.7:8093`: nothing routes it then).
+
+The name's DNS record points at this server. No public certificate is
+needed for it: central's server certificate comes from the deployment's
+own PKI and the edge pins it.
+
+With `--proxy nginx` the proxy routes the name itself. Port 443 is then
+shared by TLS it terminates and TLS it must not touch, so it is a stream
+(TCP) server that reads the server name from the ClientHello
+(`ssl_preread`):
+
+- `central.<domain>` goes, as bytes, to central's mutual-TLS listener on
+  `127.0.0.1:8093` -- the handshake and the edge's client certificate
+  reach central untouched;
+- every other name -- `--auth-url`'s -- goes to the http server it was
+  always served by, which moves to `127.0.0.1:8444` and keeps the ACME
+  certificate. Port 80 is unchanged, so Let's Encrypt's HTTP-01 challenge
+  works as before. The stream server tells it who the client is in a
+  PROXY protocol header (the http server trusts only that loopback peer),
+  so auth's per-IP throttling still sees real addresses.
+
+Central's connection takes a hop through a loopback relay
+(`127.0.0.1:8445`) that drops that header, which its TLS listener would
+take for a broken handshake. All three loopback ports must be free;
+`configure` checks. Central's own port 8093 stays open on all interfaces,
+as before, for edges that use the host address.
+
+The generated file is `proxy/stream.d/central-mtls.conf` in the proxy's
+config (see `~/.versola/active/proxy-vps/current/`).
+
+With `--proxy external`, Versola's proxy only listens on
+`127.0.0.1:2821` and doesn't see 443, so the web server in front has to do
+the same, without terminating TLS for this name -- for nginx, a `stream`
+block in the main context sharing 443 with the `http` server that handles
+`--auth-url`'s name:
+
+```nginx
+stream {
+    map $ssl_preread_server_name $versola_tls {
+        hostnames;
+        central.example.com 127.0.0.1:8093;   # central's mutual-TLS listener
+        default             127.0.0.1:8443;   # your existing https server, moved off 443
+    }
+    server {
+        listen 443;
+        ssl_preread on;
+        proxy_pass $versola_tls;
+    }
+}
+```
+
+(Your `http` server for the auth name then listens on 8443 and, to keep
+the client address, uses `proxy_protocol` on both ends; or leave the
+address out of it.) Until that is in place, edges outside this host can use
+the host's address and port 8093 directly: `--central-url
+https://<host>:8093`.
+
+`versola doctor --target vps --auth-url ...` checks the name resolves to
+this server and answers a TLS handshake on 8093 (and 443).
+
+This needs versola-tools to read `--central-mutual-tls-url` from the
+arguments it is run with; an image that does not keeps its default
+(`https://127.0.0.1:8093`) and the proxy routes the name regardless.
 
 The proxy is part of the same Docker Compose project as the rest of the
 deployment, so `status`, `down` and `uninstall` include it. Its

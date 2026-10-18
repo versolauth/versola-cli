@@ -17,6 +17,7 @@ var postgresHost string
 var setupOpenBao bool
 var bootstrapProxy string
 var bootstrapACMEStaging bool
+var bootstrapCentralURL string
 var bootstrapPostgresDB string
 var bootstrapPostgresCA string
 var bootstrapGenerateMissing []string
@@ -82,6 +83,7 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	bootstrapCmd.Flags().StringVar(&bootstrapCentralURL, "central-url", "", centralURLUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -171,7 +173,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// error asks for, so it is not a reason to stop.)
 
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging},
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {
 		return err

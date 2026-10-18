@@ -16,6 +16,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
@@ -75,6 +76,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		results = append(results, central...)
+		// Certificates of a deployment already on this host: none to check
+		// before the first configure.
+		if r, found := checks.MTLSLeafCheck(deploy.MTLSVolumeName("vps"), "versola-step-ca"); found {
+			results = append(results, r)
+		}
 	} else if doctorAuthURL != "" || doctorCentralURL != "" {
 		return fmt.Errorf("--auth-url and --central-url only apply to --target vps")
 	}

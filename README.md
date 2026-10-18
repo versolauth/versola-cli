@@ -136,6 +136,10 @@ an install page in your browser, and only after you confirm:
   this server, and answers a TLS handshake on its port 8093 and, if the
   URL has no port, on 443. Meant for a server where central already runs
   (after `versola up`): before that there is nothing to answer
+- With `--target vps`, on a host that already has a deployment: the
+  mutual-TLS certificates in the `versola-mtls-vps` volume are not
+  expired and not within the last third of their lifetime (a warning
+  then; see `certs renew`)
 - Enough free memory (differs by target, see below)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
@@ -693,6 +697,44 @@ earlier version out the same way. If the old version can't run on the
 migrated schema at all, restore the database from step 2 and deploy the
 old version with `configure` / `migrate` / `up`.
 
+### `certs renew` (vps and local)
+
+Auth's and central's mutual-TLS listeners and the certificate edge
+presents to central are issued by the deployment's own CA (step-ca) into
+the `versola-mtls-vps` volume (`versola-mtls-local` locally), valid for two
+years. `versola certs renew` keeps them valid, the way cert-manager does
+on Kubernetes: it runs versola-tools' `mtls-init` service as a one-off,
+which re-issues a certificate only when a third of its lifetime or less is
+left, and -- if it issued anything -- restarts `central`, `auth` and
+`edge` (every replica, in that order, waiting for each to be ready before
+the next), because they read their certificates at startup. When nothing
+is due it prints nothing and exits 0; a failing step exits non-zero with
+its output. Nothing needs registering in central: an edge is recognised by
+the URI name in its certificate.
+
+If a restart fails after the certificates were renewed, the error names
+the services still running on the old ones; once the problem is fixed,
+`versola certs renew --restart` restarts them (a plain `renew` finds
+nothing due by then).
+
+The edge pins central's server certificate. An edge on the same host
+mounts the volume and picks the new one up with its restart; an edge on
+another host has to be given the renewed `central-server.crt` (and, when
+`ca.crt` changed, the CA bundle) before its next reconnect.
+
+Run it on a schedule -- daily is plenty:
+
+```
+versola certs renew --show-timer      # prints what it would write; writes nothing
+versola certs renew --install-timer   # writes + enables it (systemd, current user)
+```
+
+The timer is a systemd user timer (`~/.config/systemd/user/versola-certs-renew.{service,timer}`,
+`OnCalendar=daily`, `Persistent=true`); on a host without systemd
+`--show-timer` prints a crontab line instead, which is yours to add. A
+user timer stops with the user's last session unless lingering is on
+(`sudo loginctl enable-linger $USER`).
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
@@ -779,7 +821,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, certs, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up — which bootstrap chains together
 internal/state/         locates ~/.versola/active, the on-disk state configure writes

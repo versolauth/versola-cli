@@ -134,6 +134,10 @@ run() {
     midway) pattern="(auth|edge)(-[0-9]+)? runs ${B//./\\.} and takes traffic" ;;
     *) die "--abort-at: prepared, central, standin or midway" ;;
   esac
+  # An abort stops the rollout part way: some services never reach B, so the
+  # traffic client can only be asked for A. What the abort must achieve (every
+  # container on A, the front on A, no rollout under way) is checked after it.
+  [ -z "$abort_at" ] || versions="$A"
   command -v docker >/dev/null || die "no docker"
 
   local found; found="$(existing)"
@@ -192,11 +196,11 @@ $found"
   local rrc=0 arc=0
   if [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes --assume-compatible $surge || rrc=$?
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes --assume-compatible $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
@@ -214,7 +218,7 @@ $found"
     "$cli" status || true
     sleep 5
     say "aborting ${surge}"
-    "$cli" rollout --abort --yes $surge | tee "$work/abort.txt" || arc=$?
+    "$cli" rollout --abort --yes --allow-legacy-secrets $surge | tee "$work/abort.txt" || arc=$?
     if [ "$abort_at" = prepared ] && ! grep -q "nothing running was touched" "$work/abort.txt"; then
       echo "e2e: an abort before migrate must only restore the previous configuration" >&2; arc=1
     fi

@@ -461,3 +461,56 @@ func TestAddChecksTheFrontsAfterTheReload(t *testing.T) {
 		}
 	}
 }
+
+func TestAddChecksPostgresBeforeChangingAnything(t *testing.T) {
+	ops := newFakeOps()
+	s := testScaler(t, ops, nil)
+	var asked struct {
+		service string
+		count   int
+	}
+	s.checkPostgres = func(service string, count int) error {
+		asked.service, asked.count = service, count
+		return errors.New("Postgres takes 5 more connections")
+	}
+	err := s.add(AuthService, 2)
+	if err == nil || !strings.Contains(err.Error(), "Postgres takes 5 more") {
+		t.Fatalf("error: %v", err)
+	}
+	if asked.service != AuthService || asked.count != 2 {
+		t.Errorf("asked about %+v", asked)
+	}
+	for _, e := range ops.events {
+		if !strings.HasPrefix(e, "port") {
+			t.Errorf("changed something after Postgres refused: %s", e)
+		}
+	}
+	if n := slotNumbers(s.slots[AuthService]); !reflect.DeepEqual(n, []int{1}) {
+		t.Errorf("slots: %v", n)
+	}
+
+	// Enough connections: the add goes on as before.
+	ops2 := newFakeOps()
+	s2 := testScaler(t, ops2, nil)
+	s2.checkPostgres = func(string, int) error { return nil }
+	if err := s2.add(AuthService, 1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The check `replica add` runs is aimed at the service's own bundle config and
+// multiplies by the number of replicas (the wiring openReplicaScaler installs).
+func TestNewPostgresCheckReadsTheBundle(t *testing.T) {
+	dir := pgBundle(t)
+	var asked pgTarget
+	run := func(headroom int) pgRunner {
+		return func(tg pgTarget, _ string) (int, error) { asked = tg; return headroom, nil }
+	}
+	// edge: pool 12 + LISTEN, two replicas, plus the 3 kept free.
+	if err := newPostgresCheck(dir, run(29))(EdgeService, 2); err != nil || asked.db != "edge" {
+		t.Errorf("enough: %v (asked %+v)", err, asked)
+	}
+	if err := newPostgresCheck(dir, run(28))(EdgeService, 2); err == nil || !strings.Contains(err.Error(), "add fewer replicas") {
+		t.Errorf("short: %v", err)
+	}
+}

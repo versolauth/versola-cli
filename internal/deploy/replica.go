@@ -70,6 +70,10 @@ type replicaScaler struct {
 	// proxyRouting); zero locally.
 	fronts proxy.Fronts
 	genDir string
+
+	// checkPostgres refuses an add when Postgres could not take the pools of
+	// the new replicas (nil: not checked -- the tests').
+	checkPostgres func(service string, count int) error
 }
 
 func newReplicaScaler(st *state.State, topo topology.Topology, ops replicaOps) *replicaScaler {
@@ -258,6 +262,15 @@ func (s *replicaScaler) add(service string, count int) error {
 					return fmt.Errorf("%s needs port %d on this machine: %w", r.Service, port, err)
 				}
 			}
+		}
+	}
+
+	// Each replica opens its own pool: a server out of connections shows
+	// as replicas that fail to start -- and as the serving ones failing to
+	// reconnect after a blip.
+	if s.checkPostgres != nil {
+		if err := s.checkPostgres(service, len(numbers)); err != nil {
+			return err
 		}
 	}
 
@@ -526,7 +539,22 @@ func openReplicaScaler(st *state.State, service string, needRunning bool) (*repl
 	if s.fronts, s.genDir, err = proxyRouting(topo, s.hostNetwork); err != nil {
 		return nil, err
 	}
+	// vps only: psql runs in a container on the host's network, which reaches a
+	// vps's Postgres at the address its configs name -- not local's, a service
+	// of its own compose file.
+	if st.Target == "vps" {
+		s.checkPostgres = newPostgresCheck(filepath.Dir(composePath), dockerPgHeadroom)
+	}
 	return s, nil
+}
+
+// newPostgresCheck is the check of `replica add` against the bundle in dir:
+// see checkPgForReplicas.
+func newPostgresCheck(dir string, run pgRunner) func(service string, count int) error {
+	warn := func(f string, a ...any) { fmt.Printf(f, a...) }
+	return func(service string, count int) error {
+		return checkPgForReplicas(dir, service, count, run, warn)
+	}
 }
 
 // AddReplicas starts count more replicas of auth or edge. The caller holds

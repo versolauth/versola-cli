@@ -583,6 +583,9 @@ neither):
   image, a TLS error, a login failure) it only
   warns: a stand-in that can't connect never becomes ready and is removed
   again.
+  `replica add` runs the same check before it starts anything, for the
+  replicas it adds -- they all stay, so their pools together plus 3 must fit
+  -- and refuses the same way (raise `max_connections`, or add fewer).
 
 **Short outages a rollout does have:**
 

@@ -289,6 +289,14 @@ The one exception: on `local` (a throwaway OpenBao), if the CLI can't save
 OpenBao's root token and unseal key right after initializing it, it prints
 them once so they aren't lost; on `vps` it stops with an error instead.
 
+OpenBao comes back sealed after every restart of the server. Before it logs
+in (`configure`, `rollout`, `secrets plan`, `secrets test`, `secrets login`)
+the CLI unseals it itself with the key it saved in
+`~/.versola/openbao/<target>-admin.json`, waiting up to 30 seconds for the
+container to start, and sends that key only to a local address. If you set
+OpenBao up yourself (`--setup-openbao`) the CLI has no key: it stops with the
+`bao operator unseal` command to run by hand.
+
 #### `versola secrets plan <target> <version>`
 
 Shows what `configure` would do, without doing it. Read-only: it reads
@@ -353,10 +361,11 @@ one may be lost, not new), so the CLI refuses unless you pass this flag.
 
 #### Upgrading the CLI
 
-This CLI writes its state file in `~/.versola` in **layout 3** (layout 2
+This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
 added the schema revision; layout 3 the Postgres host and the records a
-rolling upgrade needs). It reads the layouts older CLIs wrote, but an older
-CLI cannot read layout 3 and stops with a "newer schema" error: after the
+rolling upgrade needs; layout 4 the Postgres database name and CA, from
+`--postgres-db` and `--postgres-ca`). It reads the layouts older CLIs wrote,
+but an older CLI cannot read layout 4 and stops with a "newer schema" error: after the
 first command that saves state with this CLI, do not go back to an older one
 on the same machine.
 
@@ -565,7 +574,7 @@ neither):
   what a running replica of that service uses now (`docker stats`), never
   less than 900 MiB (since 0.7.0 a replica's JVM is sized at about
   850-880 MiB, and a freshly started one has not reached that yet) -- plus
-  256 MiB: a rollout with a stand-in needs at least about 1.15 GiB free. Checked before anything changes and again
+  256 MiB: a rollout with a stand-in needs at least about 1.13 GiB (1156 MiB) free. Checked before anything changes and again
   right before each stand-in. It has to run on the vps itself: with Docker
   pointed at another host it refuses.
 - Postgres connections: a stand-in opens its whole pool at once (10 for

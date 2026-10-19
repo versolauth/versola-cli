@@ -439,3 +439,51 @@ func TestPgConnectionsFindsTheBundleCA(t *testing.T) {
 		}
 	}
 }
+
+// `replica add` starts the replicas together and keeps them: Postgres has to
+// take every pool, not the largest one as for a stand-in that goes again.
+func TestPgConnectionsForNewReplicas(t *testing.T) {
+	dir := pgBundle(t)
+	run := func(headroom int) pgRunner {
+		return func(pgTarget, string) (int, error) { return headroom, nil }
+	}
+	// auth: 10 per replica, two of them, 3 kept free.
+	if err := checkPgForReplicas(dir, AuthService, 2, run(23), noWarn(t)); err != nil {
+		t.Errorf("enough: %v", err)
+	}
+	err := checkPgForReplicas(dir, AuthService, 2, run(22), noWarn(t))
+	if err == nil || !strings.Contains(err.Error(), "takes 22 more") || !strings.Contains(err.Error(), "2 more auth replica(s) open 20") || strings.Contains(err.Error(), "stand-in") || strings.Contains(err.Error(), "--no-surge") {
+		t.Errorf("short: %v", err)
+	}
+	// edge: pool 12 + its LISTEN connection, per replica.
+	if err := checkPgForReplicas(dir, EdgeService, 2, run(29), noWarn(t)); err != nil {
+		t.Errorf("edge enough: %v", err)
+	}
+	if err := checkPgForReplicas(dir, EdgeService, 2, run(28), noWarn(t)); err == nil {
+		t.Error("edge short: accepted")
+	}
+	// The check can't run: a warning that names the new replicas, never a refusal.
+	var msg string
+	warned := func(f string, a ...any) { msg = fmt.Sprintf(f, a...) }
+	if err := checkPgForReplicas(dir, AuthService, 1, func(pgTarget, string) (int, error) { return 0, errors.New("refused") }, warned); err != nil || !strings.Contains(msg, "The new replicas open 10") {
+		t.Errorf("psql failed: %v, warning %q", err, msg)
+	}
+	msg = ""
+	if err := checkPgForReplicas(t.TempDir(), AuthService, 1, run(100), warned); err != nil || !strings.Contains(msg, "the new replicas need are not checked") {
+		t.Errorf("no config: %v, warning %q", err, msg)
+	}
+}
+
+// The stand-in check's warnings read as they did before `replica add` shared
+// its code.
+func TestPgConnectionsStandInWarnings(t *testing.T) {
+	dir := pgBundle(t)
+	var msg string
+	warned := func(f string, a ...any) { msg = fmt.Sprintf(f, a...) }
+	if err := checkPgConnections(dir, []string{AuthService}, func(pgTarget, string) (int, error) { return 0, errors.New("refused") }, warned); err != nil || !strings.HasSuffix(msg, "not checked. A stand-in opens 10.\n") {
+		t.Errorf("psql failed: %v, warning %q", err, msg)
+	}
+	if err := checkPgConnections(t.TempDir(), []string{AuthService}, nil, warned); err != nil || !strings.HasSuffix(msg, "-- the Postgres connections a stand-in needs are not checked.\n") {
+		t.Errorf("no config: %v, warning %q", err, msg)
+	}
+}

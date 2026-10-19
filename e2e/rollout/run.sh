@@ -192,11 +192,11 @@ $found"
   local rrc=0 arc=0
   if [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes --assume-compatible $surge || rrc=$?
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes --assume-compatible $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do

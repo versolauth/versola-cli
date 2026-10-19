@@ -35,7 +35,7 @@ func prepareAbort(t *testing.T, w *world) {
 	next := &state.State{Target: st.Target, Version: st.PreviousVersion, PreviousVersion: st.Version, RollingBack: true,
 		ProxyMode: st.ProxyMode, AuthURL: st.AuthURL, PostgresHost: st.PostgresHost, BundleDir: "bundle-back",
 		MountedBundleDirs: st.MountedBundleDirs, MigratedAt: &migrated}
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range rolloutServices {
 		next.SetSlots(svc, st.ActiveSlots(svc))
 	}
 	for svc, n := range st.Surge {
@@ -58,11 +58,14 @@ func slotsOf(ss []state.Slot) []int {
 }
 
 var abortLayouts = []struct {
-	name       string
-	auth, edge []state.Slot
+	name           string
+	auth, edge     []state.Slot
+	centralStandIn bool
 }{
-	{"one replica each", old(1), old(1)},
-	{"two auth, one edge", old(1, 2), old(1)},
+	{"one replica each", old(1), old(1), false},
+	{"two auth, one edge", old(1, 2), old(1), false},
+	{"one replica each, central stand-in", old(1), old(1), true},
+	{"two auth, one edge, central stand-in", old(1, 2), old(1), true},
 }
 
 // A rollout cut off at any call -- before or after it took effect -- is
@@ -72,6 +75,7 @@ var abortLayouts = []struct {
 func TestAbortAfterARolloutCutOffAnywhere(t *testing.T) {
 	for _, layout := range abortLayouts {
 		clean := newWorld(t, preparedState(layout.auth, layout.edge))
+		clean.centralStandIn = layout.centralStandIn
 		if err := engineFor(clean, true, false).run(); err != nil {
 			t.Fatal(err)
 		}
@@ -80,6 +84,7 @@ func TestAbortAfterARolloutCutOffAnywhere(t *testing.T) {
 				name := fmt.Sprintf("%s/rollout cut at call %d (%s, after=%v)", layout.name, i, clean.callNames[i-1], after)
 				t.Run(name, func(t *testing.T) {
 					w := newWorld(t, preparedState(layout.auth, layout.edge))
+					w.centralStandIn = layout.centralStandIn
 					w.crashAt, w.crashAfter = i, after
 					if err := engineFor(w, true, false).run(); err != nil && !errors.Is(err, errCrash) {
 						t.Fatalf("rollout: %v", err)
@@ -107,6 +112,7 @@ func TestAbortResumesAfterACrashAnywhere(t *testing.T) {
 		// stand-in recorded, a slot or two of each version.
 		start := func(t *testing.T) *world {
 			w := newWorld(t, preparedState(layout.auth, layout.edge))
+			w.centralStandIn = layout.centralStandIn
 			w.crashAt = indexOf(w.runAndCount(t, layout.auth, layout.edge), "compose up -d --no-deps auth") + 2
 			w.crashAfter = true
 			if err := engineFor(w, true, false).run(); !errors.Is(err, errCrash) {
@@ -150,6 +156,7 @@ func TestAbortResumesAfterACrashAnywhere(t *testing.T) {
 func (w *world) runAndCount(t *testing.T, auth, edge []state.Slot) []string {
 	t.Helper()
 	c := newWorld(t, preparedState(auth, edge))
+	c.centralStandIn = w.centralStandIn
 	if err := engineFor(c, true, false).run(); err != nil {
 		t.Fatal(err)
 	}
@@ -422,6 +429,12 @@ func TestChooseAbortPath(t *testing.T) {
 		"a replica down: still the old bundle's deployment": {func(_ *state.State, w *world, _ string) {
 			delete(w.containers, "edge")
 		}, true, abortRestore, []string{"edge"}},
+		"central recorded at the new version": {func(st *state.State, _ *world, _ string) {
+			st.SetSlots(CentralService, []state.Slot{{N: 1, Version: toV}, {N: 2, Version: toV}})
+		}, true, abortRollBack, nil},
+		"no central slots recorded (prepared by an older versola-cli): the container tells": {func(st *state.State, _ *world, _ string) {
+			delete(st.Slots, CentralService)
+		}, true, abortRestore, nil},
 		"central gone (a recreate cut off halfway): restored, and said": {func(_ *state.State, w *world, _ string) {
 			delete(w.containers, CentralService)
 		}, true, abortRestore, []string{CentralService}},

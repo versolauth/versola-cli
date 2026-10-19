@@ -106,32 +106,39 @@ func TestStandInMemory(t *testing.T) {
 
 func TestStandInServices(t *testing.T) {
 	st := plainState(1, 1)
-	if got := standInServices(st, RolloutOptions{NoSurge: true}, false); got != nil {
+	if got := standInServices(st, RolloutOptions{NoSurge: true}, false, false); got != nil {
 		t.Errorf("no surge: %v", got)
 	}
-	if got := fmt.Sprint(standInServices(st, RolloutOptions{}, false)); got != "[auth edge]" {
+	if got := fmt.Sprint(standInServices(st, RolloutOptions{}, false, false)); got != "[auth edge]" {
 		t.Errorf("a new rollout: %v", got)
 	}
 	under := preparedState(old(1), old(1))
 	under.Surge = map[string]int{AuthService: 2}
-	if got := standInServices(under, RolloutOptions{}, false); len(got) != 1 || got[0] != EdgeService {
+	if got := standInServices(under, RolloutOptions{}, false, false); len(got) != 1 || got[0] != EdgeService {
 		t.Errorf("auth's stand-in already runs: %v", got)
 	}
 	// Continuing a rollout whose auth is done (recorded at the target):
 	// no stand-in for auth any more, so no check for one.
 	p := preparedState([]state.Slot{{N: 1, Version: toV}}, old(1))
-	if got := fmt.Sprint(standInServices(p, RolloutOptions{}, false)); got != "[edge]" {
+	if got := fmt.Sprint(standInServices(p, RolloutOptions{}, false, false)); got != "[edge]" {
 		t.Errorf("auth done: %v", got)
 	}
 	// Everything recorded at the target (cut off in finish): nothing.
 	p.SetSlots(EdgeService, []state.Slot{{N: 1, Version: toV}})
-	if got := standInServices(p, RolloutOptions{}, false); got != nil {
+	if got := standInServices(p, RolloutOptions{}, false, false); got != nil {
 		t.Errorf("all done: %v", got)
 	}
 	// An abort checks every service: untouched replicas are recorded at the
 	// version it goes back to and still get moved behind a stand-in.
-	if got := fmt.Sprint(standInServices(p, RolloutOptions{}, true)); got != "[auth edge]" {
+	if got := fmt.Sprint(standInServices(p, RolloutOptions{}, true, false)); got != "[auth edge]" {
 		t.Errorf("abort: %v", got)
+	}
+	// Behind the proxy's front, central gets a stand-in too -- first.
+	if got := fmt.Sprint(standInServices(st, RolloutOptions{}, false, true)); got != "[central auth edge]" {
+		t.Errorf("central fronted: %v", got)
+	}
+	if got := fmt.Sprint(standInServices(p, RolloutOptions{}, true, true)); got != "[central auth edge]" {
+		t.Errorf("abort, central fronted: %v", got)
 	}
 }
 

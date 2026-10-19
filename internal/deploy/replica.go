@@ -440,8 +440,8 @@ func (o dockerReplicaOps) waitDrained() { proxy.WaitDrained(o.mode) }
 func (o dockerReplicaOps) save(service string, slots []state.Slot) error {
 	return state.SaveSlots(service, slots)
 }
-func (o dockerReplicaOps) writeReplicas(_, auth, edge []replica) error {
-	return writeReplicasFile(o.dir, filepath.Base(o.composePath), auth, edge)
+func (o dockerReplicaOps) writeReplicas(central, auth, edge []replica) error {
+	return writeReplicasFile(o.dir, filepath.Base(o.composePath), central, auth, edge)
 }
 
 // CheckReplicaRequest is everything about a `replica add|remove` that can be

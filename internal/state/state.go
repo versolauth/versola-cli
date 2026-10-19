@@ -198,7 +198,8 @@ type State struct {
 	MountedBundleDirs []string `json:"mountedBundleDirs,omitempty"`
 
 	// Slots records, per scalable service (compose service name of its
-	// first replica: "auth", "edge"), which replica slots are deployed and
+	// first replica: "auth", "edge", and "central" -- which has one replica
+	// but gets a stand-in during a rolling upgrade), which replica slots are deployed and
 	// at which version -- see package topology for what a slot is. Absent
 	// (nil) means one replica in slot 1 at Version, which is what every
 	// deployment made before replicas existed is; ActiveSlots turns that
@@ -281,7 +282,7 @@ func (s *State) RequireCurrent() error {
 }
 
 // MixedVersions explains why the recorded replicas are not one plain
-// deployment of Version -- a replica of auth or edge recorded at another
+// deployment of Version -- a replica of central, auth or edge recorded at another
 // version, or a stand-in slot (Surge) -- or returns "" when they are. That
 // is the state a rolling upgrade leaves while it is under way (or after it
 // was cut off), and only the rolling upgrade can carry it on: `up` and
@@ -289,7 +290,7 @@ func (s *State) RequireCurrent() error {
 // which way the upgrade was going.
 func (s *State) MixedVersions() string {
 	var why []string
-	for _, svc := range []string{"auth", "edge"} {
+	for _, svc := range []string{"central", "auth", "edge"} {
 		var other []string
 		for _, sl := range s.ActiveSlots(svc) {
 			if sl.Version != s.Version {
@@ -809,7 +810,7 @@ func RestorePrevious(bundle string, migratedAt time.Time, keep ...string) error 
 	}
 	prev := s.PreviousVersion
 	slots := map[string][]Slot{}
-	for _, svc := range []string{"auth", "edge"} {
+	for _, svc := range []string{"central", "auth", "edge"} {
 		for _, sl := range s.ActiveSlots(svc) {
 			slots[svc] = append(slots[svc], Slot{N: sl.N, Version: prev})
 		}

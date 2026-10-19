@@ -137,6 +137,7 @@ func TestRestorePrevious(t *testing.T) {
 		AuthURL: "https://id.example.com", PostgresHost: "127.0.0.1:5432", MountedBundleDirs: []string{"bundle-old", "bundle-new"}, SecretsRevision: 3}
 	st.SetSlots("auth", []Slot{{N: 1, Version: "0.6.2"}, {N: 2, Version: "0.6.2"}})
 	st.SetSlots("edge", []Slot{{N: 1, Version: "0.6.2"}})
+	st.SetSlots("central", []Slot{{N: 1, Version: "0.6.2"}})
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestRestorePrevious(t *testing.T) {
 	if s.MigratedAt == nil || !s.MigratedAt.Equal(at) || s.SecretsRevision != 3 {
 		t.Errorf("migratedAt %v, secrets revision %d", s.MigratedAt, s.SecretsRevision)
 	}
-	if got := slotNs(s.ActiveSlots("auth")); !reflect.DeepEqual(got, []int{1, 2}) || s.ActiveSlots("edge")[0].Version != "0.6.2" {
+	if got := slotNs(s.ActiveSlots("auth")); !reflect.DeepEqual(got, []int{1, 2}) || s.ActiveSlots("edge")[0].Version != "0.6.2" || s.Slots["central"] != nil {
 		t.Errorf("slots: %v %v", s.ActiveSlots("auth"), s.ActiveSlots("edge"))
 	}
 	if got := bundles(t, dir); !reflect.DeepEqual(got, []string{"bundle-old", "bundle-openbao"}) {

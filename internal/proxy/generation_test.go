@@ -337,3 +337,23 @@ func TestUsesGenerationsAcceptsCRLF(t *testing.T) {
 		t.Error("a bundle without the mount is not generations")
 	}
 }
+
+func TestCurrentFrontsCentral(t *testing.T) {
+	dir := t.TempDir()
+	if CurrentFrontsCentral(dir) || CurrentFrontsCentral("") {
+		t.Error("nothing generated yet: no front")
+	}
+	conf := filepath.Join(dir, CurrentGeneration, "conf.d")
+	if err := os.MkdirAll(conf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if CurrentFrontsCentral(dir) {
+		t.Error("a generation without central.conf: no front")
+	}
+	if err := os.WriteFile(filepath.Join(conf, "central.conf"), []byte("server {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !CurrentFrontsCentral(dir) {
+		t.Error("central.conf in current: fronted")
+	}
+}

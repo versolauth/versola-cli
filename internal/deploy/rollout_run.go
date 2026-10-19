@@ -218,8 +218,11 @@ func AbortPlan(st *state.State, o RolloutOptions) string {
 	b.WriteString("   - if no container was started from the new version's configuration yet: the previous one becomes\n" +
 		"     the active one again and nothing running is touched;\n")
 	fmt.Fprintf(&b, "   - otherwise %s is configured again (versola-tools, the secrets plan -- what OpenBao holds is kept),\n", to)
-	fmt.Fprintf(&b, "     central is stopped and started on it, and every auth and edge replica is moved to it as a rollout\n     would (%s), including the replicas that never left %s:\n",
-		map[bool]string{true: "without a stand-in", false: "a stand-in first; a stand-in of " + from + " is retired"}[o.NoSurge], to)
+	how := map[bool]string{true: "without a stand-in", false: "a stand-in first; a stand-in of " + from + " is retired"}[o.NoSurge]
+	if _, ok := st.Surge[CentralService]; ok && o.NoSurge {
+		how += " -- central's stand-in of " + from + " is retired all the same"
+	}
+	fmt.Fprintf(&b, "     and central, auth and edge are moved to it as a rollout would (%s; central without a stand-in\n     stops and starts in place), including the replicas that never left %s:\n", how, to)
 	b.WriteString("     they mount files of the previous configuration, which is removed at the end.\n")
 	b.WriteString("\n  If it stops (an error, Ctrl-C, a dropped SSH session), `versola rollout --abort` again continues it.\n")
 	return b.String()
@@ -265,9 +268,21 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 	prepared := st.RolloutUnderway()
 	fmt.Fprintf(&b, "   1. prepare %s: versola-tools, the secrets plan (new secrets go into OpenBao), a new bundle -- nothing running changes%s\n", version, done(prepared))
 	fmt.Fprintf(&b, "   2. migrate the database (migrations can't be rolled back -- back it up first)%s\n", done(prepared && st.MigratedAt != nil))
-	b.WriteString("   3. central: stopped and started on the new version -- the admin console and self-registration are\n      unavailable until it is ready; auth and edge keep serving from their caches\n")
-	if dir, err := bundleDirOf(st); err == nil && !st.RolloutUnderway() && requireCentralMoved(st, dir) != nil {
-		b.WriteString("      (This deployment predates the proxy's front of central: central also moves to ports 28090/28091 and\n      the proxy takes over 8090 once auth and edge are checked, so the gap is somewhat longer, once.)\n")
+	centralDone := prepared && allAt(st.ActiveSlots(CentralService), version) && st.Slots[CentralService] == nil && st.MigratedAt != nil
+	switch standIn, hasStandIn := st.Surge[CentralService]; {
+	case centralDone && !hasStandIn:
+		fmt.Fprintf(&b, "   3. central: on %s  [done]\n", version)
+	case hasStandIn:
+		fmt.Fprintf(&b, "   3. central: stand-in %s already started; then central is recreated on the new version; then the\n      stand-in goes -- central stays reachable throughout\n", topology.SlotService(CentralService, standIn))
+	case centralStandsIn(st, o):
+		b.WriteString("   3. central: a stand-in on the new version (central-2) next to the running one, behind the proxy;\n      then central is recreated on it and the stand-in goes -- the admin console stays available\n")
+	default:
+		b.WriteString("   3. central: stopped and started on the new version -- the admin console and self-registration are\n      unavailable until it is ready; auth and edge keep serving from their caches\n")
+		if dir, err := bundleDirOf(st); err == nil && !st.RolloutUnderway() && requireCentralMoved(st, dir) != nil {
+			b.WriteString("      (This deployment predates the proxy's front of central: central also moves to ports 28090/28091 and\n      the proxy takes over 8090 once auth and edge are checked, so the gap is somewhat longer, once. The\n      next rollout runs central through a stand-in, without a gap.)\n")
+		} else if !o.NoSurge {
+			b.WriteString("      (The running proxy does not front central yet, so central can't have a stand-in this time.)\n")
+		}
 	}
 	step := 4
 	for _, svc := range []string{AuthService, EdgeService} {
@@ -362,10 +377,12 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	if o.NoSurge {
 		return nil
 	}
-	for _, svc := range []string{AuthService, EdgeService} {
-		if _, standIn := st.Surge[svc]; standIn {
-			continue
-		}
+	centralFronted := centralStandsIn(st, o)
+	// The services that will still start a stand-in: its ports, memory and
+	// Postgres connections are checked (a service already done, or with a
+	// stand-in running, starts none).
+	services := standInServices(st, o, abort, centralFronted)
+	for _, svc := range services {
 		free, err := freeSlots(st.ActiveSlots(svc), 1)
 		if err != nil {
 			return fmt.Errorf("%s: no free slot for a stand-in replica (%w) -- use --no-surge", svc, err)
@@ -383,7 +400,6 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	// The memory and the Postgres connections a stand-in takes (see
 	// rollout_preflight.go). Memory is checked again right before each
 	// stand-in starts: what is free changes while the rollout runs.
-	services := standInServices(st, o, abort)
 	warn := func(f string, a ...any) { fmt.Printf(f, a...) }
 	if err := checkStandInMemory(hostMemory{dockerRolloutOps{project: topo.Project()}}, st, services, warn); err != nil {
 		return err
@@ -494,9 +510,29 @@ func runEngine(st *state.State, o RolloutOptions) error {
 	docker.SetShielded(true)
 	defer docker.SetShielded(false)
 
+	centralInPlace := !centralStandsIn(st, o)
 	e := &rolloutEngine{st: st, topo: topo, bundleDir: filepath.Dir(composePath), ops: ops, out: func(f string, a ...any) { fmt.Printf(f, a...) },
-		fronts: fronts, genDir: genDir, surge: !o.NoSurge, allowDowntime: o.AllowDowntime, interrupted: interrupted}
+		fronts: fronts, genDir: genDir, surge: !o.NoSurge, allowDowntime: o.AllowDowntime, centralInPlace: centralInPlace, interrupted: interrupted}
 	return e.run()
+}
+
+// centralStandsIn reports whether this run moves central through a stand-in
+// (see rolloutEngine.centralInPlace): one is recorded already (only that
+// path retires it), or there is to be one (surge) and the proxy nginx runs
+// now fronts central's PORT -- before that, the old central itself holds the
+// port and a stand-in could not be reached there.
+func centralStandsIn(st *state.State, o RolloutOptions) bool {
+	if _, ok := st.Surge[CentralService]; ok {
+		return true
+	}
+	if o.NoSurge {
+		return false
+	}
+	dir, err := proxyGenerationsDir()
+	if err != nil {
+		return false
+	}
+	return proxy.CurrentFrontsCentral(dir)
 }
 
 // abortOps is what deciding how to abort needs besides the record: the
@@ -564,10 +600,13 @@ func chooseAbortPath(st *state.State, ops abortOps, activeDir string) (path abor
 	if _, err := os.Stat(filepath.Join(activeDir, prev, "compose.yml")); err != nil {
 		return abortRollBack, "", nil, nil
 	}
-	services := []string{CentralService}
-	for _, svc := range []string{AuthService, EdgeService} {
+	var services []string
+	for _, svc := range rolloutServices {
 		for _, sl := range st.ActiveSlots(svc) {
-			if sl.Version != st.PreviousVersion {
+			if sl.Version != st.PreviousVersion && (svc != CentralService || st.Slots[CentralService] != nil) {
+				// (central's slots are recorded since the rollout records
+				// them; one prepared by an older versola-cli has none, and
+				// its container is what tells.)
 				return abortRollBack, "", nil, nil
 			}
 			services = append(services, topology.SlotService(svc, sl.N))
@@ -1065,7 +1104,15 @@ func RolloutSummary(st *state.State) string {
 	if st.MigratedAt == nil {
 		b.WriteString("  migrations: not applied yet\n")
 	}
-	for _, svc := range []string{AuthService, EdgeService} {
+	// central's slots are recorded once the rollout differs from one plain
+	// replica at Version (a rollout prepared by an older versola-cli never
+	// records them): otherwise its container's image says.
+	_, centralRecorded := st.Slots[CentralService]
+	services := []string{AuthService, EdgeService}
+	if centralRecorded {
+		services = rolloutServices
+	}
+	for _, svc := range services {
 		var parts []string
 		slots := st.ActiveSlots(svc)
 		sort.Slice(slots, func(i, j int) bool { return slots[i].N < slots[j].N })
@@ -1078,6 +1125,8 @@ func RolloutSummary(st *state.State) string {
 		}
 		fmt.Fprintf(&b, "  %s: %s\n", svc, strings.Join(parts, ", "))
 	}
-	b.WriteString("  (central's version: see the image in the list below)")
-	return b.String()
+	if !centralRecorded {
+		b.WriteString("  (central's version: see the image in the list below)")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }

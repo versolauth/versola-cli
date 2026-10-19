@@ -128,9 +128,10 @@ run() {
   case "$abort_at" in
     "") ;;
     prepared) pattern="Pulling the images"; versions="$A" ;;
-    central) pattern="Waiting for central to be ready" ;;
-    standin) pattern="takes traffic" ;;
-    midway) pattern="runs $B and takes traffic" ;;
+    central) pattern="Starting a stand-in, central-2|Waiting for central to be ready" ;;
+    # auth's and edge's steps, not central's (which come first: --abort-at central)
+    standin) pattern="(auth|edge)(-[0-9]+)? (runs [^ ]+ and )?takes traffic" ;;
+    midway) pattern="(auth|edge)(-[0-9]+)? runs ${B//./\\.} and takes traffic" ;;
     *) die "--abort-at: prepared, central, standin or midway" ;;
   esac
   command -v docker >/dev/null || die "no docker"
@@ -146,7 +147,7 @@ $found"
   local kb; kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
   [ "${kb:-0}" -ge $((3584 * 1024)) ] || die "only $((${kb:-0} / 1024)) MiB of memory available; the CLI wants more than 3.25 GiB free for a first configure"
   [ "$(df -Pk "$PWD" | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ] || die "less than 4 GiB of free disk in $PWD"
-  for p in 2821 8082 8083 8090 8200 28090 28091; do
+  for p in 2821 8082 8083 8090 8200 28090 28091 28190 28191; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use"; fi
   done
 
@@ -177,7 +178,11 @@ $found"
 
   stop="$work/stop"; rm -f "$stop"
   "$work/traffic" -h >/dev/null 2>&1 || die "cannot execute $work/traffic (is $E2E_HOME on a noexec mount?)"
-  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
+  # Without a stand-in central restarts in place: its front is not part of
+  # the zero-failure promise then.
+  local central_target="127.0.0.1:8090"
+  [ -z "$surge" ] || central_target=""
+  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
   rpid=""
   # A killed or failed script must not leave the client hammering the proxy,
@@ -195,7 +200,7 @@ $found"
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
-      if [ -z "$sent" ] && grep -qF "$pattern" "$log"; then
+      if [ -z "$sent" ] && grep -qE "$pattern" "$log"; then
         kill -TERM "$rpid" 2>/dev/null || true; sent=yes
       fi
       sleep 0.5
@@ -225,8 +230,8 @@ $found"
   wait "$tpid" || trc=$?
 
   local crc=0
-  check_central "$A" || crc=1
-  [ "$abort_at" != "" ] || check_central "$B" || crc=1
+  # Where the run ended: back on A after an abort, on B after a rollout.
+  if [ -n "$abort_at" ]; then check_central "$A" || crc=1; else check_central "$B" || crc=1; fi
 
   say "traffic report"
   cat "$work/traffic.txt"

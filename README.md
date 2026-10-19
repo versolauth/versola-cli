@@ -453,8 +453,8 @@ on 9082/9083 (set in `overrides.yml` next to the compose file), the next
 on 9182/9183, and so on. Those numbers follow the compose file's APORT and
 MPORT; versola-tools' configs are unchanged.
 
-Central is behind the proxy the same way, as the first step towards
-updating it without downtime: the proxy listens on `127.0.0.1:8090` (the
+Central is behind the proxy the same way, so that a rollout can move it
+without downtime (through a stand-in, below): the proxy listens on `127.0.0.1:8090` (the
 compose file's central PORT, which auth, edge and the admin console call --
 their URLs are unchanged) and balances over the central replicas. Central
 itself listens 20000 higher: PORT and DPORT on 28090/28091 (set in
@@ -494,16 +494,24 @@ This needs a Versola release whose versola-tools ships the admin console;
 `versola rollout <version> --assume-compatible` moves a running vps
 deployment to another Versola version without stopping it: the new
 version is prepared next to the running one (versola-tools, the secrets
-plan), the database is migrated, central is stopped and started on the
-new version (the admin console and self-registration are down until it is
-ready; auth and edge keep serving), then each auth and edge replica is
-replaced one at a time behind a stand-in replica in a free slot, and the
-proxy moves to the new configuration. Cut off anywhere (an error, Ctrl-C,
+plan), the database is migrated, central is moved to the new version
+behind a stand-in (central-2, on 28190/28191, next to the running central
+behind the proxy's front of 8090; then central itself is recreated and the
+stand-in goes -- the admin console and self-registration stay available),
+then each auth and edge replica is replaced one at a time behind a
+stand-in replica in a free slot, and the proxy moves to the new
+configuration. Central keeps one replica; the stand-in exists only while
+the rollout moves it. Without a stand-in (`--no-surge`), or when the
+running proxy does not front central yet (a deployment from before that,
+whose first rollout moves central to its new ports), central is stopped and
+started in place instead: the admin console and self-registration are down
+until it is ready, auth and edge keep serving from their caches. Cut off anywhere (an error, Ctrl-C,
 a dropped SSH session), the same command continues; progress is read back
 from `state.json` and the containers. `--dry-run` shows the plan, the
 secrets plan and the pending migrations and changes nothing. `--no-surge`
 replaces replicas without a stand-in (one fewer serves meanwhile; with one
-replica it needs `--allow-downtime`).
+replica it needs `--allow-downtime`; central is restarted in place, as
+before stand-ins).
 
 **Compatibility is yours to confirm.** During a rollout the running
 version works on the new version's schema, and an abort runs it there
@@ -523,8 +531,8 @@ came from:
   the previous configuration becomes the active one again; no container
   is touched;
 - otherwise the previous version is configured again and moved to the same
-  way, stand-in first: central restarts once more, and every auth and edge
-  replica is recreated -- also the ones that never left the old version,
+  way, stand-in first: central is moved back behind a stand-in (in place
+  with `--no-surge`), and every auth and edge replica is recreated -- also the ones that never left the old version,
   because they still mount the previous configuration's files, which are
   removed at the end. A stand-in of the new version is retired before one
   of the old version starts.
@@ -556,8 +564,8 @@ neither):
   right before each stand-in. It has to run on the vps itself: with Docker
   pointed at another host it refuses.
 - Postgres connections: a stand-in opens its whole pool at once (10 for
-  auth, 10 plus a LISTEN connection for edge, read from the bundle's
-  configs). `psql` in a throwaway `postgres:18-alpine` container (pulled
+  auth, 10 plus a LISTEN connection for edge and for central, read from the
+  bundle's configs). `psql` in a throwaway `postgres:18-alpine` container (pulled
   the first time) asks the server how many more client connections it
   takes (counting other roles' sessions too); fewer than the pool plus 3 is
   a refusal. The connection uses the `sslmode` of the service's URL
@@ -578,13 +586,21 @@ neither):
 
 **Short outages a rollout does have:**
 
-- central is stopped and started (it is not replicated): the admin console
-  and self-registration are down until it is ready -- usually under a
-  minute, not yet measured on a loaded server; the rollout prints how long
-  it was. It waits up to 5 minutes (a replica: 2 minutes); if central is still not
+- only without a central stand-in (`--no-surge`, or the first rollout of a
+  deployment whose proxy does not front central yet): central is stopped
+  and started in place, so the admin console and self-registration are down
+  until it is ready -- usually under a minute, not yet measured on a loaded
+  server; the rollout prints how long it was. Any wait for central (its
+  stand-in too) is up to 5 minutes; a replica's, 2 minutes. If central is still not
   ready it stops, leaving auth and edge untouched: run the same command
   again once central is up (it only waits again). `--abort` also works but
   recreates every auth and edge replica. auth and edge keep serving.
+  If their five-minute cache refresh falls into that gap, seen on a stand:
+  their outbound HTTP pool (`fixed`, 128 slots by default) keeps the refused
+  connections and hands them out one per request, so the refreshes keep
+  failing for about 128 / 13 refreshes (some 50 minutes) after central is
+  back; they serve from their caches meanwhile. `HTTP_CLIENT_POOL_KIND=dynamic`
+  in their environment avoids it (see Versola's `ReloadingCache`).
 - auth's mutual-TLS port (8083) is passed through as TCP: every proxy
   reload (each replica taken out or put back) ends the connections the old
   nginx workers hold, 30 s later. Idle ones are simply reopened by edge; a

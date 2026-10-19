@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -84,6 +86,9 @@ type world struct {
 	oneOffs            []string        // running `compose run` containers
 	memShort           map[string]bool // standInMemory refuses for these services
 	memChecked         []string
+	// centralStandIn: the proxy fronts central (CurrentFrontsCentral), so a
+	// rollout with surge moves central through a stand-in.
+	centralStandIn bool
 }
 
 func newWorld(t *testing.T, st *state.State) *world {
@@ -108,8 +113,7 @@ func newWorld(t *testing.T, st *state.State) *world {
 			w.urls[u] = r.Service
 		}
 	}
-	w.containers[CentralService] = &fakeContainer{image: imageOf(CentralService, fromV), workDir: oldBundleDir, running: true, ready: true}
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range rolloutServices {
 		var names []string
 		for _, sl := range st.ActiveSlots(svc) {
 			name := topology.SlotService(svc, sl.N)
@@ -244,7 +248,7 @@ func (w *world) warm(r replica) error {
 
 func (w *world) applyUpstreams(c proxy.Config) error {
 	next := map[string][]string{}
-	for svc, bs := range map[string][]proxy.Backend{AuthService: c.Auth, EdgeService: c.Edge} {
+	for svc, bs := range map[string][]proxy.Backend{CentralService: c.Central, AuthService: c.Auth, EdgeService: c.Edge} {
 		ready := 0
 		for _, b := range bs {
 			next[svc] = append(next[svc], b.Service)
@@ -300,9 +304,9 @@ func (w *world) save(service string, slots []state.Slot) error {
 	return nil
 }
 
-func (w *world) writeReplicas(_, auth, edge []replica) error {
+func (w *world) writeReplicas(central, auth, edge []replica) error {
 	var files []string
-	for _, r := range append(append([]replica{}, auth...), edge...) {
+	for _, r := range append(append(append([]replica{}, central...), auth...), edge...) {
 		if r.Slot > 1 {
 			files = append(files, r.Service)
 		}
@@ -362,14 +366,21 @@ func preparedState(auth, edge []state.Slot) *state.State {
 	st := &state.State{Target: "vps", Version: toV, PreviousVersion: fromV, ProxyMode: proxy.ModeExternal,
 		AuthURL: "https://id.example.com", PostgresHost: "127.0.0.1:5432", BundleDir: "bundle-new",
 		MountedBundleDirs: []string{"bundle-old"}}
+	// What the staged configure records: central's replica at the version
+	// it runs.
+	st.SetSlots(CentralService, old(1))
 	st.SetSlots(AuthService, auth)
 	st.SetSlots(EdgeService, edge)
 	return st
 }
 
 func engineFor(w *world, surge, downtime bool) *rolloutEngine {
-	return &rolloutEngine{st: w.load(), topo: w.topo, bundleDir: w.targetDir, ops: w, out: func(string, ...any) {},
-		fronts: proxy.Fronts{Additional: 8082, MutualTLS: 8083, Central: 8090}, genDir: "/gen", surge: surge, allowDowntime: downtime}
+	st := w.load()
+	// As centralStandsIn decides it.
+	_, recorded := st.Surge[CentralService]
+	inPlace := !recorded && (!surge || !w.centralStandIn)
+	return &rolloutEngine{st: st, topo: w.topo, bundleDir: w.targetDir, ops: w, out: func(string, ...any) {},
+		fronts: proxy.Fronts{Additional: 8082, MutualTLS: 8083, Central: 8090}, genDir: "/gen", surge: surge, allowDowntime: downtime, centralInPlace: inPlace}
 }
 
 func old(ns ...int) []state.Slot {
@@ -387,8 +398,8 @@ func (w *world) done(t *testing.T, authSlots, edgeSlots []int) {
 	if st.RolloutUnderway() || st.MixedVersions() != "" || st.MigratedAt == nil {
 		t.Errorf("state after the rollout: underway=%v mixed=%q migrated=%v", st.RolloutUnderway(), st.MixedVersions(), st.MigratedAt)
 	}
-	want := map[string]bool{CentralService: true}
-	for svc, ns := range map[string][]int{AuthService: authSlots, EdgeService: edgeSlots} {
+	want := map[string]bool{}
+	for svc, ns := range map[string][]int{CentralService: {1}, AuthService: authSlots, EdgeService: edgeSlots} {
 		if got := slotNumbers(st.ActiveSlots(svc)); !reflect.DeepEqual(got, ns) {
 			t.Errorf("%s slots %v, want %v", svc, got, ns)
 		}
@@ -517,14 +528,18 @@ func TestRolloutStandInMarkerBracketsTheContainer(t *testing.T) {
 // replica that isn't ready and never to fewer than before.
 func TestRolloutResumesAfterACrashAnywhere(t *testing.T) {
 	for _, layout := range []struct {
-		name       string
-		auth, edge []state.Slot
+		name           string
+		auth, edge     []state.Slot
+		centralStandIn bool
 	}{
-		{"one replica each", old(1), old(1)},
-		{"two auth, one edge", old(1, 2), old(1)},
+		{"one replica each", old(1), old(1), false},
+		{"two auth, one edge", old(1, 2), old(1), false},
+		{"one replica each, central stand-in", old(1), old(1), true},
+		{"two auth, one edge, central stand-in", old(1, 2), old(1), true},
 	} {
 		// How many calls a clean run makes.
 		clean := newWorld(t, preparedState(layout.auth, layout.edge))
+		clean.centralStandIn = layout.centralStandIn
 		if err := engineFor(clean, true, false).run(); err != nil {
 			t.Fatal(err)
 		}
@@ -533,6 +548,7 @@ func TestRolloutResumesAfterACrashAnywhere(t *testing.T) {
 				name := fmt.Sprintf("%s/crash at call %d (%s, after=%v)", layout.name, i, clean.callNames[i-1], after)
 				t.Run(name, func(t *testing.T) {
 					w := newWorld(t, preparedState(layout.auth, layout.edge))
+					w.centralStandIn = layout.centralStandIn
 					w.crashAt, w.crashAfter = i, after
 					err := engineFor(w, true, false).run()
 					if !errors.Is(err, errCrash) && err != nil {
@@ -976,5 +992,174 @@ func TestRolloutRoutesCentralThroughItsFront(t *testing.T) {
 	}
 	if got := w.urlOf(CentralService); got != "http://localhost:28091/readiness" {
 		t.Errorf("central is waited for at %q", got)
+	}
+}
+
+// With the proxy in front of central and a stand-in wanted, central is moved
+// like a replicated service: a stand-in of the new version first, then the
+// one replica, then the stand-in goes -- and the front never routes to fewer
+// than one ready central. Both are waited for as long as central is.
+func TestRolloutCentralThroughAStandIn(t *testing.T) {
+	w := newWorld(t, preparedState(old(1), old(1)))
+	w.centralStandIn = true
+	w.minUp[CentralService] = 1
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	w.done(t, []int{1}, []int{1})
+	var got []string
+	for _, e := range w.events {
+		if strings.HasPrefix(e, "compose up -d --no-deps central") || strings.HasPrefix(e, "rm central") || strings.HasPrefix(e, "surge map[central") || e == "surge map[]" && len(got) == 4 {
+			got = append(got, e)
+		}
+	}
+	want := []string{"surge map[central:2]", "compose up -d --no-deps central-2", "compose up -d --no-deps central", "rm central-2", "surge map[]"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("central's steps:\n got %v\nwant %v", got, want)
+	}
+	if indexOf(w.events, "rm central-2") > indexOf(w.events, "surge map[auth:2]") {
+		t.Error("auth started before central was done")
+	}
+	for _, svc := range []string{"central", "central-2"} {
+		if w.waits[svc] != centralReadyTimeout {
+			t.Errorf("%s waited for %s, want %s", svc, w.waits[svc], centralReadyTimeout)
+		}
+	}
+	if indexOf(w.memChecked, CentralService) < 0 {
+		t.Error("no memory/connections check before central's stand-in")
+	}
+}
+
+// Without a stand-in (--no-surge) central is restarted in place as before,
+// whatever the proxy fronts -- and needs no --allow-downtime.
+func TestRolloutCentralInPlaceWithoutSurge(t *testing.T) {
+	w := newWorld(t, preparedState(old(1, 2), old(1, 2)))
+	w.centralStandIn = true
+	w.minUp[AuthService], w.minUp[EdgeService] = 1, 1 // one replica fewer while each is replaced
+	if err := engineFor(w, false, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	w.done(t, []int{1, 2}, []int{1, 2})
+	for _, e := range w.events {
+		if strings.Contains(e, "central-2") || strings.HasPrefix(e, "surge map[central") {
+			t.Errorf("a central stand-in without surge: %s", e)
+		}
+	}
+}
+
+// A central stand-in that never becomes ready is taken away again, and the
+// running central keeps serving: nothing else changed.
+func TestRolloutDropsACentralStandInThatDoesNotComeUp(t *testing.T) {
+	w := newWorld(t, preparedState(old(1), old(1)))
+	w.centralStandIn = true
+	w.never["central-2"] = true
+	err := engineFor(w, true, false).run()
+	if err == nil || !strings.Contains(err.Error(), "stand-in central-2 never became ready") {
+		t.Fatalf("got %v", err)
+	}
+	st := w.load()
+	if _, ok := st.Surge[CentralService]; ok || len(st.ActiveSlots(CentralService)) != 1 {
+		t.Errorf("state: surge %v, central slots %v", st.Surge, st.ActiveSlots(CentralService))
+	}
+	if w.containers["central-2"] != nil {
+		t.Error("the stand-in's container is left")
+	}
+	if c := w.containers[CentralService]; c == nil || c.image != imageOf(CentralService, fromV) || !c.running {
+		t.Errorf("the running central was touched: %+v", c)
+	}
+	if got := w.upstream[CentralService]; !reflect.DeepEqual(got, []string{CentralService}) {
+		t.Errorf("central's upstream %v", got)
+	}
+}
+
+// The plan says how central moves: through a stand-in once the running proxy
+// fronts it, in place otherwise or without surge; and the summary shows
+// central's slots once the rollout records them.
+func TestRolloutPlanCentral(t *testing.T) {
+	st := rolloutGuardState(t)
+	inPlace := "central: stopped and started"
+	standIn := "central: a stand-in on the new version (central-2)"
+	if plan := RolloutPlan(st, toV, RolloutOptions{}); !strings.Contains(plan, inPlace) || !strings.Contains(plan, "does not front central yet") {
+		t.Errorf("no front yet:\n%s", plan)
+	}
+	dir, err := proxyGenerationsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(dir, proxy.CurrentGeneration, "conf.d")
+	if err := os.MkdirAll(conf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(conf, "central.conf"), []byte("server {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !centralStandsIn(st, RolloutOptions{}) || centralStandsIn(st, RolloutOptions{NoSurge: true}) {
+		t.Error("centralStandsIn: fronted with surge only")
+	}
+	if plan := RolloutPlan(st, toV, RolloutOptions{}); !strings.Contains(plan, standIn) {
+		t.Errorf("fronted:\n%s", plan)
+	}
+	if plan := RolloutPlan(st, toV, RolloutOptions{NoSurge: true}); !strings.Contains(plan, inPlace) || strings.Contains(plan, "does not front") {
+		t.Errorf("--no-surge:\n%s", plan)
+	}
+	// A recorded stand-in is carried on, with or without surge.
+	p := preparedState(old(1), old(1))
+	p.Surge = map[string]int{CentralService: 2}
+	p.SetSlots(CentralService, []state.Slot{{N: 1, Version: fromV}, {N: 2, Version: toV}})
+	if !centralStandsIn(p, RolloutOptions{NoSurge: true}) {
+		t.Error("a recorded central stand-in must go through the stand-in path")
+	}
+	if plan := RolloutPlan(p, toV, RolloutOptions{NoSurge: true}); !strings.Contains(plan, "stand-in central-2 already started") {
+		t.Errorf("recorded stand-in:\n%s", plan)
+	}
+	sum := RolloutSummary(p)
+	if !strings.Contains(sum, "central: slot 1 at 0.6.2, slot 2 at 0.7.0 (stand-in)") || strings.Contains(sum, "see the image") {
+		t.Errorf("summary:\n%s", sum)
+	}
+}
+
+// A run that restarted central in place and gave up waiting for it, then a
+// run that would move central through a stand-in (the operator dropped
+// --no-surge): central is current but not ready, and is waited for -- the
+// rollout does not carry on to auth and edge, or finish, on its word.
+func TestRolloutWaitsForACentralItRoutedOnlyForWantOfAnother(t *testing.T) {
+	w := newWorld(t, preparedState(old(1), old(1)))
+	w.centralStandIn = true
+	w.never[CentralService] = true
+	if err := engineFor(w, false, false).run(); err == nil || !strings.Contains(err.Error(), "central never became ready") {
+		t.Fatalf("in place: %v", err)
+	}
+	err := engineFor(w, true, false).run()
+	if err == nil || !strings.Contains(err.Error(), "central never became ready") {
+		t.Fatalf("second run went on with central not ready: %v\n%v", err, w.events)
+	}
+	if indexOf(w.events, "compose up -d --no-deps auth-2") >= 0 || indexOf(w.events, "compose up -d --no-deps auth") >= 0 {
+		t.Error("auth was touched while central was not ready")
+	}
+	// Once central comes up, the same command finishes.
+	delete(w.never, CentralService)
+	w.containers[CentralService].ready = true
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	w.violations = nil // routed to central while it was down, for want of any other
+	w.done(t, []int{1}, []int{1})
+}
+
+// A rollout prepared by an older versola-cli records no central slots: the
+// running (old) central is read back from its container, and moved through
+// a stand-in all the same.
+func TestRolloutCentralWithoutRecordedSlots(t *testing.T) {
+	st := preparedState(old(1), old(1))
+	delete(st.Slots, CentralService)
+	w := newWorld(t, st)
+	w.containers[CentralService].image = imageOf(CentralService, fromV) // what runs
+	w.centralStandIn = true
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	w.done(t, []int{1}, []int{1})
+	if indexOf(w.events, "compose up -d --no-deps central-2") < 0 {
+		t.Errorf("no central stand-in: %v", w.events)
 	}
 }

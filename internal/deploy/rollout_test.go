@@ -325,6 +325,10 @@ func (w *world) inspect(service string) (containerInfo, error) {
 	return containerInfo{found: true, image: c.image, workDir: c.workDir, running: c.running}, nil
 }
 
+func (w *world) beginRollback(bundle string, _ time.Time) error {
+	return w.step("beginRollback "+bundle, nil)
+}
+
 func (w *world) restorePrevious(bundle string, _ time.Time) error {
 	return w.step("restore "+bundle, func() error {
 		w.restored = bundle

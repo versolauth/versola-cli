@@ -190,3 +190,70 @@ func slotNs(ss []Slot) []int {
 	}
 	return out
 }
+
+func TestBeginRollbackTurnsTheRecordRoundOnTheOldBundle(t *testing.T) {
+	dir := isolate(t)
+	for _, b := range []string{"bundle-old", "bundle-new", "bundle-openbao", "bundle-stray"} {
+		if err := os.MkdirAll(filepath.Join(dir, b), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bundle-old", "compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Target: "vps", Version: "0.7.0", PreviousVersion: "0.6.2", BundleDir: "bundle-new", ProxyMode: "external",
+		AuthURL: "https://id.example.com", PostgresHost: "127.0.0.1:5432", MountedBundleDirs: []string{"bundle-old", "bundle-new"},
+		SecretsRevision: 3, Surge: map[string]int{"auth": 2}}
+	// auth: slot 1 moved on, slot 2 never did; a stand-in of the new version.
+	st.SetSlots("auth", []Slot{{N: 1, Version: "0.7.0"}, {N: 2, Version: "0.6.2"}, {N: 3, Version: "0.7.0"}})
+	st.SetSlots("edge", []Slot{{N: 1, Version: "0.6.2"}})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	if err := BeginRollback("bundle-old", at, "bundle-openbao"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Version != "0.6.2" || s.PreviousVersion != "0.7.0" || !s.RollingBack || s.BundleDir != "bundle-old" || s.Surge["auth"] != 2 {
+		t.Errorf("state: %+v", s)
+	}
+	if s.MigratedAt == nil || !s.MigratedAt.Equal(at) || s.SecretsRevision != 3 {
+		t.Errorf("migratedAt %v, secrets revision %d", s.MigratedAt, s.SecretsRevision)
+	}
+	// What each slot is recorded at is not touched: the engine tells from the containers.
+	if got := s.ActiveSlots("auth"); !reflect.DeepEqual(got, []Slot{{N: 1, Version: "0.7.0"}, {N: 2, Version: "0.6.2"}, {N: 3, Version: "0.7.0"}}) {
+		t.Errorf("auth slots: %v", got)
+	}
+	// Containers of the moved replicas still mount the new bundle: both stay,
+	// the stray one and any other go, OpenBao's stays.
+	if got := bundles(t, dir); !reflect.DeepEqual(got, []string{"bundle-new", "bundle-old", "bundle-openbao"}) {
+		t.Errorf("bundles: %v", got)
+	}
+	if !reflect.DeepEqual(s.MountedBundleDirs, []string{"bundle-old", "bundle-new"}) {
+		t.Errorf("mounted: %v", s.MountedBundleDirs)
+	}
+	// Turned round once: a second call (the record already says it is going back) is refused.
+	if err := BeginRollback("bundle-old", at); err == nil {
+		t.Error("turned round twice")
+	}
+}
+
+func TestBeginRollbackNeedsTheOldBundle(t *testing.T) {
+	if err := os.MkdirAll(isolate(t), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Target: "vps", Version: "0.7.0", PreviousVersion: "0.6.2", BundleDir: "bundle-new", MountedBundleDirs: []string{"bundle-old", "bundle-new"}}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := BeginRollback("bundle-old", time.Now()); err == nil {
+		t.Error("went back to a bundle that is not there")
+	}
+	if s, _ := Load(); s.Version != "0.7.0" || s.PreviousVersion != "0.6.2" || s.RollingBack {
+		t.Errorf("the record changed: %+v", s)
+	}
+}

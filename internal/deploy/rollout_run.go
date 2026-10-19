@@ -56,7 +56,7 @@ const readyTimeout = 120 * time.Second
 // replicated, so while it starts the admin console and self-registration are
 // down whatever the wait is, and giving up early buys nothing -- a rollout
 // that stops here is finished by running it again (which only waits for
-// central again), while `--abort` recreates every auth and edge replica.
+// central again), while `--abort` restarts central once more, on the old version.
 // Its start on a loaded server is not measured yet (the rollout prints how
 // long it took); on an idle stand 0.7.1 was ready well within a minute.
 const centralReadyTimeout = 5 * time.Minute
@@ -217,13 +217,12 @@ func AbortPlan(st *state.State, o RolloutOptions) string {
 	b.WriteString("  Steps:\n")
 	b.WriteString("   - if no container was started from the new version's configuration yet: the previous one becomes\n" +
 		"     the active one again and nothing running is touched;\n")
-	fmt.Fprintf(&b, "   - otherwise %s is configured again (versola-tools, the secrets plan -- what OpenBao holds is kept),\n", to)
 	how := map[bool]string{true: "without a stand-in", false: "a stand-in first; a stand-in of " + from + " is retired"}[o.NoSurge]
 	if _, ok := st.Surge[CentralService]; ok && o.NoSurge {
 		how += " -- central's stand-in of " + from + " is retired all the same"
 	}
-	fmt.Fprintf(&b, "     and central, auth and edge are moved to it as a rollout would (%s; central without a stand-in\n     stops and starts in place), including the replicas that never left %s:\n", how, to)
-	b.WriteString("     they mount files of the previous configuration, which is removed at the end.\n")
+	fmt.Fprintf(&b, "   - otherwise the previous configuration becomes the active one again and what moved on to %s -- central,\n     auth and edge replicas -- is moved back to %s as a rollout would (%s; central without a stand-in\n     stops and starts in place). The replicas that never left %s are not touched.\n", from, to, how, to)
+	fmt.Fprintf(&b, "     (If that configuration is gone, %s is configured anew first -- versola-tools, the secrets plan, what\n     OpenBao holds is kept -- and every replica is then recreated from it.)\n", to)
 	b.WriteString("\n  If it stops (an error, Ctrl-C, a dropped SSH session), `versola rollout --abort` again continues it.\n")
 	return b.String()
 }
@@ -350,8 +349,10 @@ func openbaoSetUpByHand(target string) bool {
 
 // rolloutPreflight checks what the record cannot say, before anything
 // changes: the host ports each stand-in will take, the memory it needs and
-// the Postgres connections its pool opens.
-func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
+// the Postgres connections its pool opens. abort is the way back; reuse that
+// it goes back from the previous bundle, which leaves the replicas that never
+// moved alone (see standInServices).
+func rolloutPreflight(st *state.State, o RolloutOptions, abort, reuse bool) error {
 	// The rollout moves traffic by reloading the proxy; a stopped one would
 	// only get files, and nothing would be routed around a replica being
 	// replaced.
@@ -381,7 +382,7 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	// The services that will still start a stand-in: its ports, memory and
 	// Postgres connections are checked (a service already done, or with a
 	// stand-in running, starts none).
-	services := standInServices(st, o, abort, centralFronted)
+	services := standInServices(st, o, abort, reuse, centralFronted)
 	for _, svc := range services {
 		free, err := freeSlots(st.ActiveSlots(svc), 1)
 		if err != nil {
@@ -435,7 +436,7 @@ func centralMovePreflight(st *state.State, topo topology.Topology, bundleDir str
 // prepares the new version unless that is done, then carries the rollout
 // to the end. The caller holds state.Lock for the whole run.
 func Rollout(st *state.State, version string, o RolloutOptions) error {
-	if err := rolloutPreflight(st, o, false); err != nil {
+	if err := rolloutPreflight(st, o, false, false); err != nil {
 		return err
 	}
 	if !st.RolloutUnderway() {
@@ -536,10 +537,13 @@ func centralStandsIn(st *state.State, o RolloutOptions) bool {
 }
 
 // abortOps is what deciding how to abort needs besides the record: the
-// containers, and making the previous bundle the active one again.
+// containers, and making the previous bundle the active one again -- with
+// nothing to move (restorePrevious), or as the one the engine moves the
+// replicas that left it back to (beginRollback).
 type abortOps interface {
 	inspect(service string) (containerInfo, error)
 	restorePrevious(bundle string, migratedAt time.Time) error
+	beginRollback(bundle string, migratedAt time.Time) error
 	// oneOffsRunning names the running `compose run` containers of this
 	// project -- a migration (versola-<service>-migrate, or the migrate
 	// service) left running by a CLI that was killed.
@@ -553,10 +557,36 @@ const (
 	// abortRestore: nothing was started from the new bundle -- the previous
 	// bundle becomes the active one again; no container is touched.
 	abortRestore abortPath = iota
-	// abortRollBack: the previous version is configured again and rolled
-	// out by the engine.
+	// abortRollBack: the engine moves the replicas that left the previous
+	// version back to it, from the previous bundle made the active one again
+	// -- or, when that bundle is not there to be reused, from the previous
+	// version configured anew.
 	abortRollBack
 )
+
+// previousBundle is the earlier bundle of a rollout under way, when it can be
+// used again: the one other bundle the record keeps mounted, still with its
+// compose file on disk. Not when there are two or more (not a state a
+// rollout leaves), or it is gone.
+func previousBundle(st *state.State, activeDir string) (string, bool) {
+	prev := ""
+	for _, d := range st.MountedBundleDirs {
+		if d == st.BundleDir {
+			continue
+		}
+		if prev != "" {
+			return "", false
+		}
+		prev = d
+	}
+	if prev == "" {
+		return "", false
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, prev, "compose.yml")); err != nil {
+		return "", false
+	}
+	return prev, true
+}
 
 // chooseAbortPath decides, from the containers, whether a rollout can be
 // cancelled by making its previous bundle the active one again: no
@@ -564,7 +594,13 @@ const (
 // stand-in is recorded, and every container there is was created from that
 // previous bundle -- the only other one the record keeps mounted, still on
 // disk. Anything else, or anything it can't tell (a container without the
-// working-directory label), is rolled back the long way.
+// working-directory label), is rolled back: the engine moves what left the
+// previous version back to it.
+//
+// prev names the previous bundle whenever it can be reused: also for a
+// rollback, which then goes back from that bundle, leaving the replicas that
+// never moved (they mount it) alone. Empty when it is gone or there is more
+// than one earlier bundle -- the previous version is then configured anew.
 //
 // missing names the services with no container at all on the restore path:
 // down already (a `down --force`, or a recreate cut off between removing the
@@ -581,24 +617,12 @@ func chooseAbortPath(st *state.State, ops abortOps, activeDir string) (path abor
 	if len(running) > 0 {
 		return 0, "", nil, fmt.Errorf("%s still running (a `docker compose run` container of this deployment -- most likely a migration a cut-off `versola` left behind) -- wait for it to finish (`docker logs -f %s`), then run `versola rollout --abort` again", strings.Join(running, ", "), running[0])
 	}
-	if st.RollingBack || len(st.Surge) > 0 {
-		return abortRollBack, "", nil, nil
+	if st.RollingBack {
+		return abortRollBack, "", nil, nil // under way already, from whichever bundle it began with
 	}
-	prev = ""
-	for _, d := range st.MountedBundleDirs {
-		if d == st.BundleDir {
-			continue
-		}
-		if prev != "" {
-			return abortRollBack, "", nil, nil // more than one earlier bundle: not a state a rollout leaves
-		}
-		prev = d
-	}
-	if prev == "" {
-		return abortRollBack, "", nil, nil
-	}
-	if _, err := os.Stat(filepath.Join(activeDir, prev, "compose.yml")); err != nil {
-		return abortRollBack, "", nil, nil
+	prev, _ = previousBundle(st, activeDir)
+	if len(st.Surge) > 0 || prev == "" {
+		return abortRollBack, prev, nil, nil
 	}
 	var services []string
 	for _, svc := range rolloutServices {
@@ -607,7 +631,7 @@ func chooseAbortPath(st *state.State, ops abortOps, activeDir string) (path abor
 				// (central's slots are recorded since the rollout records
 				// them; one prepared by an older versola-cli has none, and
 				// its container is what tells.)
-				return abortRollBack, "", nil, nil
+				return abortRollBack, prev, nil, nil
 			}
 			services = append(services, topology.SlotService(svc, sl.N))
 		}
@@ -622,7 +646,7 @@ func chooseAbortPath(st *state.State, ops abortOps, activeDir string) (path abor
 			continue
 		}
 		if c.workDir == "" || filepath.Clean(c.workDir) != filepath.Clean(filepath.Join(activeDir, prev)) {
-			return abortRollBack, "", nil, nil
+			return abortRollBack, prev, nil, nil
 		}
 	}
 	return abortRestore, prev, missing, nil
@@ -654,7 +678,7 @@ func Abort(st *state.State, o RolloutOptions) error {
 		}
 		return nil
 	}
-	if err := rolloutPreflight(st, o, true); err != nil {
+	if err := rolloutPreflight(st, o, true, prev != ""); err != nil {
 		return err
 	}
 	leaving := st.Version
@@ -662,19 +686,66 @@ func Abort(st *state.State, o RolloutOptions) error {
 		leaving = st.PreviousVersion
 	}
 	if !st.RollingBack {
-		back := st.PreviousVersion
-		fmt.Printf("\nConfiguring Versola %s again to go back to it (nothing running changes in this step)...\n", back)
-		next, err := prepareStaged(st, back, o, &stagedConfigure{from: st, surge: !o.NoSurge, abort: true})
+		next, err := turnAbortRound(st, ops, prev, state.Load, func(back string) (*state.State, error) {
+			return prepareStaged(st, back, o, &stagedConfigure{from: st, surge: !o.NoSurge, abort: true})
+		})
 		if err != nil {
-			return fmt.Errorf("configuring %s again failed -- nothing running was changed: %w", back, err)
+			return err
 		}
 		st = next
+		if prev != "" {
+			// What a staged configure writes into the bundle it prepares, written
+			// now: the record says the abort is under way from here on, and a run
+			// cut off before the engine's first step finds the bundle as the
+			// record describes it (central's moved ports included).
+			if err := writeRecordedFiles(st); err != nil {
+				return fmt.Errorf("couldn't write the replica files of the previous configuration: %w -- `versola rollout --abort` again continues the abort", err)
+			}
+		}
 	}
 	if err := runEngine(st, o); err != nil {
 		return err
 	}
 	fmt.Printf("\nBack on Versola %s at %s. The database keeps the migrations of %s, and OpenBao any secrets it added.\n", st.Version, st.AuthURL, leaving)
 	return nil
+}
+
+// turnAbortRound is the first step of an abort that goes back by the engine,
+// and changes nothing that runs: the previous bundle, when prev names one, is
+// made the active one again -- the replicas that never left the previous
+// version mount it and stay as they are, only the ones that moved are moved
+// back. Without it the previous version is configured anew, and every replica
+// is recreated from that.
+func turnAbortRound(st *state.State, ops abortOps, prev string, load func() (*state.State, error), configureAnew func(back string) (*state.State, error)) (*state.State, error) {
+	back := st.PreviousVersion
+	if prev == "" {
+		fmt.Printf("\nConfiguring Versola %s again to go back to it (its previous configuration is gone; nothing running changes in this step)...\n", back)
+		next, err := configureAnew(back)
+		if err != nil {
+			return nil, fmt.Errorf("configuring %s again failed -- nothing running was changed: %w", back, err)
+		}
+		return next, nil
+	}
+	fmt.Printf("\nGoing back to Versola %s from its own configuration (nothing running changes in this step)...\n", back)
+	migrated := time.Now().UTC()
+	if st.MigratedAt != nil {
+		migrated = *st.MigratedAt
+	}
+	if err := ops.beginRollback(prev, migrated); err != nil {
+		return nil, fmt.Errorf("going back to %s failed -- nothing running was changed: %w", back, err)
+	}
+	return load()
+}
+
+// writeRecordedFiles writes replicas.yml and overrides.yml of st's bundle from
+// the record, as the engine does at the start of every run.
+func writeRecordedFiles(st *state.State) error {
+	ops, topo, _, err := newDockerRolloutOps(st)
+	if err != nil {
+		return err
+	}
+	e := &rolloutEngine{st: st, topo: topo, ops: ops}
+	return e.writeFiles()
 }
 
 // abortByRestoring is the abortRestore path. Migrations the cancelled
@@ -745,7 +816,7 @@ func watchInterrupts() (interrupted func() bool, stop func()) {
 func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 	fmt.Print(RolloutPlan(st, version, o))
 	fmt.Println()
-	if err := rolloutPreflight(st, o, false); err != nil {
+	if err := rolloutPreflight(st, o, false, false); err != nil {
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
 	}
@@ -784,9 +855,17 @@ func AbortDryRun(st *state.State, o RolloutOptions) error {
 		}
 		return nil
 	}
-	if err := rolloutPreflight(st, o, true); err != nil {
+	if err := rolloutPreflight(st, o, true, prev != ""); err != nil {
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
+	}
+	if st.RollingBack {
+		fmt.Println("Would carry on with the way back that is under way (see the steps above).")
+		return nil
+	}
+	if prev != "" {
+		fmt.Printf("Would make the previous configuration (%s) the active one again and move back only the replicas that moved (see the steps above).\n", prev)
+		return nil
 	}
 	fmt.Println("Would configure the previous version again and move every replica to it (see the steps above).")
 	return nil
@@ -1002,6 +1081,9 @@ func (o dockerRolloutOps) oneOffsRunning() ([]string, error) {
 
 func (o dockerRolloutOps) restorePrevious(bundle string, migratedAt time.Time) error {
 	return state.RestorePrevious(bundle, migratedAt, openbaoBundles()...)
+}
+func (o dockerRolloutOps) beginRollback(bundle string, migratedAt time.Time) error {
+	return state.BeginRollback(bundle, migratedAt, openbaoBundles()...)
 }
 func (o dockerRolloutOps) markStarting() error {
 	return state.MarkStarting()

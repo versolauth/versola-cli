@@ -13,7 +13,8 @@
 # traffic, and checks every container is version A again:
 #   prepared  after the new bundle is prepared, before migrate: the abort only
 #             makes the previous configuration active again (nothing restarts)
-#   central   after central restarted on B, before any stand-in
+#   central   after central restarted on B, before any stand-in; the auth and
+#             edge containers must be the same ones (IDs) after the abort
 #   standin   after the auth stand-in (B) takes traffic
 #   midway    after the first replica was recreated on B
 #
@@ -194,6 +195,11 @@ $found"
   trap 'touch "$stop"; kill "$tpid" ${rpid:-} 2>/dev/null || true' EXIT
   sleep 8
   local rrc=0 arc=0
+  # An abort stopped at central's step has moved nothing else: the abort must
+  # leave auth's and edge's containers (same IDs) alone, as they already run
+  # from the previous configuration.
+  local idsA=""
+  [ "$abort_at" != central ] || idsA="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
   if [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
     "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
@@ -225,6 +231,13 @@ $found"
     local stray
     stray="$(docker ps --format '{{.Names}} {{.Image}}' | grep -E '^versola-(central|auth|edge)' | grep -v ":$A\$" || true)"
     if [ -n "$stray" ]; then echo "e2e: still not on $A after the abort:" >&2; echo "$stray" >&2; arc=1; fi
+    if [ -n "$idsA" ]; then
+      local idsB; idsB="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
+      if [ "$idsA" != "$idsB" ]; then
+        echo "e2e: the abort recreated auth or edge replicas that never left $A:" >&2
+        diff <(echo "$idsA") <(echo "$idsB") >&2 || true; arc=1
+      fi
+    fi
     local st_out; st_out="$("$cli" status 2>&1 || true)"
     if grep -q "under way" <<<"$st_out"; then echo "e2e: status still reports a rollout under way" >&2; arc=1; fi
   fi

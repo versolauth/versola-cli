@@ -316,3 +316,24 @@ func TestValidateRunFailure(t *testing.T) {
 		t.Errorf("current %q", cur)
 	}
 }
+
+// A bundle written by a CLI built from a Windows checkout has CRLF line endings.
+func TestUsesGenerationsAcceptsCRLF(t *testing.T) {
+	for name, nl := range map[string]string{"LF": "\n", "CRLF": "\r\n"} {
+		dir := t.TempDir()
+		yml := "services:" + nl + "  proxy:" + nl + "    volumes:" + nl + "      - type: bind" + nl + "        target: " + GenerationMount + nl
+		if err := os.WriteFile(filepath.Join(dir, ComposeFile), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !UsesGenerations(dir) {
+			t.Errorf("%s: generations not recognised", name)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ComposeFile), []byte("services:\r\n  proxy:\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if UsesGenerations(dir) {
+		t.Error("a bundle without the mount is not generations")
+	}
+}

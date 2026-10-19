@@ -97,7 +97,7 @@ central was unavailable (about N s plus the 1 s poll), keep auth and edge servin
 and finish with no failures. The real central's start time is not measured here.
 
 Linux only, needs more than 3.25 GiB of available memory and 4 GiB of disk (the
-CLI's own prerequisite checks) and free ports 2821, 8082, 8083 and 8200. It
+CLI's own prerequisite checks) and free ports 2821, 8082, 8083, 8090, 8200, 28090 and 28091. It
 refuses to start if a container named `versola*` or the volume
 `versola-openbao-file-vps` exists, or ports 2821/8082/8083 are taken. The
 CLI's state goes to an isolated `HOME` (`E2E_HOME`, default
@@ -111,3 +111,10 @@ Assumed, not yet seen on a real run: the generated compose file sets no
 `command:`/`entrypoint:` on central/auth/edge (else a stub would start with a
 java command line), and `docker compose pull` skips `pull_policy: never`
 services (run.sh checks the latter before deploying).
+
+Central is behind the proxy's front like auth's APORT/MPORT: nginx owns
+127.0.0.1:8090 and the stub central listens on 28090/28091. run.sh checks
+after `up` and after the run that 8090 answers with central of the expected
+version and that 28090 answers too. Not run here (there is no Docker daemon
+in the sandbox this was written in): the first run on a throwaway machine
+must confirm it.

@@ -157,10 +157,13 @@ func (e *rolloutEngine) update(f func(*state.State)) error {
 	return nil
 }
 
-// layout is the replicas as recorded: central's single one, auth's (behind
-// the proxy's fronts) and edge's.
+// layout is the replicas as recorded: central's single one and auth's (both
+// behind the proxy's fronts), and edge's.
 func (e *rolloutEngine) layout() (central, auth, edge []replica, err error) {
 	if central, err = replicasOf(e.topo, CentralService, []state.Slot{{N: 1, Version: e.st.Version}}); err != nil {
+		return
+	}
+	if central, err = frontCentral(central, true); err != nil {
 		return
 	}
 	if auth, err = replicasOf(e.topo, AuthService, e.st.ActiveSlots(AuthService)); err != nil {
@@ -230,19 +233,19 @@ func (e *rolloutEngine) isNew(base string, c containerInfo) (bool, error) {
 }
 
 // writeFiles rewrites replicas.yml and overrides.yml from the record: what
-// compose reads to know every slot -- a stand-in included -- and auth's
-// moved APORT/MPORT.
+// compose reads to know every slot -- a stand-in included -- and central's
+// moved PORT/DPORT and auth's moved APORT/MPORT.
 func (e *rolloutEngine) writeFiles() error {
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return err
 	}
-	return e.ops.writeReplicas(auth, edge)
+	return e.ops.writeReplicas(central, auth, edge)
 }
 
 // route has the proxy route to exactly the slots in inUp.
 func (e *rolloutEngine) route() error {
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return err
 	}
@@ -255,7 +258,7 @@ func (e *rolloutEngine) route() error {
 		}
 		return out
 	}
-	c := routedConfig(e.st.ProxyMode, e.fronts, e.genDir, pick(AuthService, auth), pick(EdgeService, edge))
+	c := routedConfig(e.st.ProxyMode, e.fronts, e.genDir, central, pick(AuthService, auth), pick(EdgeService, edge))
 	return routeVia(e.ops, e.st.ProxyMode, c)
 }
 
@@ -878,10 +881,14 @@ func standInReplica(topo topology.Topology, svc string, n int, hostNetwork bool)
 	if err != nil {
 		return replica{}, err
 	}
-	if svc == AuthService {
-		if rs, err = frontAuth(rs, hostNetwork); err != nil {
-			return replica{}, err
-		}
+	switch svc {
+	case AuthService:
+		rs, err = frontAuth(rs, hostNetwork)
+	case CentralService:
+		rs, err = frontCentral(rs, hostNetwork)
+	}
+	if err != nil {
+		return replica{}, err
 	}
 	return rs[0], nil
 }
@@ -897,8 +904,11 @@ func withStandIn(topo topology.Topology, svc string, slots []state.Slot, version
 	if err != nil {
 		return nil, err
 	}
-	if svc == AuthService {
+	switch svc {
+	case AuthService:
 		return frontAuth(rs, hostNetwork)
+	case CentralService:
+		return frontCentral(rs, hostNetwork)
 	}
 	return rs, nil
 }

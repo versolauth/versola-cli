@@ -167,9 +167,11 @@ func poll(timeout time.Duration, try func() error) error {
 	}
 }
 
-// WaitFronts waits until the proxy serves its fronts of auth's APORT and
-// MPORT (vps):
+// WaitFronts waits until the proxy serves its fronts of central's PORT and of
+// auth's APORT and MPORT (vps):
 //
+//   - PORT of central: like APORT, an HTTP answer through the proxy that is
+//     not its own "nothing behind me".
 //   - APORT: an HTTP answer through the proxy that is not its own "nothing
 //     behind me" (502, 504) -- whatever auth answers on its path, it is
 //     auth answering.
@@ -182,15 +184,27 @@ func WaitFronts(f Fronts, timeout time.Duration) error {
 	return poll(timeout, func() error { return checkFronts(client, f) })
 }
 
+// WaitCentralFront waits until the proxy serves its front of central's PORT
+// (vps) with a central replica behind it -- the part of the fronts that has to
+// work before auth and edge start, since they reach central through it. The
+// rest of the fronts (and Versola itself) are waited for once those run, by
+// WaitFronts.
+func WaitCentralFront(port int, timeout time.Duration) error {
+	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return poll(timeout, func() error { return checkHTTPFront(client, port, "central's PORT", "central") })
+}
+
 func checkFronts(client *http.Client, f Fronts) error {
-	url := "http://127.0.0.1:" + strconv.Itoa(f.Additional) + "/"
-	resp, err := client.Get(url)
-	if err != nil {
-		return fmt.Errorf("auth's APORT through the proxy (%s): %w", url, err)
+	if f.centralSet() {
+		if err := checkHTTPFront(client, f.Central, "central's PORT", "central"); err != nil {
+			return err
+		}
 	}
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout {
-		return fmt.Errorf("auth's APORT through the proxy (%s) answered %d: no auth replica behind it", url, resp.StatusCode)
+	if !f.set() {
+		return nil
+	}
+	if err := checkHTTPFront(client, f.Additional, "auth's APORT", "auth"); err != nil {
+		return err
 	}
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.MutualTLS))
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
@@ -198,5 +212,21 @@ func checkFronts(client *http.Client, f Fronts) error {
 		return fmt.Errorf("the proxy doesn't accept connections in front of auth's MPORT (%s): %w", addr, err)
 	}
 	conn.Close()
+	return nil
+}
+
+// checkHTTPFront asks the proxy's front at port for any HTTP answer that is
+// not its own "nothing behind me" (502, 504): whatever the service says on
+// its path, it is the service saying it.
+func checkHTTPFront(client *http.Client, port int, what, service string) error {
+	url := "http://127.0.0.1:" + strconv.Itoa(port) + "/"
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("%s through the proxy (%s): %w", what, url, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout {
+		return fmt.Errorf("%s through the proxy (%s) answered %d: no %s replica behind it", what, url, resp.StatusCode, service)
+	}
 	return nil
 }

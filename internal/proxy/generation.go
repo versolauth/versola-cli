@@ -363,5 +363,8 @@ func ReloadCurrent(mode string) error {
 // to reload into: such a bundle is configured again, not started.
 func UsesGenerations(bundleDir string) bool {
 	b, err := os.ReadFile(filepath.Join(bundleDir, ComposeFile))
+	// CRLF too: a CLI built from a Windows checkout embeds templates with
+	// CRLF line endings and writes them as they are.
+	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 	return err == nil && bytes.Contains(b, []byte("target: "+GenerationMount+"\n"))
 }

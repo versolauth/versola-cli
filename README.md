@@ -453,6 +453,23 @@ on 9082/9083 (set in `overrides.yml` next to the compose file), the next
 on 9182/9183, and so on. Those numbers follow the compose file's APORT and
 MPORT; versola-tools' configs are unchanged.
 
+Central is behind the proxy the same way, as the first step towards
+updating it without downtime: the proxy listens on `127.0.0.1:8090` (the
+compose file's central PORT, which auth, edge and the admin console call --
+their URLs are unchanged) and balances over the central replicas. Central
+itself listens 20000 higher: PORT and DPORT on 28090/28091 (set in
+`overrides.yml`), a second replica on 28190/28191. Those ports are outside
+the 9090-9100 range that Prometheus and its exporters use and below Linux's
+ephemeral ports (from 32768). Only the proxy may use 8090 on a vps now, and central's diagnostics port
+(`/readiness`) is no longer on 8091 but on 28091: point anything outside the
+CLI that probes it there. `replica add|remove` refuses on a deployment that
+has not been moved yet (`versola up` does it; central restarts once).
+`up` starts the proxy as soon as central is ready, before auth and edge:
+they reach central through it. The first `rollout` of a deployment made
+before this change moves central to the new ports within its usual central
+restart (the admin console is unavailable for a moment longer, once);
+auth and edge keep serving from their caches.
+
 Its configuration lives outside the deployment bundles, in
 `~/.versola/active/proxy-vps/`, as generations (`gen-000001/`, ...) with
 `current` pointing at the one in use. `up` and `replica add|remove` build

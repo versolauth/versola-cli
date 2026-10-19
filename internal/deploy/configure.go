@@ -411,6 +411,10 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
+	// vps: central's PORT/DPORT behind the proxy (frontCentral).
+	if centralReplicas, err = frontCentral(centralReplicas, target == "vps"); err != nil {
+		return ConfigureResult{}, err
+	}
 	if staged != nil {
 		oldCompose, _, err := staged.from.ComposeFilePath()
 		if err != nil {
@@ -452,7 +456,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
+	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, centralReplicas, authReplicas, edgeReplicas)); err != nil {
 		return ConfigureResult{}, err
 	}
 	if staged != nil {
@@ -461,7 +465,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
-		if err := writeOverridesFile(dir, authReplicas); err != nil {
+		if err := writeOverridesFile(dir, centralReplicas, authReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
 	}

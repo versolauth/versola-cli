@@ -52,20 +52,22 @@ const (
 // that the proxy only routes to ready replicas and -- with a stand-in --
 // never to fewer than the operator's count.
 type world struct {
-	t          *testing.T
-	topo       topology.Topology
-	stateJSON  []byte
-	containers map[string]*fakeContainer
-	upstream   map[string][]string // auth/edge -> compose services routed to
-	replicas   []string            // services in replicas.yml
-	events     []string
-	callNames  []string          // the event of each counted call
-	urls       map[string]string // readiness URL -> service
+	t            *testing.T
+	topo         topology.Topology
+	stateJSON    []byte
+	containers   map[string]*fakeContainer
+	upstream     map[string][]string // auth/edge -> compose services routed to
+	central      []proxy.Backend     // what the last routing sent to central's front
+	centralFront int                 // the front the last routing carried
+	replicas     []string            // services in replicas.yml
+	events       []string
+	callNames    []string          // the event of each counted call
+	urls         map[string]string // readiness URL -> service
 
 	minUp        map[string]int // with a stand-in: never fewer in the upstream
 	never        map[string]bool
 	waits        map[string]time.Duration // the last limit a service was waited for with
-	coldOnce     map[string]bool // fails warm once
+	coldOnce     map[string]bool          // fails warm once
 	calls        int
 	crashAt      int
 	crashAfter   bool // the crashing call takes effect first
@@ -216,6 +218,15 @@ func (w *world) waitReadyWithin(u string, limit time.Duration) error {
 	})
 }
 
+func (w *world) urlOf(svc string) string {
+	for u, s := range w.urls {
+		if s == svc {
+			return u
+		}
+	}
+	return ""
+}
+
 func (w *world) readyNow(u string) bool {
 	c := w.containers[w.urls[u]]
 	return c != nil && c.running && c.ready
@@ -255,6 +266,7 @@ func (w *world) applyUpstreams(c proxy.Config) error {
 		}
 	}
 	w.upstream = next
+	w.central, w.centralFront = c.Central, c.Fronts.Central
 	return nil
 }
 
@@ -288,7 +300,7 @@ func (w *world) save(service string, slots []state.Slot) error {
 	return nil
 }
 
-func (w *world) writeReplicas(auth, edge []replica) error {
+func (w *world) writeReplicas(_, auth, edge []replica) error {
 	var files []string
 	for _, r := range append(append([]replica{}, auth...), edge...) {
 		if r.Slot > 1 {
@@ -357,7 +369,7 @@ func preparedState(auth, edge []state.Slot) *state.State {
 
 func engineFor(w *world, surge, downtime bool) *rolloutEngine {
 	return &rolloutEngine{st: w.load(), topo: w.topo, bundleDir: w.targetDir, ops: w, out: func(string, ...any) {},
-		fronts: proxy.Fronts{Additional: 8082, MutualTLS: 8083}, genDir: "/gen", surge: surge, allowDowntime: downtime}
+		fronts: proxy.Fronts{Additional: 8082, MutualTLS: 8083, Central: 8090}, genDir: "/gen", surge: surge, allowDowntime: downtime}
 }
 
 func old(ns ...int) []state.Slot {
@@ -946,5 +958,23 @@ func TestUpRefusedUntilTheRolloutIsFinished(t *testing.T) {
 	st.PreviousVersion = fromV
 	if err := checkRunnable(st, bundle); err == nil || !strings.Contains(err.Error(), "versola rollout") {
 		t.Errorf("got %v", err)
+	}
+}
+
+// On vps central sits behind the proxy's front on its shifted ports, and
+// every routing of the rollout carries it, so the proxy never loses it.
+func TestRolloutRoutesCentralThroughItsFront(t *testing.T) {
+	w := newWorld(t, preparedState(old(1), old(1)))
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if w.centralFront != 8090 {
+		t.Errorf("central front %d, want 8090", w.centralFront)
+	}
+	if want := []proxy.Backend{{Service: "central", Port: 28090}}; !reflect.DeepEqual(w.central, want) {
+		t.Errorf("routed central: %+v, want %+v", w.central, want)
+	}
+	if got := w.urlOf(CentralService); got != "http://localhost:28091/readiness" {
+		t.Errorf("central is waited for at %q", got)
 	}
 }

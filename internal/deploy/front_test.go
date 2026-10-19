@@ -87,24 +87,24 @@ func TestFrontAuth(t *testing.T) {
 func TestCheckTopologyReservesTheFronts(t *testing.T) {
 	topo := vpsTopology(t)
 	c, a, e := replicasFor(t, topo)
-	_, err := checkTopology(topo, true, nil, c, a, e)
+	_, err := checkTopology(topo, true, nil, frontedCentral(t, c), a, e)
 	if err == nil || !strings.Contains(err.Error(), "in front of auth's APORT") {
 		t.Errorf("unfronted auth on vps: %v", err)
 	}
-	if _, err := checkTopology(topo, true, nil, c, fronted(t, a), e); err != nil {
+	if _, err := checkTopology(topo, true, nil, frontedCentral(t, c), fronted(t, a), e); err != nil {
 		t.Errorf("fronted: %v", err)
 	}
 	// Another service on a fronted address clashes with the proxy.
 	clash, err := topology.Parse([]byte(`{"services":{
-	  "central":{"network_mode":"host","environment":{"PORT":"8083","DPORT":"8091"}},
+	  "central":{"network_mode":"host","environment":{"PORT":"8090","DPORT":"8091"}},
 	  "auth":{"network_mode":"host","environment":{"PORT":"8080","DPORT":"8081","APORT":"8082","MPORT":"8083"}},
-	  "edge":{"network_mode":"host","environment":{"PORT":"8095","DPORT":"8096"}}}}`))
+	  "edge":{"network_mode":"host","environment":{"PORT":"8083","DPORT":"8096"}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c, a, e = replicasFor(t, clash)
-	if _, err := checkTopology(clash, true, nil, c, fronted(t, a), e); err == nil || !strings.Contains(err.Error(), "MPORT") {
-		t.Errorf("central on the MPORT front: %v", err)
+	if _, err := checkTopology(clash, true, nil, frontedCentral(t, c), fronted(t, a), e); err == nil || !strings.Contains(err.Error(), "MPORT") {
+		t.Errorf("edge on the MPORT front: %v", err)
 	}
 }
 
@@ -114,7 +114,7 @@ func TestOverridesYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, any, err := overridesYAML(fronted(t, auth))
+	b, any, err := overridesYAML(nil, fronted(t, auth))
 	if err != nil || !any {
 		t.Fatalf("%v %v", any, err)
 	}
@@ -126,22 +126,22 @@ func TestOverridesYAML(t *testing.T) {
 		t.Error("slots beyond 1 are replicas.yml's")
 	}
 	// Nothing fronted (local), or no slot 1: nothing to override.
-	if _, any, _ := overridesYAML(auth); any {
+	if _, any, _ := overridesYAML(nil, auth); any {
 		t.Error("unfronted: want no file")
 	}
-	if _, any, _ := overridesYAML(fronted(t, auth)[1:]); any {
+	if _, any, _ := overridesYAML(nil, fronted(t, auth)[1:]); any {
 		t.Error("no slot 1: want no file")
 	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, state.OverridesFile)
-	if err := writeOverridesFile(dir, fronted(t, auth)); err != nil {
+	if err := writeOverridesFile(dir, nil, fronted(t, auth)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("not written: %v", err)
 	}
-	if err := writeOverridesFile(dir, auth); err != nil {
+	if err := writeOverridesFile(dir, nil, auth); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -164,7 +164,7 @@ func TestFrontedFilesThroughRealCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 	auth = fronted(t, auth)
-	if err := writeOverridesFile(dir, auth); err != nil {
+	if err := writeOverridesFile(dir, nil, auth); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeReplicasFile(dir, "compose.yml", auth); err != nil {
@@ -214,7 +214,7 @@ func TestProxyBackendsAndRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fronts != (proxy.Fronts{Additional: 8082, MutualTLS: 8083}) || dir != filepath.Join(home, ".versola", "active", "proxy-vps") {
+	if fronts != (proxy.Fronts{Additional: 8082, MutualTLS: 8083, Central: 8090}) || dir != filepath.Join(home, ".versola", "active", "proxy-vps") {
 		t.Errorf("vps routing: %+v %s", fronts, dir)
 	}
 	if fronts, dir, err := proxyRouting(topo, false); err != nil || fronts != (proxy.Fronts{}) || dir != "" {

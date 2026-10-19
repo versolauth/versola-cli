@@ -100,7 +100,10 @@ func checkStandInMemory(p memoryProbe, st *state.State, services []string, warn 
 			basis = "the size of one replica"
 		}
 		hint := "--no-surge (one replica fewer serves while each is replaced"
-		if replicas := len(st.ActiveSlots(svc)); replicas < 2 {
+		if svc == CentralService {
+			hint = "--no-surge (central is then stopped and started in place: the admin console is down until it is ready"
+		}
+		if replicas := len(st.ActiveSlots(svc)); replicas < 2 && svc != CentralService {
 			hint += "; with one replica add --allow-downtime: it is down until the new one is ready"
 		}
 		return fmt.Errorf("not enough free memory for a stand-in %s replica: it needs about %s (%s) plus %s kept free, and %s is available -- free memory first, or run with %s)",
@@ -121,12 +124,19 @@ func mib(b int64) string { return fmt.Sprintf("%d MiB", b/(1024*1024)) }
 // is not done, and checks memory again before any stand-in it starts.)
 // An abort checks every service: replicas that never moved are recorded
 // at the version it goes back to and are recreated all the same.
-func standInServices(st *state.State, o RolloutOptions, abort bool) []string {
+//
+// central is in only when centralFronted: a stand-in of central needs the
+// proxy in front of central's PORT (see rolloutEngine.centralInPlace).
+func standInServices(st *state.State, o RolloutOptions, abort, centralFronted bool) []string {
 	if o.NoSurge {
 		return nil
 	}
+	services := []string{AuthService, EdgeService}
+	if centralFronted {
+		services = rolloutServices
+	}
 	var out []string
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range services {
 		if _, ok := st.Surge[svc]; ok {
 			continue
 		}

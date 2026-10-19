@@ -1,6 +1,7 @@
 // Command traffic is the rollout e2e's client: it sends GET and POST requests
-// at the proxy's public port, at auth's additional listener (8082) and at
-// auth's mutual-TLS pass-through (8083) for as long as a rollout runs, and
+// at the proxy's public port, at auth's additional listener (8082), at
+// auth's mutual-TLS pass-through (8083) and at the front of central (8090)
+// for as long as a rollout runs, and
 // counts every answer that is not the one the stub gives.
 //
 // The success criterion is zero failures: a failure is a transport error or a
@@ -189,6 +190,7 @@ func main() {
 		host       = flag.String("host", "e2e.test", "Host header for -base (the deployment's auth-url host)")
 		additional = flag.String("additional", "127.0.0.1:8082", "auth's additional listener behind the proxy")
 		mtls       = flag.String("mtls", "127.0.0.1:8083", "auth's mutual-TLS pass-through behind the proxy")
+		central    = flag.String("central", "127.0.0.1:8090", "the proxy's front of central's PORT; empty to leave central out (a rollout that restarts central in place, --no-surge)")
 		interval   = flag.Duration("interval", 50*time.Millisecond, "pause between requests of one worker")
 		stopFile   = flag.String("stop-file", "", "stop when this file exists")
 		asJSON     = flag.Bool("json", false, "print the summary as JSON")
@@ -215,6 +217,14 @@ func main() {
 		{"auth-mtls POST :8083 (pooled connection)", "POST", "https://" + *mtls + "/", "", 200, post, pooled(insecure, &dialsPost), false, &dialsPost},
 		// Always in flight: a cut of this connection cannot go unnoticed.
 		{"auth-mtls GET :8083/slow (pooled, in flight)", "GET", "https://" + *mtls + "/slow?ms=1500", "", 200, "", pooled(insecure, &dialsSlow), false, &dialsSlow},
+	}
+	if *central != "" {
+		// central is behind the proxy's front and moves through a stand-in:
+		// it must not miss a request either.
+		targets = append(targets,
+			target{"central GET :8090", "GET", "http://" + *central + "/", "", 200, "", plain(), false, nil},
+			target{"central POST :8090", "POST", "http://" + *central + "/", "", 200, post, plain(), true, nil},
+		)
 	}
 
 	st := newStats()

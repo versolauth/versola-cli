@@ -219,6 +219,11 @@ func TestMixedVersions(t *testing.T) {
 			[]string{"auth has slot 1", "edge has slot 2"}},
 		"a stand-in slot": {State{Version: "0.7.0", Surge: map[string]int{"auth": 3}},
 			[]string{"stand-in", "auth slot 3"}},
+		"central at another version": {State{Version: "0.7.0", Slots: map[string][]Slot{
+			"central": {{N: 1, Version: "0.6.3"}}}},
+			[]string{"central has slot 1 at 0.6.3"}},
+		"a central stand-in": {State{Version: "0.7.0", Surge: map[string]int{"central": 2}},
+			[]string{"stand-in", "central slot 2"}},
 	} {
 		got := c.st.MixedVersions()
 		if len(c.want) == 0 {

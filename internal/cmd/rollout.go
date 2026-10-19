@@ -33,8 +33,13 @@ keeps serving:
   2. migrate: the new version's database migrations are applied. They
      cannot be rolled back: back the database up first. Releases keep their
      migrations additive, so the running version works on the new schema.
-  3. central is stopped and started on the new version: the admin console
-     and self-registration are unavailable until it is ready (about a
+  3. central: a stand-in of the new version (central-2) starts next to the
+     running one and takes traffic, then central itself is recreated on the
+     new version and the stand-in is removed, so the admin console and
+     self-registration stay available. Without a stand-in (--no-surge, or
+     the first rollout of a deployment whose proxy does not front central
+     yet) central is stopped and started in place, and the admin console and
+     self-registration are unavailable until it is ready (usually under a
      minute); auth and edge keep serving.
   4. auth, then edge: a stand-in replica of the new version starts in a free
      slot and takes traffic; then each replica in turn is taken out of the

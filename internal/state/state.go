@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -828,6 +829,60 @@ func RestorePrevious(bundle string, migratedAt time.Time, keep ...string) error 
 		return err
 	}
 	pruneBundles(dir, append([]string{bundle}, keep...)...)
+	return nil
+}
+
+// BeginRollback records the start of an abort that goes back by the engine,
+// without configuring the previous version again: bundle, the earlier
+// bundle (it must still be there), becomes the active one, and the record
+// says the rollout is being undone -- Version is what was PreviousVersion
+// and the other way round, RollingBack is set. The replicas that never left
+// the old version already mount that bundle, so the engine leaves them alone
+// and recreates only the ones that moved.
+//
+// Slots keep the versions they are recorded at (the engine corrects a record
+// from the containers), a recorded stand-in stays (it is retired). The
+// bundle that moved replicas mount is kept until they are replaced.
+// migratedAt is recorded as the time of the last migration: an abort never
+// migrates, and the schema is at least where the old version needs it.
+func BeginRollback(bundle string, migratedAt time.Time, keep ...string) error {
+	s, err := Load()
+	if err != nil {
+		return err
+	}
+	if s.PreviousVersion == "" || s.RollingBack {
+		return fmt.Errorf("no rollout to turn round is recorded")
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, bundle, "compose.yml")); err != nil {
+		return fmt.Errorf("the previous deployment's files (%s) are not there any more: %w", bundle, err)
+	}
+	slots := map[string][]Slot{}
+	for _, svc := range []string{"central", "auth", "edge"} {
+		slots[svc] = s.ActiveSlots(svc)
+	}
+	mounted := []string{bundle}
+	for _, d := range append(append([]string{}, s.MountedBundleDirs...), s.BundleDir) {
+		if d != "" && !slices.Contains(mounted, d) {
+			mounted = append(mounted, d)
+		}
+	}
+	s.Version, s.PreviousVersion, s.RollingBack = s.PreviousVersion, s.Version, true
+	s.BundleDir = bundle
+	s.MountedBundleDirs = mounted
+	s.MigratedAt = &migratedAt
+	s.ConfiguredAt = time.Now().UTC()
+	s.Slots = nil
+	for svc, ss := range slots {
+		s.SetSlots(svc, ss)
+	}
+	if err := s.Save(); err != nil {
+		return err
+	}
+	pruneBundles(dir, append(append([]string{}, mounted...), keep...)...)
 	return nil
 }
 

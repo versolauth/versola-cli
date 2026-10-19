@@ -57,10 +57,11 @@ migrations, and the running version working on the new schema.
 
 --abort goes back to the version the unfinished rollout came from. If no
 container was started from the new version's configuration yet, the
-previous configuration simply becomes the active one again. Otherwise the
-previous version is configured again and every replica -- central, auth,
-edge, including the ones that never moved -- is moved back the same way,
-stand-in first. Migrations and secrets do not go back: the old version runs
+previous configuration simply becomes the active one again. Otherwise it
+becomes the active one again too, and the replicas that moved on -- central,
+auth, edge -- are moved back the same way, stand-in first; the ones that
+never moved are not touched. (If that configuration is gone, the previous
+version is configured anew and every replica is recreated from it.) Migrations and secrets do not go back: the old version runs
 on the migrated schema (not guaranteed before 1.0). Cut off, --abort again
 continues it. After a rollout has finished there is nothing to abort: roll
 the earlier version out instead.

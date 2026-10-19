@@ -122,12 +122,15 @@ func mib(b int64) string { return fmt.Sprintf("%d MiB", b/(1024*1024)) }
 // refuse a rollout that only has its last steps left. (A recorded version
 // is not proof -- the engine still replaces a replica its container says
 // is not done, and checks memory again before any stand-in it starts.)
-// An abort checks every service: replicas that never moved are recorded
-// at the version it goes back to and are recreated all the same.
+// An abort that goes back from the previous bundle (reuse) leaves the replicas
+// that never moved alone: a service whose every replica is recorded at the
+// version it goes back to starts no stand-in. Otherwise (the previous version
+// is configured anew) it checks every service: replicas that never moved are
+// recreated all the same.
 //
 // central is in only when centralFronted: a stand-in of central needs the
 // proxy in front of central's PORT (see rolloutEngine.centralInPlace).
-func standInServices(st *state.State, o RolloutOptions, abort, centralFronted bool) []string {
+func standInServices(st *state.State, o RolloutOptions, abort, reuse, centralFronted bool) []string {
 	if o.NoSurge {
 		return nil
 	}
@@ -141,6 +144,9 @@ func standInServices(st *state.State, o RolloutOptions, abort, centralFronted bo
 			continue
 		}
 		if !abort && st.RolloutUnderway() && !st.RollingBack && allAt(st.ActiveSlots(svc), st.Version) {
+			continue
+		}
+		if abort && reuse && !st.RollingBack && allAt(st.ActiveSlots(svc), st.PreviousVersion) {
 			continue
 		}
 		out = append(out, svc)

@@ -530,12 +530,17 @@ came from:
 - nothing started from the new version yet (prepared, possibly migrated):
   the previous configuration becomes the active one again; no container
   is touched;
-- otherwise the previous version is configured again and moved to the same
-  way, stand-in first: central is moved back behind a stand-in (in place
-  with `--no-surge`), and every auth and edge replica is recreated -- also the ones that never left the old version,
-  because they still mount the previous configuration's files, which are
-  removed at the end. A stand-in of the new version is retired before one
-  of the old version starts.
+- otherwise the previous configuration becomes the active one again too, and
+  what moved on is moved back the same way, stand-in first: central behind a
+  stand-in (in place with `--no-surge`), and the auth and edge replicas that
+  were already on the new version. Replicas that never left the old version
+  are not touched: they already run from the previous configuration. A
+  stand-in of the new version is retired before one of the old version
+  starts. If the previous configuration is gone (more than one earlier one
+  is recorded, or its files were removed), the previous version is
+  configured anew instead -- versola-tools and the secrets plan run again,
+  which needs `--allow-legacy-secrets` for a release without a secrets
+  schema -- and every replica is recreated from it.
 
 Migrations and secrets don't go back: the old version runs on the migrated
 schema (not guaranteed before 1.0 -- a replica that doesn't become ready
@@ -596,8 +601,8 @@ neither):
   server; the rollout prints how long it was. Any wait for central (its
   stand-in too) is up to 5 minutes; a replica's, 2 minutes. If central is still not
   ready it stops, leaving auth and edge untouched: run the same command
-  again once central is up (it only waits again). `--abort` also works but
-  recreates every auth and edge replica. auth and edge keep serving.
+  again once central is up (it only waits again). `--abort` also works and
+  starts central once more, on the old version. auth and edge keep serving.
   If their five-minute cache refresh falls into that gap, seen on a stand:
   their outbound HTTP pool (`fixed`, 128 slots by default) keeps the refused
   connections and hands them out one per request, so the refreshes keep

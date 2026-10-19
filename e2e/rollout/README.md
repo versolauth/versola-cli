@@ -90,7 +90,9 @@ expects version A. `central` stops once central's stand-in (central-2) is
 starting (with `--no-surge`, once central is restarted in place); `standin`
 and `midway` stop at auth's and edge's steps, after central is done. With
 `--no-surge` there is no stand-in, so `standin` stops after the first
-replaced replica, like `midway`. What stubs can't
+replaced replica, like `midway`. After a `central` abort the auth and edge
+containers must be the very ones that ran before the rollout (same IDs): an
+abort recreates only what moved on. What stubs can't
 show: the old version on a really migrated schema, edge registering its
 client certificate with central, real start times -- those need the real
 images (the `0.7.0` -> `0.7.0-rt1` run on the stand).

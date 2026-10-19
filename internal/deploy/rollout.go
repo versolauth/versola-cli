@@ -524,7 +524,7 @@ func (e *rolloutEngine) central() error {
 	}
 	e.say("Waiting for central to be ready (up to %s)...\n", centralReadyTimeout)
 	if err := e.ops.waitReadyWithin(url, centralReadyTimeout); err != nil {
-		hint := "run the same `versola rollout` again: it only waits for central again and carries on. `versola rollout --abort` goes back as well, but recreates every auth and edge replica"
+		hint := "run the same `versola rollout` again: it only waits for central again and carries on. `versola rollout --abort` goes back as well, and starts central once more, on the old version"
 		if e.st.RollingBack {
 			hint = "run `versola rollout --abort` again: it only waits for central again and carries on"
 		}

@@ -1,3 +1,6 @@
 # Scripts and Dockerfiles run on Linux: keep LF even when checked out on Windows.
 e2e/** text eol=lf
 *.sh text eol=lf
+# Embedded into the binary and written to deployments as they are: LF, so a CLI
+# built on Windows does not write CRLF files.
+internal/**/templates/** text eol=lf

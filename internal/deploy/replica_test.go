@@ -53,7 +53,7 @@ func (f *fakeOps) save(service string, slots []state.Slot) error {
 	f.saved[service] = slotNumbersOf(slots)
 	return f.do(fmt.Sprintf("save %s %v", service, slotNumbers(slots)))
 }
-func (f *fakeOps) writeReplicas(auth, edge []replica) error {
+func (f *fakeOps) writeReplicas(_, auth, edge []replica) error {
 	f.files = nil
 	for _, r := range append(append([]replica{}, auth...), edge...) {
 		if r.Slot > 1 {

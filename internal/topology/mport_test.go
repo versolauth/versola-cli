@@ -82,3 +82,27 @@ func TestShiftAuthListeners(t *testing.T) {
 		t.Errorf("out of range: %v", err)
 	}
 }
+
+// ShiftListeners moves PORT and DPORT (and nothing else), and refuses a
+// result outside 1..65535.
+func TestShiftListeners(t *testing.T) {
+	topo := mustParse(t, `{"services":{"central":{"network_mode":"host",
+	  "environment":{"PORT":"8090","DPORT":"8091","APORT":"8082"}}}}`)
+	base := mustService(t, topo, "central")
+	s, err := base.ShiftListeners(20000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Port != 28090 || s.DiagnosticsPort != 28091 || s.AdditionalPort != base.AdditionalPort {
+		t.Errorf("got %+v", s)
+	}
+	if base.Port != 8090 {
+		t.Error("the receiver changed")
+	}
+	if _, err := base.ShiftListeners(60000); err == nil {
+		t.Error("68090 is out of range: want an error")
+	}
+	if _, err := base.ShiftListeners(-9000); err == nil {
+		t.Error("negative port: want an error")
+	}
+}

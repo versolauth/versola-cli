@@ -162,6 +162,22 @@ func (s Service) ShiftAuthListeners(off, slot int) Service {
 	return s
 }
 
+// ShiftListeners returns s -- slot's ports, from ForSlot -- with PORT and
+// DPORT moved by off, and nothing else: their own ports are taken over by
+// another process (the reverse proxy) in front of them. Only for a service
+// on the host's network, whose listeners are the host's ports;
+// publications are not touched. An error when a port would not fit.
+func (s Service) ShiftListeners(off int) (Service, error) {
+	s.Port += off
+	s.DiagnosticsPort += off
+	for _, p := range []int{s.Port, s.DiagnosticsPort} {
+		if p < 1 || p > 65535 {
+			return Service{}, fmt.Errorf("moving the ports by %d would need port %d, which is out of range", off, p)
+		}
+	}
+	return s, nil
+}
+
 // HostNetwork reports whether the compose file gives this service the
 // host's network (`network_mode: host`).
 func (s Service) HostNetwork() bool { return s.hostNetwork }

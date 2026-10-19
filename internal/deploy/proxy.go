@@ -125,6 +125,8 @@ var proxyOps = struct {
 	rollBack    func(dir, previous string) error
 	waitReady   func(mode string, a proxy.AuthURL) error
 	waitFronts  func(f proxy.Fronts) error
+	// waitCentral waits for the front of central's PORT alone.
+	waitCentral func(port int) error
 }{
 	containerID: func(name string) (string, bool, error) {
 		out, found, err := docker.Inspect(name, "{{.Id}} {{.State.Running}}")
@@ -144,7 +146,8 @@ var proxyOps = struct {
 	waitReady: func(mode string, a proxy.AuthURL) error {
 		return proxy.WaitReady(mode, a, 60*time.Second, 120*time.Second)
 	},
-	waitFronts: func(f proxy.Fronts) error { return proxy.WaitFronts(f, 30*time.Second) },
+	waitFronts:  func(f proxy.Fronts) error { return proxy.WaitFronts(f, 30*time.Second) },
+	waitCentral: func(port int) error { return proxy.WaitCentralFront(port, 30*time.Second) },
 }
 
 // startProxy makes the proxy route as routed says and waits until it
@@ -162,8 +165,32 @@ var proxyOps = struct {
 // local: the bundle's files are bind-mounted one by one, which a rewrite
 // does not reach, so the container is recreated (--force-recreate).
 func startProxy(composePath string, st *state.State, routed proxy.Config) error {
-	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
-	if err != nil {
+	if err := beginProxy(composePath, st, routed); err != nil {
+		return err
+	}
+	return waitProxy(st, routed)
+}
+
+// startProxyForCentral starts the proxy early on vps, as soon as central is
+// ready and before auth and edge start: they reach central through the
+// proxy's front of central's PORT, and fail at startup when it is not there.
+// It waits for that front only -- Versola and the other fronts have nothing
+// behind them yet; waitProxy checks them once auth and edge are up.
+func startProxyForCentral(composePath string, st *state.State, routed proxy.Config) error {
+	if err := beginProxy(composePath, st, routed); err != nil {
+		return err
+	}
+	fmt.Println("Waiting for it to serve central...")
+	if err := proxyOps.waitCentral(routed.Fronts.Central); err != nil {
+		return fmt.Errorf("the reverse proxy isn't serving its front of central's PORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+	}
+	return nil
+}
+
+// beginProxy makes the proxy route as routed says, starting or reloading
+// it, without waiting for anything to be served (see startProxy).
+func beginProxy(composePath string, st *state.State, routed proxy.Config) error {
+	if _, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode); err != nil {
 		return fmt.Errorf("the recorded auth URL is no longer valid -- configure again: %w", err)
 	}
 	dir := filepath.Dir(composePath)
@@ -205,6 +232,15 @@ func startProxy(composePath string, st *state.State, routed proxy.Config) error 
 			}
 		}
 	}
+	return nil
+}
+
+// waitProxy waits until the proxy actually serves Versola, and its fronts.
+func waitProxy(st *state.State, routed proxy.Config) error {
+	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
+	if err != nil {
+		return fmt.Errorf("the recorded auth URL is no longer valid -- configure again: %w", err)
+	}
 	fmt.Println("Waiting for it to serve Versola...")
 	err = proxyOps.waitReady(st.ProxyMode, auth)
 	if errors.Is(err, proxy.ErrTLSPending) {
@@ -214,7 +250,7 @@ func startProxy(composePath string, st *state.State, routed proxy.Config) error 
 	}
 	if routed.Fronts != (proxy.Fronts{}) {
 		if err := proxyOps.waitFronts(routed.Fronts); err != nil {
-			return fmt.Errorf("the reverse proxy isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+			return fmt.Errorf("the reverse proxy isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
 		}
 	}
 	return nil

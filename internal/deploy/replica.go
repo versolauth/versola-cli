@@ -49,7 +49,9 @@ type replicaOps interface {
 	// save records a service's slots in state.json.
 	save(service string, slots []state.Slot) error
 	// writeReplicas rewrites replicas.yml for these replicas.
-	writeReplicas(auth, edge []replica) error
+	// central is passed along for what is written beside replicas.yml (a
+	// rollout's overrides.yml); replicas.yml itself has no central.
+	writeReplicas(central, auth, edge []replica) error
 }
 
 // replicaScaler holds one add/remove run.
@@ -85,6 +87,9 @@ func (s *replicaScaler) layout(slots map[string][]state.Slot) (central, auth, ed
 	if central, err = replicasOf(s.topo, CentralService, []state.Slot{{N: 1, Version: s.st.Version}}); err != nil {
 		return
 	}
+	if central, err = frontCentral(central, s.hostNetwork); err != nil {
+		return
+	}
 	if auth, err = replicasOf(s.topo, AuthService, slots[AuthService]); err != nil {
 		return
 	}
@@ -95,8 +100,8 @@ func (s *replicaScaler) layout(slots map[string][]state.Slot) (central, auth, ed
 	return
 }
 
-func (s *replicaScaler) proxyConfig(auth, edge []replica) proxy.Config {
-	return routedConfig(s.st.ProxyMode, s.fronts, s.genDir, auth, edge)
+func (s *replicaScaler) proxyConfig(central, auth, edge []replica) proxy.Config {
+	return routedConfig(s.st.ProxyMode, s.fronts, s.genDir, central, auth, edge)
 }
 
 // record makes slots the service's slots, in state.json and replicas.yml
@@ -105,14 +110,14 @@ func (s *replicaScaler) proxyConfig(auth, edge []replica) proxy.Config {
 func (s *replicaScaler) record(service string, slots []state.Slot) error {
 	next := map[string][]state.Slot{AuthService: s.slots[AuthService], EdgeService: s.slots[EdgeService]}
 	next[service] = slots
-	_, auth, edge, err := s.layout(next)
+	central, auth, edge, err := s.layout(next)
 	if err != nil {
 		return err
 	}
 	if err := s.ops.save(service, slots); err != nil {
 		return fmt.Errorf("couldn't record the replicas in state.json: %w", err)
 	}
-	if err := s.ops.writeReplicas(auth, edge); err != nil {
+	if err := s.ops.writeReplicas(central, auth, edge); err != nil {
 		return err
 	}
 	s.slots[service] = slots
@@ -277,11 +282,11 @@ func (s *replicaScaler) add(service string, count int) error {
 		added++
 
 		// Ready: now it takes traffic.
-		_, a, e, err := s.layout(s.slots)
+		c, a, e, err := s.layout(s.slots)
 		if err != nil {
 			return s.partial(service, added, err)
 		}
-		if err := s.route(s.proxyConfig(a, e)); err != nil {
+		if err := s.route(s.proxyConfig(c, a, e)); err != nil {
 			return s.partial(service, added, fmt.Errorf("%s is running, but the proxy does not route to it yet: %w -- `versola up` fixes that", svc, err))
 		}
 		s.out("%s is ready and takes traffic.\n", svc)
@@ -344,7 +349,7 @@ func routeVia(ops replicaOps, mode string, c proxy.Config) error {
 	// is what shows the reload took.
 	if c.Fronts != (proxy.Fronts{}) {
 		if err := ops.waitFronts(c.Fronts); err != nil {
-			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(mode))
+			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(mode))
 		}
 	}
 	return nil
@@ -367,7 +372,7 @@ func (s *replicaScaler) remove(service string, count int) error {
 
 		remaining := map[string][]state.Slot{AuthService: s.slots[AuthService], EdgeService: s.slots[EdgeService]}
 		remaining[service] = rest
-		_, a, e, err := s.layout(remaining)
+		c, a, e, err := s.layout(remaining)
 		if err != nil {
 			return s.removed(service, i, err)
 		}
@@ -376,7 +381,7 @@ func (s *replicaScaler) remove(service string, count int) error {
 		if err != nil {
 			return s.removed(service, i, err)
 		}
-		if err := s.route(s.proxyConfig(a, e)); err != nil {
+		if err := s.route(s.proxyConfig(c, a, e)); err != nil {
 			return s.removed(service, i, fmt.Errorf("couldn't take %s out of the proxy: %w", svc, err))
 		}
 		if running {
@@ -435,7 +440,7 @@ func (o dockerReplicaOps) waitDrained() { proxy.WaitDrained(o.mode) }
 func (o dockerReplicaOps) save(service string, slots []state.Slot) error {
 	return state.SaveSlots(service, slots)
 }
-func (o dockerReplicaOps) writeReplicas(auth, edge []replica) error {
+func (o dockerReplicaOps) writeReplicas(_, auth, edge []replica) error {
 	return writeReplicasFile(o.dir, filepath.Base(o.composePath), auth, edge)
 }
 
@@ -460,6 +465,9 @@ func CheckReplicaRequest(st *state.State, service string, count int, adding bool
 		return fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file) -- configure it again")
 	}
 	if err := requireCurrentBundle(st, filepath.Dir(composePath)); err != nil {
+		return err
+	}
+	if err := requireCentralMoved(st, filepath.Dir(composePath)); err != nil {
 		return err
 	}
 	if why := st.MixedVersions(); why != "" {

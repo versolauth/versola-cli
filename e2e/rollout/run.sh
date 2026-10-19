@@ -42,6 +42,16 @@ AUTH_URL="https://e2e.test"
 PG_HOST="127.0.0.1:5432"
 
 die() { echo "e2e: $*" >&2; exit 1; }
+# Central sits behind the proxy's front: 8090 is nginx's and balances over the
+# central replicas, which listen on 28090/28091. Answers on both mean the front
+# is up with central behind it; the front must answer with central's version.
+check_central() {
+  local want="$1" out
+  out="$(curl -fsSi --max-time 5 http://127.0.0.1:8090/ 2>&1)" || { echo "e2e: central's front (127.0.0.1:8090) does not answer: $out" >&2; return 1; }
+  grep -q "central" <<<"$out" || { echo "e2e: 127.0.0.1:8090 is not answered by central: $out" >&2; return 1; }
+  [ -z "$want" ] || grep -qF "$want" <<<"$out" || { echo "e2e: central behind 8090 is not $want: $out" >&2; return 1; }
+  curl -fsS --max-time 5 http://127.0.0.1:28090/ >/dev/null 2>&1 || { echo "e2e: central itself does not answer on its own port 28090" >&2; return 1; }
+}
 say() { printf '\n=== %s\n' "$*"; }
 
 # A docker that cannot be asked is not "no containers".
@@ -136,7 +146,7 @@ $found"
   local kb; kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
   [ "${kb:-0}" -ge $((3584 * 1024)) ] || die "only $((${kb:-0} / 1024)) MiB of memory available; the CLI wants more than 3.25 GiB free for a first configure"
   [ "$(df -Pk "$PWD" | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ] || die "less than 4 GiB of free disk in $PWD"
-  for p in 2821 8082 8083 8200; do
+  for p in 2821 8082 8083 8090 8200 28090 28091; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use"; fi
   done
 
@@ -158,6 +168,8 @@ $found"
     printf 'y\n' | "$cli" replica add edge $((replicas - 1))
   fi
   "$cli" status
+  say "central behind the proxy's front"
+  check_central "$A" || die "central is not behind the front after up"
 
   say "building the traffic client"
   (cd "$HERE/traffic" && docker run --rm -v "$HERE/traffic:/src" -v "$work:/out" -w /src \
@@ -212,6 +224,10 @@ $found"
   local trc=0
   wait "$tpid" || trc=$?
 
+  local crc=0
+  check_central "$A" || crc=1
+  [ "$abort_at" != "" ] || check_central "$B" || crc=1
+
   say "traffic report"
   cat "$work/traffic.txt"
 
@@ -220,8 +236,8 @@ $found"
   "$cli" status || true
 
   echo
-  echo "rollout exit: $rrc   abort exit: $arc   traffic exit: $trc   (all 0 is a pass)"
-  [ "$rrc" -eq 0 ] && [ "$arc" -eq 0 ] && [ "$trc" -eq 0 ]
+  echo "rollout exit: $rrc   abort exit: $arc   traffic exit: $trc   central front: $crc   (all 0 is a pass)"
+  [ "$rrc" -eq 0 ] && [ "$arc" -eq 0 ] && [ "$trc" -eq 0 ] && [ "$crc" -eq 0 ]
 }
 
 case "${1:-}" in

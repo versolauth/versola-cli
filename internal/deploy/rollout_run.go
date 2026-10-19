@@ -266,6 +266,9 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 	fmt.Fprintf(&b, "   1. prepare %s: versola-tools, the secrets plan (new secrets go into OpenBao), a new bundle -- nothing running changes%s\n", version, done(prepared))
 	fmt.Fprintf(&b, "   2. migrate the database (migrations can't be rolled back -- back it up first)%s\n", done(prepared && st.MigratedAt != nil))
 	b.WriteString("   3. central: stopped and started on the new version -- the admin console and self-registration are\n      unavailable until it is ready; auth and edge keep serving from their caches\n")
+	if dir, err := bundleDirOf(st); err == nil && !st.RolloutUnderway() && requireCentralMoved(st, dir) != nil {
+		b.WriteString("      (This deployment predates the proxy's front of central: central also moves to ports 28090/28091 and\n      the proxy takes over 8090 once auth and edge are checked, so the gap is somewhat longer, once.)\n")
+	}
 	step := 4
 	for _, svc := range []string{AuthService, EdgeService} {
 		slots := st.ActiveSlots(svc)
@@ -345,9 +348,6 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	if !running {
 		return fmt.Errorf("the reverse proxy (%s) is not running -- start it first (`docker start %s`)", name, name)
 	}
-	if o.NoSurge {
-		return nil
-	}
 	composePath, _, err := st.ComposeFilePath()
 	if err != nil {
 		return err
@@ -355,6 +355,12 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 	topo, err := loadTopology(composePath)
 	if err != nil {
 		return err
+	}
+	if err := centralMovePreflight(st, topo, filepath.Dir(composePath)); err != nil {
+		return err
+	}
+	if o.NoSurge {
+		return nil
 	}
 	for _, svc := range []string{AuthService, EdgeService} {
 		if _, standIn := st.Surge[svc]; standIn {
@@ -383,6 +389,30 @@ func rolloutPreflight(st *state.State, o RolloutOptions, abort bool) error {
 		return err
 	}
 	return checkPgConnections(filepath.Dir(composePath), services, dockerPgHeadroom, warn)
+}
+
+// centralMovePreflight: a deployment from before central was fronted has it
+// on the compose file's ports; this rollout restarts it on the fronted ones
+// (see frontCentral) after stopping the old container, so a foreign listener
+// there would leave central down until someone frees the port. Checked
+// before anything is touched, with or without a stand-in.
+func centralMovePreflight(st *state.State, topo topology.Topology, bundleDir string) error {
+	if requireCentralMoved(st, bundleDir) == nil {
+		return nil // already there: its ports are its own
+	}
+	rs, err := replicasOf(topo, CentralService, []state.Slot{{N: 1}})
+	if err != nil {
+		return err
+	}
+	if rs, err = frontCentral(rs, true); err != nil {
+		return err
+	}
+	for _, port := range hostPortsOf(rs[0], true) {
+		if res := checks.PortFree(port, ""); !res.OK {
+			return fmt.Errorf("central is to move behind the reverse proxy, to port %d, which is taken on this machine: %s -- free it first (central's PORT/DPORT move 20000 up; the proxy takes over %d)", port, res.Detail, rs[0].Ports.Port-centralFrontOffset)
+		}
+	}
+	return nil
 }
 
 // Rollout runs `versola rollout <version>` on st (what CheckRollout passed):
@@ -811,13 +841,13 @@ func (o dockerRolloutOps) waitReadyWithin(u string, timeout time.Duration) error
 }
 
 // writeReplicas writes overrides.yml along with replicas.yml: the rollout
-// recreates auth's slot 1 from this bundle, and without the override it
-// would listen on the APORT/MPORT the proxy holds.
-func (o dockerRolloutOps) writeReplicas(auth, edge []replica) error {
-	if err := o.dockerReplicaOps.writeReplicas(auth, edge); err != nil {
+// recreates central and auth's slot 1 from this bundle, and without the
+// override they would listen on the PORT and APORT/MPORT the proxy holds.
+func (o dockerRolloutOps) writeReplicas(central, auth, edge []replica) error {
+	if err := o.dockerReplicaOps.writeReplicas(central, auth, edge); err != nil {
 		return err
 	}
-	return writeOverridesFile(o.dir, auth)
+	return writeOverridesFile(o.dir, central, auth)
 }
 
 func (o dockerRolloutOps) readyNow(u string) bool {

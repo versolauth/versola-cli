@@ -149,10 +149,8 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(deploy.RolloutPlan(st, version, opts))
-	if !rolloutYes {
-		if err := deploy.ConfirmVpsDeploy(fmt.Sprintf("roll Versola %s out on the VPS as above, applying its migrations to the live database", version)); err != nil {
-			return err
-		}
+	if err := deploy.ConfirmVpsDeployYes(rolloutYes, fmt.Sprintf("roll Versola %s out on the VPS as above, applying its migrations to the live database", version)); err != nil {
+		return err
 	}
 	return deploy.Rollout(st, version, opts)
 }
@@ -178,14 +176,12 @@ func runAbort(opts deploy.RolloutOptions) error {
 		return deploy.AbortDryRun(st, opts)
 	}
 	fmt.Print(deploy.AbortPlan(st, opts))
-	if !rolloutYes {
-		back := st.PreviousVersion
-		if st.RollingBack {
-			back = st.Version
-		}
-		if err := deploy.ConfirmVpsDeploy(fmt.Sprintf("go back to Versola %s on the VPS as above (migrations and secrets stay)", back)); err != nil {
-			return err
-		}
+	back := st.PreviousVersion
+	if st.RollingBack {
+		back = st.Version
+	}
+	if err := deploy.ConfirmVpsDeployYes(rolloutYes, fmt.Sprintf("go back to Versola %s on the VPS as above (migrations and secrets stay)", back)); err != nil {
+		return err
 	}
 	return deploy.Abort(st, opts)
 }

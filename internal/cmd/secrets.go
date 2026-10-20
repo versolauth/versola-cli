@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -109,10 +110,23 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 // scripted/CI invocation piping the value in) -- term.ReadPassword
 // requires a real TTY and errors otherwise, and a script feeding this in
 // isn't the case this masking exists for anyway.
+//
+// That plain read is stricter than readLine() (doctor.go): a read error, an
+// over-long line or an empty line is an error here, not an empty answer, since
+// a cut or missing ID would only fail later as a confusing auth error.
 func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {
-		return readLine(), nil
+		line, err := deploy.ReadLine(os.Stdin)
+		if (err != nil && !errors.Is(err, io.EOF)) || strings.TrimSpace(line) == "" {
+			// A cut, failed or missing ID would be stored or tried and fail later as a
+			// confusing auth error.
+			if err == nil {
+				err = errors.New("empty input")
+			}
+			return "", fmt.Errorf("couldn't read secret ID: %w", err)
+		}
+		return strings.TrimSpace(line), nil
 	}
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()

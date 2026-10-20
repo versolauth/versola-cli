@@ -1,9 +1,10 @@
 package deploy
 
 import (
-	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// the old containers might still be the ones really serving traffic
 	// (flagged in review on versolauth/versola-cli#7). cmd/bootstrap.go
 	// asks once, before Configure runs at all; cmd/up.go asks again on its
-	// own when Up is run standalone (see ConfirmVpsDeploy's own comment on
+	// own when Up is run standalone (see ConfirmVpsDeployYes's own comment on
 	// why one fixed prompt can't cover both callers).
 
 	// The compose file declares this volume `external: true` (see the
@@ -296,7 +297,7 @@ func Up(opts UpOptions, st *state.State) error {
 	return nil
 }
 
-// ConfirmVpsDeploy asks for an explicit go-ahead before anything touches
+// ConfirmVpsDeployYes asks for an explicit go-ahead before anything touches
 // a real VPS deployment. action is the already-formatted sentence
 // describing what this particular call is actually about to do --
 // configure/migrate/up are separate commands now (see cmd/configure.go,
@@ -307,15 +308,80 @@ func Up(opts UpOptions, st *state.State) error {
 // the whole chain in one prompt; cmd/migrate.go and cmd/up.go each call
 // it again themselves when run standalone, since nothing then guarantees
 // the same process just showed one moments ago.
-func ConfirmVpsDeploy(action string) error {
+//
+// assumeYes is the command's -y/--yes: the action is still printed (so a
+// script's log says what it agreed to) but nothing is read from stdin.
+func ConfirmVpsDeployYes(assumeYes bool, action string) error {
+	return confirmVpsFrom(os.Stdin, assumeYes, action)
+}
+
+func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	fmt.Printf("\nThis will %s.\n", action)
+	if assumeYes {
+		fmt.Println("Proceeding (--yes).")
+		return nil
+	}
 	fmt.Print("Continue? [y/N]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := ReadLine(in)
+	// Only a clean end of input after the answer counts: a read error after
+	// a partial "y" must not read as consent.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("aborted: %w", err)
+	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
 		return fmt.Errorf("aborted")
 	}
 	return nil
+}
+
+const (
+	maxLineLen = 4096
+	// maxDrain bounds how much of an over-long line is thrown away, so an
+	// endless stream without a newline cannot hold the prompt forever.
+	maxDrain = 1 << 20
+)
+
+// ErrLineTooLong is ReadLine's error for a line longer than maxLineLen.
+var ErrLineTooLong = errors.New("input line too long")
+
+// ReadLine reads one line from r a byte at a time, without a buffer. Every
+// prompt used to wrap stdin in its own bufio.Reader, which pulls up to 4 KB
+// from a pipe and is then thrown away: with `printf 'y\ny\n' | { versola
+// configure ...; versola migrate; }` the first process swallowed both answers
+// and the second saw EOF and said "aborted". Reading no further than the
+// newline leaves the rest of the pipe for whoever reads next, in this process
+// or the next one. Neither the newline nor a "\r" before it is returned; a
+// final line without a newline is.
+//
+// A line longer than maxLineLen is cut there and returned with
+// ErrLineTooLong: the answers asked for are a word, and a stream with no
+// newline must not be read into memory until EOF. The rest of that line (up
+// to maxDrain bytes) is read and discarded, because left in the pipe it would
+// become the next prompt's answer.
+func ReadLine(r io.Reader) (string, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				return strings.TrimSuffix(string(line), "\r"), nil
+			}
+			line = append(line, b[0])
+			if len(line) > maxLineLen {
+				for drained := 0; b[0] != '\n' && drained < maxDrain; drained++ {
+					if n, err := r.Read(b); n == 0 && err != nil {
+						break
+					}
+				}
+				return string(line[:maxLineLen]), ErrLineTooLong
+			}
+		}
+		if err != nil {
+			return strings.TrimSuffix(string(line), "\r"), err
+		}
+	}
 }
 
 // CheckUp is what Up refuses on the record alone (see checkRunnable), for a

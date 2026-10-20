@@ -243,6 +243,23 @@ first, describing what that particular step is about to do. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
+The answer is read from stdin one line at a time, never further than the
+newline, so a script can feed several answers to consecutive commands
+(`printf 'y\ny\n' | { versola configure vps ...; versola migrate; }`).
+Pasting several commands into an interactive terminal is different: the shell
+has already taken the next line as typed-ahead input, and the prompt reads it
+as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
+`migrate`, `up`, `bootstrap` and `replica add|remove`; `rollout`, `upgrade` and
+`uninstall` accept it too. With `--yes`, `configure`, `migrate`, `up`,
+`bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
+script's log shows what it agreed to) and then go on without asking.
+`local` never asks about its own deployment, so `--yes` changes nothing there.
+The one exception it does not cover: `configure local` / `bootstrap local` on a
+machine whose record still points at a running VPS deployment ask before
+replacing that record, even with `--yes`, because replacing it leaves `status`,
+`down` and `uninstall` unable to find the VPS containers. In a script that
+question is answered by stdin, or the command aborts.
+
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
 
 `configure` (and so `bootstrap`) keeps Versola's secrets in OpenBao, under

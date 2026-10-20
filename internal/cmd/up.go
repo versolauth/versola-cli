@@ -9,6 +9,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
+var upYes bool
 var upNoBrowser bool
 
 var upCmd = &cobra.Command{
@@ -33,6 +34,7 @@ real traffic, so it asks for confirmation first.`,
 }
 
 func init() {
+	upCmd.Flags().BoolVarP(&upYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	upCmd.Flags().BoolVar(&upNoBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 }
 
@@ -58,7 +60,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	st, err := confirmIfVpsState(func(version string) string {
+	st, err := confirmIfVpsState(upYes, func(version string) string {
 		return fmt.Sprintf("start Versola %s on the VPS, replacing whatever's currently serving traffic there", version)
 	})
 	if err != nil {

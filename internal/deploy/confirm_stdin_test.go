@@ -120,3 +120,13 @@ func TestConfirmTooLongLineSaysWhy(t *testing.T) {
 		t.Fatalf("err = %v, want ErrLineTooLong", err)
 	}
 }
+
+func TestReadLineExactLimit(t *testing.T) {
+	at := strings.Repeat("x", maxLineLen)
+	if got, err := ReadLine(strings.NewReader(at + "\n")); err != nil || got != at {
+		t.Errorf("line of exactly maxLineLen: len=%d err=%v", len(got), err)
+	}
+	if _, err := ReadLine(strings.NewReader(at + "x\n")); !errors.Is(err, ErrLineTooLong) {
+		t.Errorf("maxLineLen+1: err = %v, want ErrLineTooLong", err)
+	}
+}

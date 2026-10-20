@@ -367,13 +367,13 @@ func ReadLine(r io.Reader) (string, error) {
 				return strings.TrimSuffix(string(line), "\r"), nil
 			}
 			line = append(line, b[0])
-			if len(line) >= maxLineLen {
+			if len(line) > maxLineLen {
 				for drained := 0; b[0] != '\n' && drained < maxDrain; drained++ {
 					if n, err := r.Read(b); n == 0 && err != nil {
 						break
 					}
 				}
-				return string(line), ErrLineTooLong
+				return string(line[:maxLineLen]), ErrLineTooLong
 			}
 		}
 		if err != nil {

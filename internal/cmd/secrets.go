@@ -112,7 +112,13 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {
-		return readLine(), nil
+		line, err := deploy.ReadLine(os.Stdin)
+		if errors.Is(err, deploy.ErrLineTooLong) {
+			// Truncating would store or try a wrong ID and fail later as a
+			// confusing auth error.
+			return "", fmt.Errorf("couldn't read secret ID: %w", err)
+		}
+		return strings.TrimSpace(line), nil
 	}
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()

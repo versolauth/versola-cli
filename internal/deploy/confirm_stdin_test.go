@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -71,6 +72,7 @@ func TestReadLine(t *testing.T) {
 		{"y\nrest", "y"},
 		{"y\r\n", "y"},
 		{"no newline", "no newline"},
+		{"y\r", "y"},
 		{"", ""},
 	} {
 		got, _ := ReadLine(strings.NewReader(c.in))
@@ -94,5 +96,20 @@ func TestReadLine(t *testing.T) {
 	ReadLine(r)
 	if got, _ := ReadLine(r); got != "b" {
 		t.Errorf("second line = %q, want b", got)
+	}
+}
+
+// endless never delivers a newline.
+type endless struct{ n int }
+
+func (e *endless) Read(p []byte) (int, error) { e.n++; p[0] = 'x'; return 1, nil }
+
+func TestReadLineEndlessStreamTerminates(t *testing.T) {
+	e := &endless{}
+	if _, err := ReadLine(e); !errors.Is(err, ErrLineTooLong) {
+		t.Fatalf("err = %v, want ErrLineTooLong", err)
+	}
+	if e.n > maxLineLen+maxDrain+1 {
+		t.Errorf("read %d bytes, want at most %d", e.n, maxLineLen+maxDrain+1)
 	}
 }

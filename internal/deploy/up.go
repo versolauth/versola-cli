@@ -330,9 +330,15 @@ func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	return nil
 }
 
-const maxLineLen = 4096
+const (
+	maxLineLen = 4096
+	// maxDrain bounds how much of an over-long line is thrown away, so an
+	// endless stream without a newline cannot hold the prompt forever.
+	maxDrain = 1 << 20
+)
 
-var errLineTooLong = errors.New("input line too long")
+// ErrLineTooLong is ReadLine's error for a line longer than maxLineLen.
+var ErrLineTooLong = errors.New("input line too long")
 
 // ReadLine reads one line from r a byte at a time, without a buffer. Every
 // prompt used to wrap stdin in its own bufio.Reader, which pulls up to 4 KB
@@ -340,11 +346,14 @@ var errLineTooLong = errors.New("input line too long")
 // configure ...; versola migrate; }` the first process swallowed both answers
 // and the second saw EOF and said "aborted". Reading no further than the
 // newline leaves the rest of the pipe for whoever reads next, in this process
-// or the next one. The newline is not returned (nor a "\r" before it); a final
-// line without one is. A line longer than maxLineLen is cut there (the
-// rest of it is discarded) with
-// errLineTooLong: the answers asked for are a word, and a stream with no
-// newline must not be read into memory until EOF.
+// or the next one. Neither the newline nor a "\r" before it is returned; a
+// final line without a newline is.
+//
+// A line longer than maxLineLen is cut there and returned with
+// ErrLineTooLong: the answers asked for are a word, and a stream with no
+// newline must not be read into memory until EOF. The rest of that line (up
+// to maxDrain bytes) is read and discarded, because left in the pipe it would
+// become the next prompt's answer.
 func ReadLine(r io.Reader) (string, error) {
 	var line []byte
 	b := make([]byte, 1)
@@ -356,19 +365,16 @@ func ReadLine(r io.Reader) (string, error) {
 			}
 			line = append(line, b[0])
 			if len(line) >= maxLineLen {
-				// Drop the rest of the line (unstored, so memory stays
-				// bounded): left in the pipe it would become the next
-				// prompt's answer.
-				for b[0] != '\n' {
+				for drained := 0; b[0] != '\n' && drained < maxDrain; drained++ {
 					if n, err := r.Read(b); n == 0 && err != nil {
 						break
 					}
 				}
-				return string(line), errLineTooLong
+				return string(line), ErrLineTooLong
 			}
 		}
 		if err != nil {
-			return string(line), err
+			return strings.TrimSuffix(string(line), "\r"), err
 		}
 	}
 }

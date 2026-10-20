@@ -19,8 +19,10 @@ about Versola's own service topology (ports, service names, config schema)
 `secrets`, `uninstall`, and `version` are all implemented and have been
 tested end-to-end against a real local deployment (Postgres + auth +
 central + edge + the reverse proxy, real browser login through to the admin
-console). Releases are automated (see Releasing below) and installed via
-the one-line scripts below.
+console). `replica`, `rollout` and `certs` are implemented too (see their
+sections below); that local test did not cover them. Releases are
+automated (see Releasing below) and installed via the one-line scripts
+below.
 
 `upgrade` is newly added and not yet tested against a real published
 release — try it after the next release goes out, and expect rough edges
@@ -717,8 +719,9 @@ neither):
 - only without a central stand-in (`--no-surge`, or the first rollout of a
   deployment whose proxy does not front central yet): central is stopped
   and started in place, so the admin console and self-registration are down
-  until it is ready -- usually under a minute, not yet measured on a loaded
-  server; the rollout prints how long it was. Any wait for central (its
+  until it is ready -- on an idle stand 0.7.1 was ready well within a
+  minute; not measured on a loaded server. The rollout prints how long it
+  was. Any wait for central (its
   stand-in too) is up to 5 minutes; a replica's, 2 minutes. If central is still not
   ready it stops, leaving auth and edge untouched: run the same command
   again once central is up (it only waits again). `--abort` also works and

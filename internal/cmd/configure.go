@@ -16,6 +16,7 @@ var configurePostgresHost string
 var configureSetupOpenBao bool
 var configureProxy string
 var configureACMEStaging bool
+var configureCentralURL string
 var configureGenerateMissing []string
 var configureAllowLegacy bool
 var configurePostgresDB string
@@ -85,6 +86,7 @@ func init() {
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -180,7 +182,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// error asks for, so it is not a reason to stop.)
 
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging},
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
 	return err
 }
@@ -192,13 +194,15 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range []string{"proxy", "acme-staging", "postgres-db", "postgres-ca"} {
+	for _, name := range []string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca"} {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}
 	}
 	return nil
 }
+
+const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://central.<domain>, <domain> being --auth-url's host without its first label). With --proxy nginx that name is routed to central's port 8093 by Versola's proxy on 443 without terminating TLS, so it needs a DNS record pointing at this server; behind --proxy external your own web server has to do it (see the README)"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

@@ -89,15 +89,18 @@ func OpenbaoContainerName(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
-	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg)
+func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions, genEnvArgs ...string) error {
+	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg, genEnvArgs...)
 }
 
 // pullAndRunToolsTo is pullAndRunTools with the container's stdout sent to
 // stdout instead of always to this process's own: a command that prints a
 // machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
 // so the progress of the pull does not end up inside the result.
-func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
+//
+// genEnvArgs are gen-env.scala's own flags (--central-mutual-tls-url=...),
+// handed to the image as its arguments.
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions, genEnvArgs ...string) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -219,6 +222,7 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		args = append(args, pg.toolsArgs()...)
 	}
 	args = append(args, "-v", dir+":/out", image)
+	args = append(args, genEnvArgs...)
 	c := docker.Cmd(args...)
 	c.Stdout = stdout
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
@@ -230,6 +234,15 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		return err
 	}
 	return nil
+}
+
+// centralGenEnvArgs is gen-env's flag for where edge reaches central, none
+// when there is no URL (it keeps its own default then).
+func centralGenEnvArgs(centralURL string) []string {
+	if centralURL == "" {
+		return nil
+	}
+	return []string{"--central-mutual-tls-url=" + centralURL}
 }
 
 // cappedBuffer is a bytes.Buffer that silently stops accumulating past a

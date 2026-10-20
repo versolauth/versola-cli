@@ -50,9 +50,10 @@ http {
 }
 {{- if .Stream }}
 
-# vps: plain TCP pass-through in front of auth's mutual-TLS listener (MPORT).
-# TLS stays end to end between the caller (edge) and auth -- auth's own
-# certificate, the caller's client certificate -- so it has to be the stream
+# vps: plain TCP pass-through in front of auth's mutual-TLS listener (MPORT),
+# and on 443 in front of central's (central.<domain>, by SNI).
+# TLS stays end to end between the caller (edge) and auth/central -- their own
+# certificates, the caller's client certificate -- so it has to be the stream
 # module, not an http proxy; and stream is a block of its own, beside http.
 stream {
     include stream.d/*.conf;

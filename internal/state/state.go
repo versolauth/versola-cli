@@ -138,6 +138,12 @@ type State struct {
 	// versolauth/versola-cli#7).
 	AuthURL string `json:"authUrl,omitempty"`
 
+	// CentralURL is how edge reaches central's mutual-TLS listener
+	// (--central-url, or central.<domain> derived from AuthURL), as it was
+	// given to versola-tools; empty for vps deployments configured before
+	// the flag, and for any that has no https domain to derive it from.
+	CentralURL string `json:"centralUrl,omitempty"`
+
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
@@ -396,6 +402,8 @@ type FinalizeOptions struct {
 	BundleDir string
 	AuthURL   string
 	ProxyMode string
+	// CentralURL is the normalized --central-url, "" for none.
+	CentralURL string
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
@@ -475,6 +483,7 @@ func Finalize(o FinalizeOptions) error {
 		ConfiguredAt:  time.Now().UTC(),
 		BundleDir:     filepath.Base(o.BundleDir),
 		AuthURL:       o.AuthURL,
+		CentralURL:    o.CentralURL,
 		ProxyMode:     o.ProxyMode,
 		PostgresHost:  o.PostgresHost,
 		PostgresDB:    o.PostgresDB,

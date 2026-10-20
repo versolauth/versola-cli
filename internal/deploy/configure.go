@@ -139,6 +139,18 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 		authURL = auth.URL
 	}
+	// vps: where edge reaches central's mutual-TLS listener, validated the
+	// same way. "" when nothing was given and there is no https domain to
+	// derive central.<domain> from: gen-env keeps its own default then.
+	var central proxy.CentralURL
+	if target == "vps" {
+		var err error
+		central, _, err = proxy.ParseCentralURL(proxyOpts.CentralURL, auth)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		proxyOpts.CentralURL = central.URL
+	}
 	// local: its proxy is versola-cli's too (proxy.ModeLocal), at the
 	// address versola-tools builds every local issuer and redirect URI on.
 	if target == "local" {
@@ -171,7 +183,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 	}
 	if target == "vps" {
-		if err := checkProxyPorts(auth, proxyOpts.Mode); err != nil {
+		if err := checkProxyPorts(auth, proxyOpts.Mode, central.RoutedHost(auth, proxyOpts.Mode) != ""); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -189,7 +201,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, centralGenEnvArgs(proxyOpts.CentralURL)...); err != nil {
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
@@ -485,7 +497,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
-		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
 		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}

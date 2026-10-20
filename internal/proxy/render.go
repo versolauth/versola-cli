@@ -51,6 +51,14 @@ type Config struct {
 	// lives in, as generations (see generation.go), instead of the bundle.
 	// Empty: the bundle's files are mounted as they are (local).
 	GenerationsDir string
+
+	// CentralHost, vps with TLS only: the public name (central.<domain>)
+	// whose TCP/TLS the proxy forwards to central's mutual-TLS port by SNI,
+	// without terminating it. Empty: no such name (see CentralURL.RoutedHost).
+	// Setting it moves the https server from 443 to CentralFrontPort, where
+	// the stream block on 443 forwards every other name, and needs the
+	// stream block (Fronts set).
+	CentralHost string
 }
 
 // Fronts are the ports the proxy listens on, on 127.0.0.1, in front of
@@ -242,6 +250,11 @@ const (
 	CentralFile = "proxy/conf.d/central.conf"
 )
 
+// CentralStreamFile is the stream server on 443 (see Config.CentralHost):
+// written by configure like versola.conf, which it belongs to, and absent
+// when no name is routed.
+const CentralStreamFile = "proxy/stream.d/central-mtls.conf"
+
 // dynamicData is what the files that change with the replicas are
 // rendered from.
 func (c Config) dynamicData() map[string]any {
@@ -371,6 +384,10 @@ func (c Config) Files() (map[string][]byte, error) {
 		listen = []string{strconv.Itoa(LocalPort)}
 	case c.Mode == ModeExternal:
 		listen = []string{"127.0.0.1:" + strconv.Itoa(ExternalPort)}
+	case tls && c.CentralHost != "":
+		// Behind the stream server on 443 (CentralStreamFile), which says
+		// who the client was in a PROXY protocol header.
+		listen = []string{fmt.Sprintf("127.0.0.1:%d ssl proxy_protocol", CentralFrontPort)}
 	case tls:
 		listen = []string{"443 ssl"}
 		if ipv6 {
@@ -383,6 +400,16 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 	}
 
+	if c.CentralHost != "" {
+		switch {
+		case !tls:
+			return nil, fmt.Errorf("the proxy routes central's name only when it terminates TLS itself (--proxy nginx, https --auth-url)")
+		case c.CentralHost == c.AuthURL.Host:
+			return nil, fmt.Errorf("central's name %s is the auth URL's: SNI could not tell them apart", c.CentralHost)
+		case !c.Fronts.set():
+			return nil, fmt.Errorf("routing central's name needs the stream block, which is vps's")
+		}
+	}
 	if c.GenerationsDir != "" && c.Mode == ModeLocal {
 		return nil, fmt.Errorf("the local proxy mounts its bundle's files, not config generations")
 	}
@@ -401,6 +428,11 @@ func (c Config) Files() (map[string][]byte, error) {
 		"TLS":           tls,
 		"IPv6":          ipv6,
 		"RealIP":        c.Mode == ModeExternal,
+		"ProxyProtocol": tls && c.CentralHost != "",
+		"CentralHost":   c.CentralHost,
+		"CentralPort":   CentralMutualTLSPort,
+		"FrontPort":     CentralFrontPort,
+		"RelayPort":     CentralRelayPort,
 		"Listen":        listen,
 		"Host":          c.AuthURL.Host,
 		"Resolvers":     c.Resolvers,
@@ -413,7 +445,7 @@ func (c Config) Files() (map[string][]byte, error) {
 		"ExternalPort":  ExternalPort,
 		"LocalPort":     LocalPort,
 		"HostNetwork":   c.Mode != ModeLocal,
-		"Stream":        c.Fronts.set(),
+		"Stream":        c.Fronts.set() || c.CentralHost != "",
 		"Generations":   c.GenerationsDir != "",
 		// JSON strings are YAML's double-quoted scalars, so a path with
 		// spaces stays one value; `$` is doubled, or Compose would
@@ -437,6 +469,13 @@ func (c Config) Files() (map[string][]byte, error) {
 			return nil, err
 		}
 		files[out] = b
+	}
+	if c.CentralHost != "" {
+		b, err := render("templates/central-mtls.conf.tmpl", data)
+		if err != nil {
+			return nil, err
+		}
+		files[CentralStreamFile] = b
 	}
 	for out, src := range map[string]string{
 		"proxy/proxy_params.conf": "templates/proxy_params.conf",
@@ -490,6 +529,13 @@ func Write(bundleDir string, c Config) error {
 		}
 		if err := os.WriteFile(path, content, 0o644); err != nil {
 			return fmt.Errorf("couldn't write %s: %w", path, err)
+		}
+	}
+	// A bundle reconfigured without a routed name must not keep the stream
+	// server of the last one: versola.conf is back on 443 itself.
+	if _, ok := files[CentralStreamFile]; !ok {
+		if err := os.Remove(filepath.Join(bundleDir, CentralStreamFile)); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
 	return nil

@@ -42,8 +42,14 @@ func (a AuthURL) TLS(mode string) bool {
 //   - TLS: a public domain name, not an IP or localhost -- Let's Encrypt
 //     won't issue for those, and the ACME module would just keep failing.
 func ParseAuthURL(raw, mode string) (AuthURL, error) {
+	return parseOrigin("--auth-url", raw, mode)
+}
+
+// parseOrigin is ParseAuthURL for any flag that takes scheme://host[:port]:
+// flag is only what its errors call the value.
+func parseOrigin(flag, raw, mode string) (AuthURL, error) {
 	fail := func(reason string) (AuthURL, error) {
-		return AuthURL{}, fmt.Errorf("--auth-url %q: %s", raw, reason)
+		return AuthURL{}, fmt.Errorf("%s %q: %s", flag, raw, reason)
 	}
 
 	u := strings.ToLower(strings.TrimSuffix(raw, "/"))

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +16,11 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
-var doctorTarget string
+var doctorTarget, doctorAuthURL, doctorCentralURL string
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
@@ -37,6 +40,8 @@ would actually pass, or pass one it would actually fail.`,
 }
 
 func init() {
+	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- also checks the name central.<domain> is derived from it")
+	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with (default: derived from --auth-url) -- checks that its name resolves to this server and that port 8093 answers a TLS handshake")
 	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
 }
 
@@ -65,6 +70,20 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		results = append(results, checks.PortFree(proxy.LocalPort, proxy.LocalContainerName))
 	}
 	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
+	if doctorTarget == "vps" {
+		central, err := centralChecks(doctorAuthURL, doctorCentralURL)
+		if err != nil {
+			return err
+		}
+		results = append(results, central...)
+		// Certificates of a deployment already on this host: none to check
+		// before the first configure.
+		if r, found := checks.MTLSLeafCheck(deploy.MTLSVolumeName("vps"), "versola-step-ca"); found {
+			results = append(results, r)
+		}
+	} else if doctorAuthURL != "" || doctorCentralURL != "" {
+		return fmt.Errorf("--auth-url and --central-url only apply to --target vps")
+	}
 
 	failed := 0
 	for _, r := range results {
@@ -94,6 +113,47 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
 	return fmt.Errorf("doctor found %d problem(s)", failed)
+}
+
+// centralChecks: vps's second name, the one edge reaches central's
+// mutual-TLS listener at (see proxy.CentralURL). Only with --auth-url or
+// --central-url, since doctor otherwise knows nothing about the deployment.
+// The handshake checks are for a server whose central is running: before
+// `versola up` there is nothing to answer.
+func centralChecks(authURL, centralURL string) ([]checks.Result, error) {
+	if authURL == "" && centralURL == "" {
+		return nil, nil
+	}
+	var auth proxy.AuthURL
+	if authURL != "" {
+		var err error
+		if auth, err = proxy.ParseAuthURL(authURL, proxy.ModeExternal); err != nil {
+			return nil, err
+		}
+	}
+	c, ok, err := proxy.ParseCentralURL(centralURL, auth)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	name := checks.CentralName(c.Host)
+	results := []checks.Result{name}
+	if !name.OK {
+		return results, nil
+	}
+	// Central's own listener, where an edge outside this host can use it
+	// directly; and 443, where the proxy routes the name to it by SNI.
+	port := strconv.Itoa(proxy.CentralMutualTLSPort)
+	if c.Port != "" {
+		port = c.Port
+	}
+	results = append(results, checks.TLSAnswers("Central mutual TLS", net.JoinHostPort(c.Host, port), c.Host))
+	if c.Port == "" {
+		results = append(results, checks.TLSAnswers("Central via the proxy", net.JoinHostPort(c.Host, "443"), c.Host))
+	}
+	return results, nil
 }
 
 // offerDockerHelp runs when the Docker daemon check failed. It distinguishes

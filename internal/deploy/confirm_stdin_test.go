@@ -130,3 +130,23 @@ func TestReadLineExactLimit(t *testing.T) {
 		t.Errorf("maxLineLen+1: err = %v, want ErrLineTooLong", err)
 	}
 }
+
+// failAfter delivers its data, then a non-EOF error.
+type failAfter struct{ data string }
+
+func (f *failAfter) Read(p []byte) (int, error) {
+	if f.data == "" {
+		return 0, errors.New("read failed")
+	}
+	p[0], f.data = f.data[0], f.data[1:]
+	return 1, nil
+}
+
+func TestConfirmReadErrorIsNotConsent(t *testing.T) {
+	if err := confirmVpsFrom(&failAfter{data: "y"}, false, "do a thing"); err == nil {
+		t.Fatal("a read error after a partial y was taken as consent")
+	}
+	if err := confirmVpsFrom(strings.NewReader("y"), false, "do a thing"); err != nil {
+		t.Errorf("clean EOF after y: %v, want consent", err)
+	}
+}

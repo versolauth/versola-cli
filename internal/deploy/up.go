@@ -323,7 +323,9 @@ func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	}
 	fmt.Print("Continue? [y/N]: ")
 	line, err := ReadLine(in)
-	if errors.Is(err, ErrLineTooLong) {
+	// Only a clean end of input after the answer counts: a read error after
+	// a partial "y" must not read as consent.
+	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("aborted: %w", err)
 	}
 	line = strings.TrimSpace(strings.ToLower(line))

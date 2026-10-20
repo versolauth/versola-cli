@@ -57,7 +57,7 @@ is the replica stopped. The last replica of a service cannot be removed.`,
 var replicaYes bool
 
 func init() {
-	replicaCmd.PersistentFlags().BoolVarP(&replicaYes, "yes", "y", false, "don't ask for confirmation (vps)")
+	replicaCmd.PersistentFlags().BoolVarP(&replicaYes, "yes", "y", false, "don't ask for confirmation")
 	replicaCmd.AddCommand(replicaAddCmd)
 	replicaCmd.AddCommand(replicaRemoveCmd)
 }

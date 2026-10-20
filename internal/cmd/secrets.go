@@ -113,9 +113,12 @@ func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {
 		line, err := deploy.ReadLine(os.Stdin)
-		if errors.Is(err, deploy.ErrLineTooLong) || (err != nil && strings.TrimSpace(line) == "") {
+		if errors.Is(err, deploy.ErrLineTooLong) || strings.TrimSpace(line) == "" {
 			// A cut or missing ID would be stored or tried and fail later as a
 			// confusing auth error.
+			if err == nil {
+				err = errors.New("empty input")
+			}
 			return "", fmt.Errorf("couldn't read secret ID: %w", err)
 		}
 		return strings.TrimSpace(line), nil

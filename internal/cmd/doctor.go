@@ -3,8 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
-	"io"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"

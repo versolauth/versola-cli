@@ -110,6 +110,10 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 // scripted/CI invocation piping the value in) -- term.ReadPassword
 // requires a real TTY and errors otherwise, and a script feeding this in
 // isn't the case this masking exists for anyway.
+//
+// That plain read is stricter than readLine() (doctor.go): a read error, an
+// over-long line or an empty line is an error here, not an empty answer, since
+// a cut or missing ID would only fail later as a confusing auth error.
 func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {

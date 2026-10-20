@@ -23,6 +23,8 @@ var bootstrapPostgresCA string
 var bootstrapGenerateMissing []string
 var bootstrapAllowLegacy bool
 
+var bootstrapYes bool
+
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
 	Short: "Deploy a specific version of Versola",
@@ -77,6 +79,7 @@ touches a live database, or to run migrate on its own schedule.`,
 }
 
 func init() {
+	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
@@ -156,10 +159,10 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// configure.go.
 	if target == "vps" {
 		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
-		if err := deploy.ConfirmVpsDeploy(action); err != nil {
+		if err := deploy.ConfirmVpsDeployYes(bootstrapYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(bootstrapYes, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state loaded here (if any) describes the record this run is

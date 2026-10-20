@@ -243,6 +243,17 @@ first, describing what that particular step is about to do. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
+The answer is read from stdin one line at a time, never further than the
+newline, so a script can feed several answers to consecutive commands
+(`printf 'y\ny\n' | { versola configure vps ...; versola migrate; }`).
+Pasting several commands into an interactive terminal is different: the shell
+has already taken the next line as typed-ahead input, and the prompt reads it
+as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
+`migrate`, `up`, `bootstrap` and `replica add|remove` (as `rollout`, `upgrade`
+and `uninstall` already accept): the "This will …" line is still printed,
+the question is not asked. `--yes` changes nothing against `local`, which
+never asks.
+
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
 
 `configure` (and so `bootstrap`) keeps Versola's secrets in OpenBao, under

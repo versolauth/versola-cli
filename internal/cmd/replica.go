@@ -54,7 +54,10 @@ is the replica stopped. The last replica of a service cannot be removed.`,
 	},
 }
 
+var replicaYes bool
+
 func init() {
+	replicaCmd.PersistentFlags().BoolVarP(&replicaYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	replicaCmd.AddCommand(replicaAddCmd)
 	replicaCmd.AddCommand(replicaRemoveCmd)
 }
@@ -99,7 +102,7 @@ func runReplica(args []string, verb string, run func(*state.State, string, int) 
 		return err
 	}
 	if st.Target == "vps" {
-		if err := deploy.ConfirmVpsDeploy(action(service, count, st.Version)); err != nil {
+		if err := deploy.ConfirmVpsDeployYes(replicaYes, action(service, count, st.Version)); err != nil {
 			return err
 		}
 	}

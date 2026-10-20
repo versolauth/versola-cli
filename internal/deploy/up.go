@@ -1,9 +1,9 @@
 package deploy
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,14 +308,53 @@ func Up(opts UpOptions, st *state.State) error {
 // it again themselves when run standalone, since nothing then guarantees
 // the same process just showed one moments ago.
 func ConfirmVpsDeploy(action string) error {
+	return confirmVpsFrom(os.Stdin, false, action)
+}
+
+// ConfirmVpsDeployYes is ConfirmVpsDeploy for commands with a -y/--yes flag:
+// with assumeYes the action is still printed (so a script's log says what it
+// agreed to) but nothing is read from stdin.
+func ConfirmVpsDeployYes(assumeYes bool, action string) error {
+	return confirmVpsFrom(os.Stdin, assumeYes, action)
+}
+
+func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	fmt.Printf("\nThis will %s.\n", action)
+	if assumeYes {
+		fmt.Println("Continue? [y/N]: y (--yes)")
+		return nil
+	}
 	fmt.Print("Continue? [y/N]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := ReadLine(in)
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
 		return fmt.Errorf("aborted")
 	}
 	return nil
+}
+
+// ReadLine reads one line from r a byte at a time, without a buffer. Every
+// prompt used to wrap stdin in its own bufio.Reader, which pulls up to 4 KB
+// from a pipe and is then thrown away: with `printf 'y\ny\n' | { versola
+// configure ...; versola migrate; }` the first process swallowed both answers
+// and the second saw EOF and said "aborted". Reading no further than the
+// newline leaves the rest of the pipe for whoever reads next, in this process
+// or the next one. The newline is not returned; a final line without one is.
+func ReadLine(r io.Reader) (string, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				return string(line), nil
+			}
+			line = append(line, b[0])
+		}
+		if err != nil {
+			return string(line), err
+		}
+	}
 }
 
 // CheckUp is what Up refuses on the record alone (see checkRunnable), for a

@@ -11,6 +11,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
+var configureYes bool
 var configureAuthURL string
 var configurePostgresHost string
 var configureSetupOpenBao bool
@@ -81,6 +82,7 @@ than something that happens silently — e.g. deploying onto a server.`,
 }
 
 func init() {
+	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
@@ -165,10 +167,10 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// ifs, to avoid a double prompt when both technically apply.
 	if target == "vps" {
 		action := fmt.Sprintf("make Versola %s the deployment this machine tracks for the VPS, replacing its current record (nothing is started or stopped yet)", version)
-		if err := deploy.ConfirmVpsDeploy(action); err != nil {
+		if err := deploy.ConfirmVpsDeployYes(configureYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(configureYes, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state confirmIfVpsState loaded (if any) describes the record

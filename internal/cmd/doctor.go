@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -296,8 +295,7 @@ func stdinIsInteractive() bool {
 }
 
 func readLine() string {
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
+	line, _ := deploy.ReadLine(os.Stdin)
 	return strings.TrimSpace(line)
 }
 

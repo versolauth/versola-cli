@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -321,7 +322,7 @@ func ConfirmVpsDeployYes(assumeYes bool, action string) error {
 func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	fmt.Printf("\nThis will %s.\n", action)
 	if assumeYes {
-		fmt.Println("Continue? [y/N]: y (--yes)")
+		fmt.Println("Proceeding (--yes).")
 		return nil
 	}
 	fmt.Print("Continue? [y/N]: ")
@@ -333,13 +334,20 @@ func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	return nil
 }
 
+const maxLineLen = 4096
+
+var errLineTooLong = errors.New("input line too long")
+
 // ReadLine reads one line from r a byte at a time, without a buffer. Every
 // prompt used to wrap stdin in its own bufio.Reader, which pulls up to 4 KB
 // from a pipe and is then thrown away: with `printf 'y\ny\n' | { versola
 // configure ...; versola migrate; }` the first process swallowed both answers
 // and the second saw EOF and said "aborted". Reading no further than the
 // newline leaves the rest of the pipe for whoever reads next, in this process
-// or the next one. The newline is not returned; a final line without one is.
+// or the next one. The newline is not returned (nor a "\r" before it); a final
+// line without one is. A line longer than maxLineLen is cut there with
+// errLineTooLong: the answers asked for are a word, and a stream with no
+// newline must not be read into memory until EOF.
 func ReadLine(r io.Reader) (string, error) {
 	var line []byte
 	b := make([]byte, 1)
@@ -347,9 +355,12 @@ func ReadLine(r io.Reader) (string, error) {
 		n, err := r.Read(b)
 		if n == 1 {
 			if b[0] == '\n' {
-				return string(line), nil
+				return strings.TrimSuffix(string(line), "\r"), nil
 			}
 			line = append(line, b[0])
+			if len(line) >= maxLineLen {
+				return string(line), errLineTooLong
+			}
 		}
 		if err != nil {
 			return string(line), err

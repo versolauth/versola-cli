@@ -69,7 +69,7 @@ func TestConfirmVpsDeployYesSkipsStdin(t *testing.T) {
 func TestReadLine(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"y\nrest", "y"},
-		{"y\r\n", "y\r"}, // callers TrimSpace
+		{"y\r\n", "y"},
 		{"no newline", "no newline"},
 		{"", ""},
 	} {
@@ -77,6 +77,11 @@ func TestReadLine(t *testing.T) {
 		if got != c.want {
 			t.Errorf("ReadLine(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+	// A newline-less stream is cut, not read to EOF.
+	long := strings.NewReader(strings.Repeat("x", 3*maxLineLen))
+	if got, err := ReadLine(long); err == nil || len(got) != maxLineLen {
+		t.Errorf("long line: len=%d err=%v, want len %d and an error", len(got), err, maxLineLen)
 	}
 	// Does not consume past the newline.
 	r := strings.NewReader("a\nb\n")

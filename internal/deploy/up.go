@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,8 +72,12 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	// vps: APORT/MPORT behind the proxy, slot 1's included (frontAuth).
+	// vps: APORT/MPORT behind the proxy, slot 1's included (frontAuth), and
+	// central's PORT/DPORT (frontCentral).
 	if authReplicas, err = frontAuth(authReplicas, isVps); err != nil {
+		return err
+	}
+	if centralReplicas, err = frontCentral(centralReplicas, isVps); err != nil {
 		return err
 	}
 	fronts, genDir, err := proxyRouting(topo, isVps)
@@ -102,7 +107,7 @@ func Up(opts UpOptions, st *state.State) error {
 		return err
 	}
 	// Slot 1's moved ports, merged over compose.yml (see overridesYAML).
-	if err := writeOverridesFile(dir, authReplicas); err != nil {
+	if err := writeOverridesFile(dir, centralReplicas, authReplicas); err != nil {
 		return err
 	}
 	steps := appStartSteps(authReplicas, edgeReplicas)
@@ -178,6 +183,20 @@ func Up(opts UpOptions, st *state.State) error {
 		return fmt.Errorf("central never became ready: %w", err)
 	}
 
+	// vps: auth, edge and the admin console's resource reach central through
+	// the proxy's front of its PORT, and auth/edge fail at startup when they
+	// cannot, so the proxy is started now, before them, rather than last. It
+	// routes to auth and edge replicas that are not up yet; what it serves of
+	// Versola is waited for below, once they are.
+	routed := routedConfig(st.ProxyMode, fronts, genDir, centralReplicas, authReplicas, edgeReplicas)
+	proxyStarted := false
+	if routed.Fronts.Central != 0 {
+		if err := startProxyForCentral(composePath, st, routed); err != nil {
+			return err
+		}
+		proxyStarted = true
+	}
+
 	// Named explicitly, not a bare "up -d" ("start everything not already
 	// running under this project") -- openbao is deliberately left out of
 	// that: Configure starts it (or leaves an already-running one alone —
@@ -206,10 +225,15 @@ func Up(opts UpOptions, st *state.State) error {
 
 	// The reverse proxy versola-cli generated at configure time (see
 	// package proxy) -- started last, once what it routes to is ready, so
-	// it never serves traffic to a backend that isn't. Its upstreams follow
-	// the replicas recorded in state, whatever configure or the last
-	// `replica add|remove` wrote.
-	if err := startProxy(composePath, st, routedConfig(st.ProxyMode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
+	// it never serves traffic to a backend that isn't (vps: it was started
+	// before auth and edge, see above, and what is left is to wait for it to
+	// serve them). Its upstreams follow the replicas recorded in state,
+	// whatever configure or the last `replica add|remove` wrote.
+	if proxyStarted {
+		if err := waitProxy(st, routed); err != nil {
+			return err
+		}
+	} else if err := startProxy(composePath, st, routed); err != nil {
 		return err
 	}
 
@@ -345,6 +369,26 @@ func requireCurrentBundle(st *state.State, bundleDir string) error {
 	// over (its container has no config generations to reload into).
 	if st.Target == "vps" && !proxy.UsesGenerations(bundleDir) {
 		return fmt.Errorf("%w (its reverse proxy config predates the proxy's config generations)", state.ErrOldInstall)
+	}
+	return nil
+}
+
+// requireCentralMoved is for what routes a front of central's PORT while
+// central itself is not to run (`replica add|remove`): on vps the bundle has
+// to say central listens behind the proxy (overrides.yml, written by up and
+// configure). A bundle that does not is from before central was fronted --
+// its central still holds 8090, which a generation with the front cannot
+// bind (nginx would reload "fine" and never take the port).
+func requireCentralMoved(st *state.State, bundleDir string) error {
+	if st.Target != "vps" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(bundleDir, state.OverridesFile))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("couldn't read %s: %w", state.OverridesFile, err)
+	}
+	if !bytes.Contains(b, []byte("\n  "+CentralService+":\n")) {
+		return fmt.Errorf("central still listens on its own port 8090, not behind the reverse proxy (this deployment predates that): run `versola up` first -- central restarts once, auth and edge keep serving")
 	}
 	return nil
 }

@@ -139,9 +139,41 @@ func frontAuth(auth []replica, hostNetwork bool) ([]replica, error) {
 	return out, nil
 }
 
-// proxyFronts are the addresses the reverse proxy takes over in front of
-// auth on a host network: auth's APORT and MPORT as the compose file sets
-// them, on loopback (where auth binds and edge and central connect).
+// centralFrontOffset is how far central's PORT and DPORT move on a host
+// network (vps) for the reverse proxy to listen where the compose file
+// puts PORT (8090), which auth, edge and the admin console's resource all
+// call. The same idea as frontOffset, with a bigger step: 28090/28091 is
+// outside the ports other software on a server commonly takes (Prometheus
+// and its exporters sit at 9090-9100) and below Linux's ephemeral range
+// (from 32768), which outgoing connections pick from. Slot n adds the
+// usual slot stride on top.
+const centralFrontOffset = 20000
+
+// frontCentral moves central's PORT and DPORT behind the reverse proxy (see
+// centralFrontOffset) on a host network; on a bridge network (local) every
+// container has its own ports, so nothing moves. Out of range is an error.
+func frontCentral(central []replica, hostNetwork bool) ([]replica, error) {
+	if !hostNetwork {
+		return central, nil
+	}
+	out := make([]replica, len(central))
+	for i, r := range central {
+		ports, err := r.Ports.ShiftListeners(centralFrontOffset)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", r.Service, err)
+		}
+		r.Ports = ports
+		r.Fronted = true
+		out[i] = r
+	}
+	return out, nil
+}
+
+// proxyFronts are the addresses the reverse proxy takes over on a host
+// network: in front of auth, its APORT and MPORT as the compose file sets
+// them, on loopback (where auth binds and edge and central connect); and in
+// front of central, its PORT as the compose file sets it (where auth, edge
+// and the admin console's resource connect).
 func proxyFronts(topo topology.Topology) (proxy.Fronts, error) {
 	auth, err := topo.Service(AuthService)
 	if err != nil {
@@ -150,7 +182,11 @@ func proxyFronts(topo topology.Topology) (proxy.Fronts, error) {
 	if err := auth.CheckAdditional(AuthService); err != nil {
 		return proxy.Fronts{}, err
 	}
-	return proxy.Fronts{Additional: auth.AdditionalPort, MutualTLS: auth.MutualTLSPort}, nil
+	central, err := topo.Service(CentralService)
+	if err != nil {
+		return proxy.Fronts{}, err
+	}
+	return proxy.Fronts{Additional: auth.AdditionalPort, MutualTLS: auth.MutualTLSPort, Central: central.Port}, nil
 }
 
 // proxyGenerationsDir is the vps proxy's own configuration directory (see
@@ -183,8 +219,15 @@ func proxyRouting(topo topology.Topology, hostNetwork bool) (proxy.Fronts, strin
 }
 
 // routedConfig is the proxy config that routes to these replicas.
-func routedConfig(mode string, fronts proxy.Fronts, genDir string, auth, edge []replica) proxy.Config {
-	return proxy.Config{Mode: mode, Auth: proxyBackends(auth), Edge: proxyBackends(edge), Fronts: fronts, GenerationsDir: genDir}
+//
+// central is the replicas behind the proxy's front of central (vps); on
+// local nothing is in front of it and it is not part of the config.
+func routedConfig(mode string, fronts proxy.Fronts, genDir string, central, auth, edge []replica) proxy.Config {
+	c := proxy.Config{Mode: mode, Auth: proxyBackends(auth), Edge: proxyBackends(edge), Fronts: fronts, GenerationsDir: genDir}
+	if fronts.Central != 0 {
+		c.Central = centralBackends(central)
+	}
+	return c
 }
 
 // frontReservations are proxyFronts as ports nothing else may take.
@@ -192,6 +235,7 @@ func frontReservations(f proxy.Fronts) []reservation {
 	return []reservation{
 		{Name: proxyHolder + " (in front of auth's APORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.Additional}},
 		{Name: proxyHolder + " (in front of auth's MPORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.MutualTLS}},
+		{Name: proxyHolder + " (in front of central's PORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.Central}},
 	}
 }
 
@@ -598,6 +642,16 @@ func serviceNames(replicas ...[]replica) []string {
 		}
 	}
 	return names
+}
+
+// centralBackends is what the proxy's central upstream routes to: each
+// replica's PORT, nothing else (central has no APORT or MPORT).
+func centralBackends(replicas []replica) []proxy.Backend {
+	backends := make([]proxy.Backend, len(replicas))
+	for i, r := range replicas {
+		backends[i] = proxy.Backend{Service: r.Service, Port: r.Ports.Port}
+	}
+	return backends
 }
 
 // proxyBackends is what the proxy's upstreams route to: each replica's

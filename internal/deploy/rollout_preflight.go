@@ -100,7 +100,10 @@ func checkStandInMemory(p memoryProbe, st *state.State, services []string, warn 
 			basis = "the size of one replica"
 		}
 		hint := "--no-surge (one replica fewer serves while each is replaced"
-		if replicas := len(st.ActiveSlots(svc)); replicas < 2 {
+		if svc == CentralService {
+			hint = "--no-surge (central is then stopped and started in place: the admin console is down until it is ready"
+		}
+		if replicas := len(st.ActiveSlots(svc)); replicas < 2 && svc != CentralService {
 			hint += "; with one replica add --allow-downtime: it is down until the new one is ready"
 		}
 		return fmt.Errorf("not enough free memory for a stand-in %s replica: it needs about %s (%s) plus %s kept free, and %s is available -- free memory first, or run with %s)",
@@ -119,18 +122,31 @@ func mib(b int64) string { return fmt.Sprintf("%d MiB", b/(1024*1024)) }
 // refuse a rollout that only has its last steps left. (A recorded version
 // is not proof -- the engine still replaces a replica its container says
 // is not done, and checks memory again before any stand-in it starts.)
-// An abort checks every service: replicas that never moved are recorded
-// at the version it goes back to and are recreated all the same.
-func standInServices(st *state.State, o RolloutOptions, abort bool) []string {
+// An abort that goes back from the previous bundle (reuse) leaves the replicas
+// that never moved alone: a service whose every replica is recorded at the
+// version it goes back to starts no stand-in. Otherwise (the previous version
+// is configured anew) it checks every service: replicas that never moved are
+// recreated all the same.
+//
+// central is in only when centralFronted: a stand-in of central needs the
+// proxy in front of central's PORT (see rolloutEngine.centralInPlace).
+func standInServices(st *state.State, o RolloutOptions, abort, reuse, centralFronted bool) []string {
 	if o.NoSurge {
 		return nil
 	}
+	services := []string{AuthService, EdgeService}
+	if centralFronted {
+		services = rolloutServices
+	}
 	var out []string
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range services {
 		if _, ok := st.Surge[svc]; ok {
 			continue
 		}
 		if !abort && st.RolloutUnderway() && !st.RollingBack && allAt(st.ActiveSlots(svc), st.Version) {
+			continue
+		}
+		if abort && reuse && !st.RollingBack && allAt(st.ActiveSlots(svc), st.PreviousVersion) {
 			continue
 		}
 		out = append(out, svc)
@@ -338,52 +354,88 @@ func firstLine(s string) string {
 	return ""
 }
 
+// pgAsker words the check for what it is about: a stand-in that goes again, or
+// the replicas `replica add` leaves running.
+type pgAsker struct {
+	announce string // "Checking that Postgres has the connections for <announce>..."
+	needs    string // "the Postgres connections <needs> are not checked"
+	opens    string // format of the sentence with how many connections are needed
+}
+
+var (
+	standInAsker    = pgAsker{"a stand-in replica", "a stand-in needs", "A stand-in opens %d."}
+	newReplicaAsker = pgAsker{"the new replicas", "the new replicas need", "The new replicas open %d."}
+)
+
 // checkPgConnections refuses when Postgres can't take the pool of a stand-in
 // of any of services (they run one after another: the largest counts). It
 // only warns when the check itself can't run -- a config it can't read, the
 // image out of reach, a server it can't log in to: the rollout's own
 // readiness checks still stop a stand-in that can't connect.
 func checkPgConnections(bundleDir string, services []string, run pgRunner, warn func(string, ...any)) error {
-	if len(services) == 0 {
+	headroom, need, needFor, ok := pgHeadroomFor(bundleDir, services, 1, standInAsker, run, warn)
+	if !ok || headroom >= need+pgMargin {
 		return nil
 	}
-	need, needFor := 0, ""
+	return fmt.Errorf("Postgres takes %d more connections and a stand-in %s replica opens %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or run with --no-surge",
+		headroom, needFor, need, pgMargin)
+}
+
+// checkPgForReplicas is the check of `replica add`: count more replicas of
+// service open their pools together and stay open, so Postgres has to take
+// all of them, not the largest one as for a stand-in that goes again. Like
+// checkPgConnections it only warns when it can't ask.
+func checkPgForReplicas(bundleDir, service string, count int, run pgRunner, warn func(string, ...any)) error {
+	headroom, need, _, ok := pgHeadroomFor(bundleDir, []string{service}, count, newReplicaAsker, run, warn)
+	if !ok || headroom >= need+pgMargin {
+		return nil
+	}
+	return fmt.Errorf("Postgres takes %d more connections and %d more %s replica(s) open %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or add fewer replicas",
+		headroom, count, service, need, pgMargin)
+}
+
+// pgHeadroomFor asks Postgres how many connections are free and what
+// replicas of the services need: the largest of them, times replicas. ok is
+// false when the check could not be made (a warning was given), or there is
+// nothing to check.
+func pgHeadroomFor(bundleDir string, services []string, replicas int, who pgAsker, run pgRunner, warn func(string, ...any)) (headroom, need int, needFor string, ok bool) {
+	if len(services) == 0 {
+		return 0, 0, "", false
+	}
 	var target pgTarget
 	var secrets string
+	per := 0
 	for _, svc := range services {
 		b, err := os.ReadFile(filepath.Join(bundleDir, svc+".conf"))
 		if err != nil {
-			warn("Warning: couldn't read %s.conf (%v) -- the Postgres connections a stand-in needs are not checked.\n", svc, err)
-			return nil
+			warn("Warning: couldn't read %s.conf (%v) -- the Postgres connections %s are not checked.\n", svc, err, who.needs)
+			return 0, 0, "", false
 		}
 		t, err := parsePgTarget(string(b))
 		if err != nil {
-			warn("Warning: couldn't read the Postgres settings of %s (%v) -- the connections a stand-in needs are not checked.\n", svc, err)
-			return nil
+			warn("Warning: couldn't read the Postgres settings of %s (%v) -- the connections %s are not checked.\n", svc, err, who.needs)
+			return 0, 0, "", false
 		}
-		if n := t.pool + pgListenConns[svc]; n > need {
-			need, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
+		if n := t.pool + pgListenConns[svc]; n > per {
+			per, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
 		}
 	}
+	need = per * replicas
 	if target.rootCert != "" && pgVerifies(target.sslmode) {
 		ca, err := pgCAOnHost(bundleDir, target.rootCert)
 		if err != nil {
-			warn("Warning: %v -- the Postgres connections a stand-in needs are not checked.\n", err)
-			return nil
+			warn("Warning: %v -- the Postgres connections %s are not checked.\n", err, who.needs)
+			return 0, 0, "", false
 		}
 		target.caFile = ca
 	}
-	fmt.Println("Checking that Postgres has the connections for a stand-in replica...")
+	fmt.Printf("Checking that Postgres has the connections for %s...\n", who.announce)
 	headroom, err := run(target, secrets)
 	if err != nil {
-		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. A stand-in opens %d.\n", err, need)
-		return nil
+		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. "+who.opens+"\n", err, need)
+		return 0, 0, "", false
 	}
-	if headroom < need+pgMargin {
-		return fmt.Errorf("Postgres takes %d more connections and a stand-in %s replica opens %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or run with --no-surge",
-			headroom, needFor, need, pgMargin)
-	}
-	return nil
+	return headroom, need, needFor, true
 }
 
 // pgCAOnHost maps the CA file a service names (a path in its container) to

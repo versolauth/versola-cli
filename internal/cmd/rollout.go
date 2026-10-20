@@ -33,8 +33,13 @@ keeps serving:
   2. migrate: the new version's database migrations are applied. They
      cannot be rolled back: back the database up first. Releases keep their
      migrations additive, so the running version works on the new schema.
-  3. central is stopped and started on the new version: the admin console
-     and self-registration are unavailable until it is ready (about a
+  3. central: a stand-in of the new version (central-2) starts next to the
+     running one and takes traffic, then central itself is recreated on the
+     new version and the stand-in is removed, so the admin console and
+     self-registration stay available. Without a stand-in (--no-surge, or
+     the first rollout of a deployment whose proxy does not front central
+     yet) central is stopped and started in place, and the admin console and
+     self-registration are unavailable until it is ready (usually under a
      minute); auth and edge keep serving.
   4. auth, then edge: a stand-in replica of the new version starts in a free
      slot and takes traffic; then each replica in turn is taken out of the
@@ -57,10 +62,11 @@ migrations, and the running version working on the new schema.
 
 --abort goes back to the version the unfinished rollout came from. If no
 container was started from the new version's configuration yet, the
-previous configuration simply becomes the active one again. Otherwise the
-previous version is configured again and every replica -- central, auth,
-edge, including the ones that never moved -- is moved back the same way,
-stand-in first. Migrations and secrets do not go back: the old version runs
+previous configuration simply becomes the active one again. Otherwise it
+becomes the active one again too, and the replicas that moved on -- central,
+auth, edge -- are moved back the same way, stand-in first; the ones that
+never moved are not touched. (If that configuration is gone, the previous
+version is configured anew and every replica is recreated from it.) Migrations and secrets do not go back: the old version runs
 on the migrated schema (not guaranteed before 1.0). Cut off, --abort again
 continues it. After a rollout has finished there is nothing to abort: roll
 the earlier version out instead.

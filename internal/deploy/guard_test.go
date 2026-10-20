@@ -11,6 +11,8 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
+const centralOverride = "services:\n  central:\n    environment:\n      PORT: \"28090\"\n      DPORT: \"28091\"\n"
+
 // guardBundle makes a bundle under a temp home with a compose file and,
 // when withUpstreams, the proxy's upstreams.conf, and returns a state that
 // points at it and runs from it.
@@ -37,6 +39,12 @@ func guardBundle(t *testing.T, withUpstreams bool) (*state.State, string) {
 		// What configure writes on vps since config generations.
 		yml := "services:\n  proxy:\n    volumes:\n      - type: bind\n        source: \"/home/v/.versola/active/proxy-vps\"\n        target: " + proxy.GenerationMount + "\n        read_only: true\n"
 		if err := os.WriteFile(filepath.Join(bundle, proxy.ComposeFile), []byte(yml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if withUpstreams {
+		// What up and configure write on vps since central is fronted.
+		if err := os.WriteFile(filepath.Join(bundle, state.OverridesFile), []byte(centralOverride), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -168,5 +176,41 @@ func TestCheckReplicaRequestGuards(t *testing.T) {
 		if err := CheckReplicaRequest(old, EdgeService, 1, adding); !errors.Is(err, state.ErrOldInstall) {
 			t.Errorf("adding=%v, bundle without upstreams.conf: %v", adding, err)
 		}
+	}
+}
+
+// A deployment from before central was fronted: its central still holds
+// 8090, so replicas can't be routed until `up` moves it.
+func TestCheckReplicaRequestNeedsCentralMoved(t *testing.T) {
+	st, bundle := guardBundle(t, true)
+	st.Slots = map[string][]state.Slot{"auth": {{N: 1, Version: "0.7.0"}, {N: 2, Version: "0.7.0"}}}
+	for _, adding := range []bool{true, false} {
+		if err := os.Remove(filepath.Join(bundle, state.OverridesFile)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		err := CheckReplicaRequest(st, AuthService, 1, adding)
+		if err == nil || !strings.Contains(err.Error(), "versola up") {
+			t.Errorf("adding=%v, no overrides.yml: %v", adding, err)
+		}
+		// Auth's override alone does not move central.
+		only := "services:\n  auth:\n    environment:\n      APORT: \"9082\"\n"
+		if err := os.WriteFile(filepath.Join(bundle, state.OverridesFile), []byte(only), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckReplicaRequest(st, AuthService, 1, adding); err == nil || !strings.Contains(err.Error(), "versola up") {
+			t.Errorf("adding=%v, auth-only overrides.yml: %v", adding, err)
+		}
+		if err := os.WriteFile(filepath.Join(bundle, state.OverridesFile), []byte(centralOverride), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckReplicaRequest(st, AuthService, 1, adding); err != nil {
+			t.Errorf("adding=%v, central moved: %v", adding, err)
+		}
+	}
+	// local has no overrides and needs none.
+	local, _ := guardBundle(t, true)
+	local.Target, local.ProxyMode = "local", proxy.ModeLocal
+	if err := requireCentralMoved(local, t.TempDir()); err != nil {
+		t.Errorf("local: %v", err)
 	}
 }

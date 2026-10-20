@@ -11,7 +11,8 @@ tools/    wraps the real versola-tools image: runs its real entrypoint, then
           points the generated compose file at the stub images; `migrate`
           is a no-op (no Postgres needed)
 traffic/  GET+POST client for the proxy's public port (127.0.0.1:2821),
-          8082 and 8083 (new and long-lived connections); counts every
+          8082, 8083 (new and long-lived connections) and central's front
+          8090 (left out with --no-surge: central restarts in place); counts every
           transport error and unexpected status, and on the long-lived 8083
           connections tells cuts and reconnects apart (below)
 run.sh    builds the images, deploys version A, rolls out version B under
@@ -85,19 +86,25 @@ the same traffic, and passes when the abort exits 0, the traffic client
 reports no failures, and every central/auth/edge container is version A
 again. `prepared` (stopped while pulling, before migrate) must restore the
 previous configuration without restarting anything; the client then only
-expects version A. With `--no-surge` there is no stand-in, so `standin`
-stops after the first replaced replica, like `midway`. What stubs can't
+expects version A. `central` stops once central's stand-in (central-2) is
+starting (with `--no-surge`, once central is restarted in place); `standin`
+and `midway` stop at auth's and edge's steps, after central is done. With
+`--no-surge` there is no stand-in, so `standin` stops after the first
+replaced replica, like `midway`. After a `central` abort the auth and edge
+containers must be the very ones that ran before the rollout (same IDs): an
+abort recreates only what moved on. What stubs can't
 show: the old version on a really migrated schema, edge registering its
 client certificate with central, real start times -- those need the real
 images (the `0.7.0` -> `0.7.0-rt1` run on the stand).
 
 `--slow-central N` makes the stub central of version B answer `/readiness` with
-503 for N seconds after it starts. The rollout must wait for it, print how long
-central was unavailable (about N s plus the 1 s poll), keep auth and edge serving
-and finish with no failures. The real central's start time is not measured here.
+503 for N seconds after it starts. The rollout must wait for its stand-in
+(central-2) without routing to it, keep the old central serving 8090 meanwhile and
+finish with no failures; with `--no-surge` central restarts in place and the
+rollout prints how long it was unavailable (about N s plus the 1 s poll). The real central's start time is not measured here.
 
 Linux only, needs more than 3.25 GiB of available memory and 4 GiB of disk (the
-CLI's own prerequisite checks) and free ports 2821, 8082, 8083 and 8200. It
+CLI's own prerequisite checks) and free ports 2821, 8082, 8083, 8090, 8200, 28090, 28091, 28190 and 28191. It
 refuses to start if a container named `versola*` or the volume
 `versola-openbao-file-vps` exists, or ports 2821/8082/8083 are taken. The
 CLI's state goes to an isolated `HOME` (`E2E_HOME`, default
@@ -111,3 +118,10 @@ Assumed, not yet seen on a real run: the generated compose file sets no
 `command:`/`entrypoint:` on central/auth/edge (else a stub would start with a
 java command line), and `docker compose pull` skips `pull_policy: never`
 services (run.sh checks the latter before deploying).
+
+Central is behind the proxy's front like auth's APORT/MPORT: nginx owns
+127.0.0.1:8090 and the stub central listens on 28090/28091. run.sh checks
+after `up` and after the run that 8090 answers with central of the expected
+version and that 28090 answers too. Not run here (there is no Docker daemon
+in the sandbox this was written in): the first run on a throwaway machine
+must confirm it.

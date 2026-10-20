@@ -19,9 +19,14 @@ import (
 //	         the secrets plan, replicas.yml) -- nothing running changes
 //	migrate  the database (additive migrations: the old version keeps
 //	         working on the new schema -- the release contract)
-//	central  stopped and started on the new version (not replicated: the
-//	         admin console and self-registration are down until it is
-//	         ready; auth and edge keep serving from their caches)
+//	central  a stand-in of the new version (central-2) next to the running
+//	         one, behind the proxy's front of central's PORT; then the
+//	         running one is recreated on the new version and the stand-in
+//	         goes -- central is never down. Without a stand-in (--no-surge,
+//	         or a deployment whose proxy does not front central yet) it is
+//	         stopped and started in place: the admin console and
+//	         self-registration are down until it is ready, auth and edge
+//	         keep serving from their caches
 //	auth     a stand-in replica of the new version in a free slot, then
 //	         every replica in turn: out of the proxy, drained, recreated
 //	         on the new version, ready, back in; then the stand-in goes
@@ -122,6 +127,13 @@ type rolloutEngine struct {
 	// allowDowntime: a service with one replica and no stand-in is
 	// recreated in place, unreachable until it is ready.
 	allowDowntime bool
+	// centralInPlace: central is stopped and started in place (central()),
+	// not moved through a stand-in (service). So without surge, and when
+	// the running proxy does not front central's PORT yet -- the old central
+	// itself holds that port, so a stand-in could not be reached there --
+	// unless a stand-in of central is recorded already, which only service
+	// knows how to retire.
+	centralInPlace bool
 	// interrupted reports whether the operator asked to stop; checked
 	// between steps, never in the middle of one.
 	interrupted func() bool
@@ -131,6 +143,12 @@ type rolloutEngine struct {
 	// as the run goes.
 	running map[string]map[int]bool
 	inUp    map[string]map[int]bool
+	// unready, per scalable service and slot: routed only because no slot of
+	// the service answered (reconcile's fallback), not because it is ready.
+	// service brings such a slot up -- waits for it -- before it counts as
+	// serving: a run must not carry on, or retire a stand-in, on the word
+	// of a replica that never answered.
+	unready map[string]map[int]bool
 	// current, per scalable service and slot: whether its container is the
 	// target's -- its image, created from this bundle (isNew). What has to be
 	// replaced is decided by it, not by the version recorded: a container of
@@ -157,10 +175,14 @@ func (e *rolloutEngine) update(f func(*state.State)) error {
 	return nil
 }
 
-// layout is the replicas as recorded: central's single one, auth's (behind
-// the proxy's fronts) and edge's.
+// layout is the replicas as recorded: central's (its one replica, and a
+// stand-in while the rollout has one) and auth's, both behind the proxy's
+// fronts, and edge's.
 func (e *rolloutEngine) layout() (central, auth, edge []replica, err error) {
-	if central, err = replicasOf(e.topo, CentralService, []state.Slot{{N: 1, Version: e.st.Version}}); err != nil {
+	if central, err = replicasOf(e.topo, CentralService, e.st.ActiveSlots(CentralService)); err != nil {
+		return
+	}
+	if central, err = frontCentral(central, true); err != nil {
 		return
 	}
 	if auth, err = replicasOf(e.topo, AuthService, e.st.ActiveSlots(AuthService)); err != nil {
@@ -174,13 +196,16 @@ func (e *rolloutEngine) layout() (central, auth, edge []replica, err error) {
 }
 
 func (e *rolloutEngine) replicaOf(svc string, n int) (replica, error) {
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return replica{}, err
 	}
 	group := edge
-	if svc == AuthService {
+	switch svc {
+	case AuthService:
 		group = auth
+	case CentralService:
+		group = central
 	}
 	for _, r := range group {
 		if r.Slot == n {
@@ -193,6 +218,20 @@ func (e *rolloutEngine) replicaOf(svc string, n int) (replica, error) {
 func (e *rolloutEngine) readyURL(r replica) (string, error) {
 	return readinessURL(true, r.Ports)
 }
+
+// waitReady waits for a replica of svc to report ready: central longer
+// (centralReadyTimeout) -- its start is the slowest, and giving up on it costs
+// more than waiting.
+func (e *rolloutEngine) waitReady(svc, url string) error {
+	if svc == CentralService {
+		return e.ops.waitReadyWithin(url, centralReadyTimeout)
+	}
+	return e.ops.waitReady(url)
+}
+
+// rolloutServices are the services a rollout moves, in order: central first
+// (auth and edge of the new version may need it), then auth, then edge.
+var rolloutServices = []string{CentralService, AuthService, EdgeService}
 
 // expectedImage is the image the new bundle's compose file gives a service:
 // what a container of the new version was created from.
@@ -230,19 +269,19 @@ func (e *rolloutEngine) isNew(base string, c containerInfo) (bool, error) {
 }
 
 // writeFiles rewrites replicas.yml and overrides.yml from the record: what
-// compose reads to know every slot -- a stand-in included -- and auth's
-// moved APORT/MPORT.
+// compose reads to know every slot -- a stand-in included -- and central's
+// moved PORT/DPORT and auth's moved APORT/MPORT.
 func (e *rolloutEngine) writeFiles() error {
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return err
 	}
-	return e.ops.writeReplicas(auth, edge)
+	return e.ops.writeReplicas(central, auth, edge)
 }
 
 // route has the proxy route to exactly the slots in inUp.
 func (e *rolloutEngine) route() error {
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return err
 	}
@@ -255,7 +294,7 @@ func (e *rolloutEngine) route() error {
 		}
 		return out
 	}
-	c := routedConfig(e.st.ProxyMode, e.fronts, e.genDir, pick(AuthService, auth), pick(EdgeService, edge))
+	c := routedConfig(e.st.ProxyMode, e.fronts, e.genDir, pick(CentralService, central), pick(AuthService, auth), pick(EdgeService, edge))
 	return routeVia(e.ops, e.st.ProxyMode, c)
 }
 
@@ -320,8 +359,9 @@ func (e *rolloutEngine) reconcile() error {
 	e.running = map[string]map[int]bool{}
 	e.inUp = map[string]map[int]bool{}
 	e.current = map[string]map[int]bool{}
-	for _, svc := range []string{AuthService, EdgeService} {
-		e.running[svc], e.inUp[svc], e.current[svc] = map[int]bool{}, map[int]bool{}, map[int]bool{}
+	e.unready = map[string]map[int]bool{}
+	for _, svc := range rolloutServices {
+		e.running[svc], e.inUp[svc], e.current[svc], e.unready[svc] = map[int]bool{}, map[int]bool{}, map[int]bool{}, map[int]bool{}
 		slots := e.st.ActiveSlots(svc)
 		changed := false
 		for i, sl := range slots {
@@ -356,11 +396,11 @@ func (e *rolloutEngine) reconcile() error {
 			}
 		}
 	}
-	_, auth, edge, err := e.layout()
+	central, auth, edge, err := e.layout()
 	if err != nil {
 		return err
 	}
-	for _, group := range [][]replica{auth, edge} {
+	for _, group := range [][]replica{central, auth, edge} {
 		for _, r := range group {
 			if !e.running[r.Base][r.Slot] {
 				continue
@@ -374,13 +414,14 @@ func (e *rolloutEngine) reconcile() error {
 			}
 		}
 	}
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range rolloutServices {
 		if len(e.inUp[svc]) == 0 {
 			// Nothing of it answers: route to every recorded slot, as `up`
 			// would, rather than refuse -- the steps below bring them up.
 			e.say("Warning: no %s replica answers its readiness check right now.\n", svc)
 			for _, sl := range e.st.ActiveSlots(svc) {
 				e.inUp[svc][sl.N] = true
+				e.unready[svc][sl.N] = true
 			}
 		}
 	}
@@ -426,14 +467,18 @@ func (e *rolloutEngine) run() error {
 	if err := e.ops.markStarting(); err != nil {
 		return fmt.Errorf("couldn't record the deployment being started: %w", err)
 	}
-	if err := e.central(); err != nil {
-		return err
+	services := rolloutServices
+	if e.centralInPlace {
+		if err := e.central(); err != nil {
+			return err
+		}
+		services = []string{AuthService, EdgeService}
 	}
-	e.say("\nChecking where auth and edge stand...\n")
+	e.say("\nChecking where central, auth and edge stand...\n")
 	if err := e.reconcile(); err != nil {
 		return err
 	}
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range services {
 		if err := e.service(svc); err != nil {
 			return err
 		}
@@ -441,13 +486,13 @@ func (e *rolloutEngine) run() error {
 	return e.finish()
 }
 
-// central restarts central on the new version unless its container already
-// is, and waits until it is ready: auth and edge wait for central when they
-// start, and hang rather than fail if it is not there. It is the one step
-// where something is down (the admin console, self-registration), so it says
-// how long that lasted, and waits longer than for a replica
-// (centralReadyTimeout): a rollout stopped here costs more to undo than to
-// wait out.
+// central restarts central on the new version in place (centralInPlace)
+// unless its container already is, and waits until it is ready: auth and
+// edge wait for central when they start, and hang rather than fail if it is
+// not there. Something is down meanwhile (the admin console,
+// self-registration), so it says how long that lasted, and waits longer than
+// for a replica (centralReadyTimeout): a rollout stopped here costs more to
+// undo than to wait out.
 func (e *rolloutEngine) central() error {
 	c, err := e.ops.inspect(CentralService)
 	if err != nil {
@@ -479,7 +524,7 @@ func (e *rolloutEngine) central() error {
 	}
 	e.say("Waiting for central to be ready (up to %s)...\n", centralReadyTimeout)
 	if err := e.ops.waitReadyWithin(url, centralReadyTimeout); err != nil {
-		hint := "run the same `versola rollout` again: it only waits for central again and carries on. `versola rollout --abort` goes back as well, but recreates every auth and edge replica"
+		hint := "run the same `versola rollout` again: it only waits for central again and carries on. `versola rollout --abort` goes back as well, and starts central once more, on the old version"
 		if e.st.RollingBack {
 			hint = "run `versola rollout --abort` again: it only waits for central again and carries on"
 		}
@@ -505,9 +550,10 @@ func (e *rolloutEngine) service(svc string) error {
 		switch {
 		case !e.current[svc][sl.N]:
 			old = append(old, sl.N)
-		case !e.inUp[svc][sl.N]:
+		case !e.inUp[svc][sl.N] || e.unready[svc][sl.N]:
 			// On the new version but not serving: recreated by a run that
-			// was cut off, or one that did not become ready.
+			// was cut off, or one that did not become ready (also when it is
+			// routed only for want of any ready slot).
 			pending = append(pending, sl.N)
 		}
 	}
@@ -601,7 +647,7 @@ func (e *rolloutEngine) bringUp(svc string, n int, what string) error {
 		return fmt.Errorf("couldn't start %s: %w", r.Service, err)
 	}
 	e.running[svc][n], e.current[svc][n] = true, true
-	if err := e.ops.waitReady(url); err != nil {
+	if err := e.waitReady(svc, url); err != nil {
 		return fmt.Errorf("%s never became ready on %s: %w -- it is not in the proxy; the other replicas serve. Run the same `versola rollout` again to retry", r.Service, e.st.Version, err)
 	}
 	if err := e.ops.warm(r); err != nil {
@@ -610,6 +656,7 @@ func (e *rolloutEngine) bringUp(svc string, n int, what string) error {
 	if err := e.addToProxy(svc, n); err != nil {
 		return fmt.Errorf("%s is ready, but the proxy does not route to it: %w", r.Service, err)
 	}
+	delete(e.unready[svc], n)
 	e.say("%s takes traffic.\n", r.Service)
 	return nil
 }
@@ -662,7 +709,7 @@ func (e *rolloutEngine) startStandIn(svc string) (int, error) {
 	}
 	e.running[svc][n], e.current[svc][n] = true, true
 	url, _ := e.readyURL(r)
-	if err := e.ops.waitReady(url); err != nil {
+	if err := e.waitReady(svc, url); err != nil {
 		return 0, e.dropStandIn(svc, n, fmt.Errorf("the stand-in %s never became ready on %s: %w -- nothing else was changed", r.Service, target, err))
 	}
 	if err := e.ops.warm(r); err != nil {
@@ -726,7 +773,9 @@ func (e *rolloutEngine) replace(svc string, n int) error {
 		}
 	}
 	if others == 0 {
-		if !e.allowDowntime {
+		// central has always been restarted in place without a stand-in:
+		// auth and edge serve from their caches meanwhile.
+		if !e.allowDowntime && svc != CentralService {
 			return fmt.Errorf("%s is the only %s replica serving and there is no stand-in: replacing it would leave %s unreachable -- run without --no-surge, or with --allow-downtime", r.Service, svc, svc)
 		}
 		e.say("Recreating %s on %s in place -- %s is unreachable until it is ready...\n", r.Service, e.st.Version, svc)
@@ -747,7 +796,7 @@ func (e *rolloutEngine) replace(svc string, n int) error {
 	if err := e.update(func(s *state.State) { s.SetSlots(svc, slotAt(s.ActiveSlots(svc), n, target)) }); err != nil {
 		return err
 	}
-	if err := e.ops.waitReady(url); err != nil {
+	if err := e.waitReady(svc, url); err != nil {
 		if others == 0 {
 			return fmt.Errorf("%s never became ready on %s: %w -- %s is unreachable; see its `docker logs`", r.Service, target, err, svc)
 		}
@@ -801,7 +850,7 @@ func (e *rolloutEngine) retireStandIn(svc string, n int) error {
 // replica needed replacing), lets the old bundle go (MarkRunning removes it:
 // nothing mounts it any more) and records the rollout as done.
 func (e *rolloutEngine) finish() error {
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range rolloutServices {
 		for _, sl := range e.st.ActiveSlots(svc) {
 			if sl.Version != e.st.Version {
 				return fmt.Errorf("%s slot %d is still recorded at %s -- run the same `versola rollout` again", svc, sl.N, sl.Version)
@@ -878,10 +927,14 @@ func standInReplica(topo topology.Topology, svc string, n int, hostNetwork bool)
 	if err != nil {
 		return replica{}, err
 	}
-	if svc == AuthService {
-		if rs, err = frontAuth(rs, hostNetwork); err != nil {
-			return replica{}, err
-		}
+	switch svc {
+	case AuthService:
+		rs, err = frontAuth(rs, hostNetwork)
+	case CentralService:
+		rs, err = frontCentral(rs, hostNetwork)
+	}
+	if err != nil {
+		return replica{}, err
 	}
 	return rs[0], nil
 }
@@ -897,8 +950,11 @@ func withStandIn(topo topology.Topology, svc string, slots []state.Slot, version
 	if err != nil {
 		return nil, err
 	}
-	if svc == AuthService {
+	switch svc {
+	case AuthService:
 		return frontAuth(rs, hostNetwork)
+	case CentralService:
+		return frontCentral(rs, hostNetwork)
 	}
 	return rs, nil
 }

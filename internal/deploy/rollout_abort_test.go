@@ -13,16 +13,46 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// abortBundleDir is the bundle an abort configures for the version it goes
-// back to.
+// abortBundleDir is the bundle an abort configures anew for the version it
+// goes back to, when the previous bundle can not be reused.
 const abortBundleDir = "/home/v/.versola/active/bundle-back"
 
 // prepareAbort turns the world a forward rollout left (finished or cut off
-// anywhere) into what `rollout --abort` prepares before the engine runs:
-// the record of the staged configure of the previous version (state.Finalize
-// with the abort's options), and compose creating containers of that version
-// from the abort's bundle.
+// anywhere) into what `rollout --abort` prepares before the engine runs when
+// the previous bundle is still there (state.BeginRollback): the record turned
+// round on that bundle. The replicas that never moved mount it already.
 func prepareAbort(t *testing.T, w *world) {
+	t.Helper()
+	st := w.load()
+	if st.PreviousVersion == "" {
+		t.Fatal("no rollout to abort")
+	}
+	migrated := time.Now().UTC()
+	if st.MigratedAt != nil {
+		migrated = *st.MigratedAt
+	}
+	next := &state.State{Target: st.Target, Version: st.PreviousVersion, PreviousVersion: st.Version, RollingBack: true,
+		ProxyMode: st.ProxyMode, AuthURL: st.AuthURL, PostgresHost: st.PostgresHost, BundleDir: filepath.Base(oldBundleDir),
+		MountedBundleDirs: []string{filepath.Base(oldBundleDir), filepath.Base(newBundleDir)}, MigratedAt: &migrated}
+	for _, svc := range rolloutServices {
+		next.SetSlots(svc, st.ActiveSlots(svc))
+	}
+	for svc, n := range st.Surge {
+		if next.Surge == nil {
+			next.Surge = map[string]int{}
+		}
+		next.Surge[svc] = n
+	}
+	w.persist(next)
+	w.topo = testTopologyFrom(t, strings.ReplaceAll(rolloutCompose, ":"+toV, ":"+fromV))
+	w.targetV, w.targetDir = fromV, oldBundleDir
+}
+
+// prepareAbortReconfigured is what the abort prepares when the previous
+// bundle is gone: the staged configure of the previous version (state.Finalize
+// with the abort's options), and compose creating containers of that version
+// from a bundle of its own.
+func prepareAbortReconfigured(t *testing.T, w *world) {
 	t.Helper()
 	st := w.load()
 	if st.PreviousVersion == "" {
@@ -35,7 +65,7 @@ func prepareAbort(t *testing.T, w *world) {
 	next := &state.State{Target: st.Target, Version: st.PreviousVersion, PreviousVersion: st.Version, RollingBack: true,
 		ProxyMode: st.ProxyMode, AuthURL: st.AuthURL, PostgresHost: st.PostgresHost, BundleDir: "bundle-back",
 		MountedBundleDirs: st.MountedBundleDirs, MigratedAt: &migrated}
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range rolloutServices {
 		next.SetSlots(svc, st.ActiveSlots(svc))
 	}
 	for svc, n := range st.Surge {
@@ -49,6 +79,13 @@ func prepareAbort(t *testing.T, w *world) {
 	w.targetV, w.targetDir = fromV, abortBundleDir
 }
 
+// abortPreparations are the two ways an abort gets ready, which the tests of
+// the engine's way back run through both.
+var abortPreparations = []struct {
+	name string
+	run  func(*testing.T, *world)
+}{{"previous bundle", prepareAbort}, {"configured anew", prepareAbortReconfigured}}
+
 func slotsOf(ss []state.Slot) []int {
 	var out []int
 	for _, sl := range ss {
@@ -58,11 +95,14 @@ func slotsOf(ss []state.Slot) []int {
 }
 
 var abortLayouts = []struct {
-	name       string
-	auth, edge []state.Slot
+	name           string
+	auth, edge     []state.Slot
+	centralStandIn bool
 }{
-	{"one replica each", old(1), old(1)},
-	{"two auth, one edge", old(1, 2), old(1)},
+	{"one replica each", old(1), old(1), false},
+	{"two auth, one edge", old(1, 2), old(1), false},
+	{"one replica each, central stand-in", old(1), old(1), true},
+	{"two auth, one edge, central stand-in", old(1, 2), old(1), true},
 }
 
 // A rollout cut off at any call -- before or after it took effect -- is
@@ -70,30 +110,34 @@ var abortLayouts = []struct {
 // from the abort's bundle, with the proxy never routing to a replica that
 // isn't ready nor to fewer than the operator's count.
 func TestAbortAfterARolloutCutOffAnywhere(t *testing.T) {
-	for _, layout := range abortLayouts {
-		clean := newWorld(t, preparedState(layout.auth, layout.edge))
-		if err := engineFor(clean, true, false).run(); err != nil {
-			t.Fatal(err)
-		}
-		for i := 1; i <= clean.calls; i++ {
-			for _, after := range []bool{false, true} {
-				name := fmt.Sprintf("%s/rollout cut at call %d (%s, after=%v)", layout.name, i, clean.callNames[i-1], after)
-				t.Run(name, func(t *testing.T) {
-					w := newWorld(t, preparedState(layout.auth, layout.edge))
-					w.crashAt, w.crashAfter = i, after
-					if err := engineFor(w, true, false).run(); err != nil && !errors.Is(err, errCrash) {
-						t.Fatalf("rollout: %v", err)
-					}
-					w.crashed, w.crashAt = false, 0
-					if w.load().PreviousVersion == "" {
-						t.Skip("the rollout had already finished: nothing to abort (CheckAbort refuses)")
-					}
-					prepareAbort(t, w)
-					if err := engineFor(w, true, false).run(); err != nil {
-						t.Fatalf("abort: %v\nevents: %v", err, w.events)
-					}
-					w.done(t, slotsOf(layout.auth), slotsOf(layout.edge))
-				})
+	for _, prep := range abortPreparations {
+		for _, layout := range abortLayouts {
+			clean := newWorld(t, preparedState(layout.auth, layout.edge))
+			clean.centralStandIn = layout.centralStandIn
+			if err := engineFor(clean, true, false).run(); err != nil {
+				t.Fatal(err)
+			}
+			for i := 1; i <= clean.calls; i++ {
+				for _, after := range []bool{false, true} {
+					name := fmt.Sprintf("%s/%s/rollout cut at call %d (%s, after=%v)", prep.name, layout.name, i, clean.callNames[i-1], after)
+					t.Run(name, func(t *testing.T) {
+						w := newWorld(t, preparedState(layout.auth, layout.edge))
+						w.centralStandIn = layout.centralStandIn
+						w.crashAt, w.crashAfter = i, after
+						if err := engineFor(w, true, false).run(); err != nil && !errors.Is(err, errCrash) {
+							t.Fatalf("rollout: %v", err)
+						}
+						w.crashed, w.crashAt = false, 0
+						if w.load().PreviousVersion == "" {
+							t.Skip("the rollout had already finished: nothing to abort (CheckAbort refuses)")
+						}
+						prep.run(t, w)
+						if err := engineFor(w, true, false).run(); err != nil {
+							t.Fatalf("abort: %v\nevents: %v", err, w.events)
+						}
+						w.done(t, slotsOf(layout.auth), slotsOf(layout.edge))
+					})
+				}
 			}
 		}
 	}
@@ -102,44 +146,47 @@ func TestAbortAfterARolloutCutOffAnywhere(t *testing.T) {
 // An abort cut off anywhere is finished by running it again (--abort reads
 // RollingBack and does not turn round).
 func TestAbortResumesAfterACrashAnywhere(t *testing.T) {
-	for _, layout := range abortLayouts {
-		// Abort a rollout cut off halfway through auth: central moved, a
-		// stand-in recorded, a slot or two of each version.
-		start := func(t *testing.T) *world {
-			w := newWorld(t, preparedState(layout.auth, layout.edge))
-			w.crashAt = indexOf(w.runAndCount(t, layout.auth, layout.edge), "compose up -d --no-deps auth") + 2
-			w.crashAfter = true
-			if err := engineFor(w, true, false).run(); !errors.Is(err, errCrash) {
-				t.Fatalf("rollout: %v", err)
+	for _, prep := range abortPreparations {
+		for _, layout := range abortLayouts {
+			// Abort a rollout cut off halfway through auth: central moved, a
+			// stand-in recorded, a slot or two of each version.
+			start := func(t *testing.T) *world {
+				w := newWorld(t, preparedState(layout.auth, layout.edge))
+				w.centralStandIn = layout.centralStandIn
+				w.crashAt = indexOf(w.runAndCount(t, layout.auth, layout.edge), "compose up -d --no-deps auth") + 2
+				w.crashAfter = true
+				if err := engineFor(w, true, false).run(); !errors.Is(err, errCrash) {
+					t.Fatalf("rollout: %v", err)
+				}
+				w.crashed, w.crashAt = false, 0
+				prep.run(t, w)
+				return w
 			}
-			w.crashed, w.crashAt = false, 0
-			prepareAbort(t, w)
-			return w
-		}
-		probe := start(t)
-		base := probe.calls
-		if err := engineFor(probe, true, false).run(); err != nil {
-			t.Fatal(err)
-		}
-		for i := base + 1; i <= probe.calls; i++ {
-			for _, after := range []bool{false, true} {
-				name := fmt.Sprintf("%s/abort cut at call %d (%s, after=%v)", layout.name, i-base, probe.callNames[i-1], after)
-				t.Run(name, func(t *testing.T) {
-					w := start(t)
-					w.crashAt, w.crashAfter = i, after
-					if err := engineFor(w, true, false).run(); err != nil && !errors.Is(err, errCrash) {
-						t.Fatalf("abort: %v", err)
-					}
-					w.crashed, w.crashAt = false, 0
-					st := w.load()
-					if st.RolloutUnderway() && (!st.RollingBack || st.Version != fromV) {
-						t.Fatalf("the record no longer says the abort is under way: %+v", st)
-					}
-					if err := engineFor(w, true, false).run(); err != nil {
-						t.Fatalf("resumed abort: %v\nevents: %v", err, w.events)
-					}
-					w.done(t, slotsOf(layout.auth), slotsOf(layout.edge))
-				})
+			probe := start(t)
+			base := probe.calls
+			if err := engineFor(probe, true, false).run(); err != nil {
+				t.Fatal(err)
+			}
+			for i := base + 1; i <= probe.calls; i++ {
+				for _, after := range []bool{false, true} {
+					name := fmt.Sprintf("%s/%s/abort cut at call %d (%s, after=%v)", prep.name, layout.name, i-base, probe.callNames[i-1], after)
+					t.Run(name, func(t *testing.T) {
+						w := start(t)
+						w.crashAt, w.crashAfter = i, after
+						if err := engineFor(w, true, false).run(); err != nil && !errors.Is(err, errCrash) {
+							t.Fatalf("abort: %v", err)
+						}
+						w.crashed, w.crashAt = false, 0
+						st := w.load()
+						if st.RolloutUnderway() && (!st.RollingBack || st.Version != fromV) {
+							t.Fatalf("the record no longer says the abort is under way: %+v", st)
+						}
+						if err := engineFor(w, true, false).run(); err != nil {
+							t.Fatalf("resumed abort: %v\nevents: %v", err, w.events)
+						}
+						w.done(t, slotsOf(layout.auth), slotsOf(layout.edge))
+					})
+				}
 			}
 		}
 	}
@@ -150,6 +197,7 @@ func TestAbortResumesAfterACrashAnywhere(t *testing.T) {
 func (w *world) runAndCount(t *testing.T, auth, edge []state.Slot) []string {
 	t.Helper()
 	c := newWorld(t, preparedState(auth, edge))
+	c.centralStandIn = w.centralStandIn
 	if err := engineFor(c, true, false).run(); err != nil {
 		t.Fatal(err)
 	}
@@ -272,10 +320,10 @@ func TestAbortRecreatesAnUnlabelledContainer(t *testing.T) {
 	w.done(t, []int{1, 2}, []int{1})
 }
 
-// The replicas that never left the old version keep their record (the
-// version they run) but are recreated: they mount the old bundle, which the
-// end of the run deletes.
-func TestAbortRecreatesReplicasThatNeverMoved(t *testing.T) {
+// With the previous bundle made the active one again, the replicas that never
+// left the old version are not touched: they mount that bundle already. Only
+// what moved (here: central) is recreated.
+func TestAbortLeavesReplicasThatNeverMoved(t *testing.T) {
 	w := newWorld(t, preparedState(old(1, 2), old(1)))
 	calls := w.runAndCount(t, old(1, 2), old(1))
 	// Cut off right after central came up on the new version: no auth or
@@ -286,6 +334,55 @@ func TestAbortRecreatesReplicasThatNeverMoved(t *testing.T) {
 	}
 	w.crashed, w.crashAt = false, 0
 	prepareAbort(t, w)
+	e := engineFor(w, true, false)
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sl := range w.load().ActiveSlots(AuthService) {
+		if sl.Version != fromV {
+			t.Errorf("auth slot %d relabelled %s: it runs %s", sl.N, sl.Version, fromV)
+		}
+		if !e.current[AuthService][sl.N] {
+			t.Errorf("auth slot %d is not taken as done, but its container is from the active bundle", sl.N)
+		}
+	}
+	if e.current[CentralService][1] {
+		t.Error("central taken as done, but it runs the new version")
+	}
+	w.events = nil
+	if err := engineFor(w, true, false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if indexOf(w.events, "compose up -d --no-deps central") < 0 {
+		t.Error("central was not moved back")
+	}
+	// Nothing of auth or edge is started, stopped or removed: no stand-in
+	// either (a stand-in of a service with nothing to move is not needed).
+	for _, ev := range w.events {
+		if !strings.HasPrefix(ev, "compose") && !strings.HasPrefix(ev, "rm ") {
+			continue
+		}
+		for _, f := range strings.Fields(ev) {
+			if strings.HasPrefix(f, "auth") || strings.HasPrefix(f, "edge") {
+				t.Errorf("auth or edge was touched although it never left the old version: %s", ev)
+			}
+		}
+	}
+	w.done(t, []int{1, 2}, []int{1})
+}
+
+// Configured anew, the replicas that never left the old version keep their
+// record (the version they run) but are recreated: they mount the old
+// bundle, which the end of the run deletes.
+func TestAbortRecreatesReplicasThatNeverMovedWhenConfiguredAnew(t *testing.T) {
+	w := newWorld(t, preparedState(old(1, 2), old(1)))
+	calls := w.runAndCount(t, old(1, 2), old(1))
+	w.crashAt, w.crashAfter = indexOf(calls, "ready central"), true
+	if err := engineFor(w, true, false).run(); !errors.Is(err, errCrash) {
+		t.Fatalf("rollout: %v", err)
+	}
+	w.crashed, w.crashAt = false, 0
+	prepareAbortReconfigured(t, w)
 	e := engineFor(w, true, false)
 	if err := e.reconcile(); err != nil {
 		t.Fatal(err)
@@ -313,9 +410,10 @@ func TestAbortRecreatesReplicasThatNeverMoved(t *testing.T) {
 // finish never lets the old bundles go while a container still mounts one.
 func TestFinishRefusesAContainerFromAnotherBundle(t *testing.T) {
 	// Nothing moved: every container is the old version's, from the old
-	// bundle -- the right version, the wrong bundle.
+	// bundle -- the right version, the wrong bundle (the abort configured a
+	// bundle of its own).
 	w := newWorld(t, preparedState(old(1), old(1)))
-	prepareAbort(t, w)
+	prepareAbortReconfigured(t, w)
 	e := engineFor(w, true, false)
 	if err := e.reconcile(); err != nil {
 		t.Fatal(err)
@@ -325,6 +423,28 @@ func TestFinishRefusesAContainerFromAnotherBundle(t *testing.T) {
 	}
 	if indexOf(w.events, "markRunning") >= 0 {
 		t.Error("markRunning ran")
+	}
+}
+
+// Going back from the previous bundle, containers that run from it are
+// already what the abort wants: finishing touches none of them.
+func TestFinishAcceptsContainersOfTheActiveBundle(t *testing.T) {
+	w := newWorld(t, preparedState(old(1), old(1)))
+	prepareAbort(t, w)
+	e := engineFor(w, true, false)
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if indexOf(w.events, "markRunning") < 0 {
+		t.Error("markRunning did not run")
+	}
+	for _, ev := range w.events {
+		if strings.HasPrefix(ev, "compose") {
+			t.Errorf("touched a container: %s", ev)
+		}
 	}
 }
 
@@ -411,6 +531,17 @@ func TestChooseAbortPath(t *testing.T) {
 		"a stand-in recorded": {func(st *state.State, _ *world, _ string) {
 			st.Surge = map[string]int{AuthService: 2}
 		}, true, abortRollBack, nil},
+		"a stand-in recorded and the old bundle gone": {func(st *state.State, _ *world, _ string) {
+			st.Surge = map[string]int{AuthService: 2}
+		}, false, abortRollBack, nil},
+		"two earlier bundles": {func(st *state.State, _ *world, _ string) {
+			st.MountedBundleDirs = []string{"bundle-old", "bundle-other", "bundle-new"}
+			st.Surge = map[string]int{AuthService: 2}
+		}, true, abortRollBack, nil},
+		"no mounted bundles recorded": {func(st *state.State, _ *world, _ string) {
+			st.MountedBundleDirs = nil
+			st.Surge = map[string]int{AuthService: 2}
+		}, true, abortRollBack, nil},
 		"the old bundle is gone": {func(*state.State, *world, string) {}, false, abortRollBack, nil},
 		"a container without the working-dir label": {func(_ *state.State, w *world, _ string) {
 			w.containers["edge"].workDir = ""
@@ -422,6 +553,12 @@ func TestChooseAbortPath(t *testing.T) {
 		"a replica down: still the old bundle's deployment": {func(_ *state.State, w *world, _ string) {
 			delete(w.containers, "edge")
 		}, true, abortRestore, []string{"edge"}},
+		"central recorded at the new version": {func(st *state.State, _ *world, _ string) {
+			st.SetSlots(CentralService, []state.Slot{{N: 1, Version: toV}, {N: 2, Version: toV}})
+		}, true, abortRollBack, nil},
+		"no central slots recorded (prepared by an older versola-cli): the container tells": {func(st *state.State, _ *world, _ string) {
+			delete(st.Slots, CentralService)
+		}, true, abortRestore, nil},
 		"central gone (a recreate cut off halfway): restored, and said": {func(_ *state.State, w *world, _ string) {
 			delete(w.containers, CentralService)
 		}, true, abortRestore, []string{CentralService}},
@@ -447,6 +584,16 @@ func TestChooseAbortPath(t *testing.T) {
 			}
 			if path == abortRestore && prev != "bundle-old" {
 				t.Errorf("restores %q", prev)
+			}
+			// A rollback goes back from the previous bundle whenever it is
+			// there to be reused -- not when it is gone, and not for an abort
+			// that is under way already.
+			wantPrev := "bundle-old"
+			if !c.withOld || name == "already rolling back" || name == "two earlier bundles" || name == "no mounted bundles recorded" {
+				wantPrev = ""
+			}
+			if path == abortRollBack && prev != wantPrev {
+				t.Errorf("rolls back from %q, want %q", prev, wantPrev)
 			}
 		})
 	}
@@ -582,7 +729,7 @@ func TestDownBlocked(t *testing.T) {
 func TestAbortPlanAndSummary(t *testing.T) {
 	st := preparedState(old(1), old(1))
 	plan := AbortPlan(st, RolloutOptions{})
-	for _, want := range []string{"back from 0.7.0 to 0.6.2", "What does NOT go back", "migrations already applied stay", "secrets", "stand-in of 0.7.0 is retired", "--abort` again"} {
+	for _, want := range []string{"back from 0.7.0 to 0.6.2", "What does NOT go back", "migrations already applied stay", "secrets", "stand-in of 0.7.0 is retired", "never left 0.6.2 are not touched", "--abort` again"} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("plan lacks %q:\n%s", want, plan)
 		}
@@ -594,4 +741,48 @@ func TestAbortPlanAndSummary(t *testing.T) {
 	if sum := RolloutSummary(st); !strings.Contains(sum, "Abort of the rolling upgrade under way: back from 0.7.0 to 0.6.2") {
 		t.Errorf("summary: %s", sum)
 	}
+}
+
+// The first step of an abort that goes back by the engine: from the previous
+// bundle when there is one, a fresh configure of the previous version only
+// when there is not.
+func TestTurnAbortRound(t *testing.T) {
+	loaded := &state.State{Version: fromV, PreviousVersion: toV, RollingBack: true}
+	t.Run("from the previous bundle", func(t *testing.T) {
+		w := newWorld(t, preparedState(old(1), old(1)))
+		got, err := turnAbortRound(w.load(), w, "bundle-old",
+			func() (*state.State, error) { return loaded, nil },
+			func(string) (*state.State, error) { t.Error("configured the version again"); return nil, nil })
+		if err != nil || got != loaded {
+			t.Fatalf("got %v, %v", got, err)
+		}
+		if indexOf(w.events, "beginRollback bundle-old") < 0 {
+			t.Errorf("the previous bundle was not made the active one: %v", w.events)
+		}
+	})
+	t.Run("its bundle is gone", func(t *testing.T) {
+		w := newWorld(t, preparedState(old(1), old(1)))
+		var backTo string
+		got, err := turnAbortRound(w.load(), w, "",
+			func() (*state.State, error) { t.Error("loaded a record turned round"); return nil, nil },
+			func(back string) (*state.State, error) { backTo = back; return loaded, nil })
+		if err != nil || got != loaded || backTo != fromV {
+			t.Fatalf("got %v, %v, configured %q", got, err, backTo)
+		}
+		if indexOf(w.events, "beginRollback bundle-old") >= 0 {
+			t.Error("turned the record round on a bundle that is not there")
+		}
+	})
+	t.Run("failures say nothing running changed", func(t *testing.T) {
+		w := newWorld(t, preparedState(old(1), old(1)))
+		w.failOnce["beginRollback bundle-old"] = errors.New("disk full")
+		_, err := turnAbortRound(w.load(), w, "bundle-old", func() (*state.State, error) { return loaded, nil }, nil)
+		if err == nil || !strings.Contains(err.Error(), "nothing running was changed") || !strings.Contains(err.Error(), "disk full") {
+			t.Errorf("turn round: %v", err)
+		}
+		_, err = turnAbortRound(w.load(), w, "", nil, func(string) (*state.State, error) { return nil, errors.New("tools failed") })
+		if err == nil || !strings.Contains(err.Error(), "nothing running was changed") || !strings.Contains(err.Error(), "tools failed") {
+			t.Errorf("configure anew: %v", err)
+		}
+	})
 }

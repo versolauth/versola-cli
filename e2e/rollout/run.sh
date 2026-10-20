@@ -13,7 +13,8 @@
 # traffic, and checks every container is version A again:
 #   prepared  after the new bundle is prepared, before migrate: the abort only
 #             makes the previous configuration active again (nothing restarts)
-#   central   after central restarted on B, before any stand-in
+#   central   after central restarted on B, before any stand-in; the auth and
+#             edge containers must be the same ones (IDs) after the abort
 #   standin   after the auth stand-in (B) takes traffic
 #   midway    after the first replica was recreated on B
 #
@@ -42,6 +43,16 @@ AUTH_URL="https://e2e.test"
 PG_HOST="127.0.0.1:5432"
 
 die() { echo "e2e: $*" >&2; exit 1; }
+# Central sits behind the proxy's front: 8090 is nginx's and balances over the
+# central replicas, which listen on 28090/28091. Answers on both mean the front
+# is up with central behind it; the front must answer with central's version.
+check_central() {
+  local want="$1" out
+  out="$(curl -fsSi --max-time 5 http://127.0.0.1:8090/ 2>&1)" || { echo "e2e: central's front (127.0.0.1:8090) does not answer: $out" >&2; return 1; }
+  grep -q "central" <<<"$out" || { echo "e2e: 127.0.0.1:8090 is not answered by central: $out" >&2; return 1; }
+  [ -z "$want" ] || grep -qF "$want" <<<"$out" || { echo "e2e: central behind 8090 is not $want: $out" >&2; return 1; }
+  curl -fsS --max-time 5 http://127.0.0.1:28090/ >/dev/null 2>&1 || { echo "e2e: central itself does not answer on its own port 28090" >&2; return 1; }
+}
 say() { printf '\n=== %s\n' "$*"; }
 
 # A docker that cannot be asked is not "no containers".
@@ -118,11 +129,16 @@ run() {
   case "$abort_at" in
     "") ;;
     prepared) pattern="Pulling the images"; versions="$A" ;;
-    central) pattern="Waiting for central to be ready" ;;
-    standin) pattern="takes traffic" ;;
-    midway) pattern="runs $B and takes traffic" ;;
+    central) pattern="Starting a stand-in, central-2|Waiting for central to be ready" ;;
+    # auth's and edge's steps, not central's (which come first: --abort-at central)
+    standin) pattern="(auth|edge)(-[0-9]+)? (runs [^ ]+ and )?takes traffic" ;;
+    midway) pattern="(auth|edge)(-[0-9]+)? runs ${B//./\\.} and takes traffic" ;;
     *) die "--abort-at: prepared, central, standin or midway" ;;
   esac
+  # An abort stops the rollout part way: some services never reach B, so the
+  # traffic client can only be asked for A. What the abort must achieve (every
+  # container on A, the front on A, no rollout under way) is checked after it.
+  [ -z "$abort_at" ] || versions="$A"
   command -v docker >/dev/null || die "no docker"
 
   local found; found="$(existing)"
@@ -136,7 +152,7 @@ $found"
   local kb; kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
   [ "${kb:-0}" -ge $((3584 * 1024)) ] || die "only $((${kb:-0} / 1024)) MiB of memory available; the CLI wants more than 3.25 GiB free for a first configure"
   [ "$(df -Pk "$PWD" | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ] || die "less than 4 GiB of free disk in $PWD"
-  for p in 2821 8082 8083 8200; do
+  for p in 2821 8082 8083 8090 8200 28090 28091 28190 28191; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use"; fi
   done
 
@@ -158,6 +174,8 @@ $found"
     printf 'y\n' | "$cli" replica add edge $((replicas - 1))
   fi
   "$cli" status
+  say "central behind the proxy's front"
+  check_central "$A" || die "central is not behind the front after up"
 
   say "building the traffic client"
   (cd "$HERE/traffic" && docker run --rm -v "$HERE/traffic:/src" -v "$work:/out" -w /src \
@@ -165,7 +183,11 @@ $found"
 
   stop="$work/stop"; rm -f "$stop"
   "$work/traffic" -h >/dev/null 2>&1 || die "cannot execute $work/traffic (is $E2E_HOME on a noexec mount?)"
-  "$work/traffic" -host e2e.test -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
+  # Without a stand-in central restarts in place: its front is not part of
+  # the zero-failure promise then.
+  local central_target="127.0.0.1:8090"
+  [ -z "$surge" ] || central_target=""
+  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
   rpid=""
   # A killed or failed script must not leave the client hammering the proxy,
@@ -173,17 +195,22 @@ $found"
   trap 'touch "$stop"; kill "$tpid" ${rpid:-} 2>/dev/null || true' EXIT
   sleep 8
   local rrc=0 arc=0
+  # An abort stopped at central's step has moved nothing else: the abort must
+  # leave auth's and edge's containers (same IDs) alone, as they already run
+  # from the previous configuration.
+  local idsA=""
+  [ "$abort_at" != central ] || idsA="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
   if [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes --assume-compatible $surge || rrc=$?
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes --assume-compatible $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
-      if [ -z "$sent" ] && grep -qF "$pattern" "$log"; then
+      if [ -z "$sent" ] && grep -qE "$pattern" "$log"; then
         kill -TERM "$rpid" 2>/dev/null || true; sent=yes
       fi
       sleep 0.5
@@ -197,13 +224,20 @@ $found"
     "$cli" status || true
     sleep 5
     say "aborting ${surge}"
-    "$cli" rollout --abort --yes $surge | tee "$work/abort.txt" || arc=$?
+    "$cli" rollout --abort --yes --allow-legacy-secrets $surge | tee "$work/abort.txt" || arc=$?
     if [ "$abort_at" = prepared ] && ! grep -q "nothing running was touched" "$work/abort.txt"; then
       echo "e2e: an abort before migrate must only restore the previous configuration" >&2; arc=1
     fi
     local stray
     stray="$(docker ps --format '{{.Names}} {{.Image}}' | grep -E '^versola-(central|auth|edge)' | grep -v ":$A\$" || true)"
     if [ -n "$stray" ]; then echo "e2e: still not on $A after the abort:" >&2; echo "$stray" >&2; arc=1; fi
+    if [ -n "$idsA" ]; then
+      local idsB; idsB="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
+      if [ "$idsA" != "$idsB" ]; then
+        echo "e2e: the abort recreated auth or edge replicas that never left $A:" >&2
+        diff <(echo "$idsA") <(echo "$idsB") >&2 || true; arc=1
+      fi
+    fi
     local st_out; st_out="$("$cli" status 2>&1 || true)"
     if grep -q "under way" <<<"$st_out"; then echo "e2e: status still reports a rollout under way" >&2; arc=1; fi
   fi
@@ -211,6 +245,10 @@ $found"
   touch "$stop"
   local trc=0
   wait "$tpid" || trc=$?
+
+  local crc=0
+  # Where the run ended: back on A after an abort, on B after a rollout.
+  if [ -n "$abort_at" ]; then check_central "$A" || crc=1; else check_central "$B" || crc=1; fi
 
   say "traffic report"
   cat "$work/traffic.txt"
@@ -220,8 +258,8 @@ $found"
   "$cli" status || true
 
   echo
-  echo "rollout exit: $rrc   abort exit: $arc   traffic exit: $trc   (all 0 is a pass)"
-  [ "$rrc" -eq 0 ] && [ "$arc" -eq 0 ] && [ "$trc" -eq 0 ]
+  echo "rollout exit: $rrc   abort exit: $arc   traffic exit: $trc   central front: $crc   (all 0 is a pass)"
+  [ "$rrc" -eq 0 ] && [ "$arc" -eq 0 ] && [ "$trc" -eq 0 ] && [ "$crc" -eq 0 ]
 }
 
 case "${1:-}" in

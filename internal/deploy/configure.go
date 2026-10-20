@@ -64,8 +64,8 @@ func Configure(target, version, authURL, postgresHost string, pg PostgresOptions
 type stagedConfigure struct {
 	// from is the deployment being upgraded, as recorded before this run.
 	from *state.State
-	// surge: the rollout will start a stand-in replica of auth and of edge
-	// in the lowest free slot, so their ports are checked now as well.
+	// surge: the rollout will start a stand-in replica of central, auth and
+	// edge in the lowest free slot, so their ports are checked now as well.
 	surge bool
 	// abort: this prepares the bundle of the version a rollout goes back to
 	// (`versola rollout --abort`): from.PreviousVersion is configured, the
@@ -404,8 +404,9 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, err
 	}
 	slotOne := []state.Slot{{N: 1, Version: version}}
-	authSlots, edgeSlots := slotOne, slotOne
+	centralSlots, authSlots, edgeSlots := slotOne, slotOne, slotOne
 	if staged != nil {
+		centralSlots = staged.from.ActiveSlots(CentralService)
 		authSlots, edgeSlots = staged.from.ActiveSlots(AuthService), staged.from.ActiveSlots(EdgeService)
 	}
 	authReplicas, err := replicasOf(topo, AuthService, authSlots)
@@ -419,8 +420,12 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	centralReplicas, err := replicasOf(topo, CentralService, slotOne)
+	centralReplicas, err := replicasOf(topo, CentralService, centralSlots)
 	if err != nil {
+		return ConfigureResult{}, err
+	}
+	// vps: central's PORT/DPORT behind the proxy (frontCentral).
+	if centralReplicas, err = frontCentral(centralReplicas, target == "vps"); err != nil {
 		return ConfigureResult{}, err
 	}
 	if staged != nil {
@@ -438,42 +443,48 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 	// A rollout's stand-ins are checked too: a port the new version's compose
 	// file puts a stand-in on is found clashing now, before anything changes.
-	checkAuth, checkEdge := authReplicas, edgeReplicas
+	checkCentral, checkAuth, checkEdge := centralReplicas, authReplicas, edgeReplicas
 	if staged != nil && staged.surge {
 		// A stand-in already recorded (an abort of a rollout that started
 		// one) is replaced by the new one, in the lowest free slot once it is
 		// gone: checked without it.
-		baseAuth, baseEdge := authSlots, edgeSlots
-		if n, ok := staged.from.Surge[AuthService]; ok {
-			baseAuth = withoutSlot(authSlots, n)
+		base := func(svc string, slots []state.Slot) []state.Slot {
+			if n, ok := staged.from.Surge[svc]; ok {
+				return withoutSlot(slots, n)
+			}
+			return slots
 		}
-		if n, ok := staged.from.Surge[EdgeService]; ok {
-			baseEdge = withoutSlot(edgeSlots, n)
+		// central gets a stand-in only behind the proxy's front of its PORT
+		// (see centralStandsIn); otherwise it restarts in place.
+		if centralStandsIn(staged.from, RolloutOptions{}) {
+			if checkCentral, err = withStandIn(topo, CentralService, base(CentralService, centralSlots), version, target == "vps"); err != nil {
+				return ConfigureResult{}, err
+			}
 		}
-		if checkAuth, err = withStandIn(topo, AuthService, baseAuth, version, target == "vps"); err != nil {
+		if checkAuth, err = withStandIn(topo, AuthService, base(AuthService, authSlots), version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
-		if checkEdge, err = withStandIn(topo, EdgeService, baseEdge, version, target == "vps"); err != nil {
+		if checkEdge, err = withStandIn(topo, EdgeService, base(EdgeService, edgeSlots), version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
-	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, checkAuth, checkEdge); err != nil {
+	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), checkCentral, checkAuth, checkEdge); err != nil {
 		return ConfigureResult{}, err
 	}
 	fronts, genDir, err := proxyRouting(topo, target == "vps")
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
+	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, centralReplicas, authReplicas, edgeReplicas)); err != nil {
 		return ConfigureResult{}, err
 	}
 	if staged != nil {
 		// What `up` writes before it starts anything, written now: the
 		// rollout starts containers from this bundle one at a time.
-		if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
+		if err := writeReplicasFile(dir, filepath.Base(composePath), centralReplicas, authReplicas, edgeReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
-		if err := writeOverridesFile(dir, authReplicas); err != nil {
+		if err := writeOverridesFile(dir, centralReplicas, authReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -491,7 +502,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}
 	if staged != nil {
-		fin.Slots = map[string][]state.Slot{AuthService: authSlots, EdgeService: edgeSlots}
+		fin.Slots = map[string][]state.Slot{CentralService: centralSlots, AuthService: authSlots, EdgeService: edgeSlots}
 		fin.PreviousVersion = staged.from.Version
 		if staged.abort {
 			fin.RollingBack = true

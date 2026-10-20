@@ -668,7 +668,7 @@ stays out of the proxy while the others serve; restore the database from
 the backup if the old version can't run at all), and secrets the new
 version added stay in OpenBao. No compatibility confirmation is asked. If
 the rollout used `--no-surge` because the server has no memory for one more
-JVM, pass `--no-surge` to the abort too. Cut off, `--abort` again continues
+JVM, pass `--no-surge` to the abort too (it skips the stand-in memory and Postgres checks). Cut off, `--abort` again continues
 it (`state.json` records that an abort is under way, so it does not turn
 round). Once a rollout has finished there is nothing to abort: roll the
 earlier version out instead.

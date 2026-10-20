@@ -249,10 +249,11 @@ newline, so a script can feed several answers to consecutive commands
 Pasting several commands into an interactive terminal is different: the shell
 has already taken the next line as typed-ahead input, and the prompt reads it
 as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
-`migrate`, `up`, `bootstrap` and `replica add|remove` (as `rollout`, `upgrade`
-and `uninstall` already accept): the "This will …" line is still printed (for
-`rollout` too, which printed nothing extra with `-y` before), but the question
-is not asked. `--yes` changes nothing against `local`, which never asks.
+`migrate`, `up`, `bootstrap` and `replica add|remove`; `rollout`, `upgrade` and
+`uninstall` accept it too. With `--yes`, `configure`, `migrate`, `up`,
+`bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
+script's log shows what it agreed to) and then go on without asking.
+`--yes` changes nothing against `local`, which never asks.
 
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
 

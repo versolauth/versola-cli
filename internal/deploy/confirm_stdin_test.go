@@ -113,3 +113,10 @@ func TestReadLineEndlessStreamTerminates(t *testing.T) {
 		t.Errorf("read %d bytes, want at most %d", e.n, maxLineLen+maxDrain+1)
 	}
 }
+
+func TestConfirmTooLongLineSaysWhy(t *testing.T) {
+	err := confirmVpsFrom(strings.NewReader(strings.Repeat("y", 2*maxLineLen)+"\n"), false, "do a thing")
+	if !errors.Is(err, ErrLineTooLong) {
+		t.Fatalf("err = %v, want ErrLineTooLong", err)
+	}
+}

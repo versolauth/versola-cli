@@ -322,7 +322,10 @@ func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 		return nil
 	}
 	fmt.Print("Continue? [y/N]: ")
-	line, _ := ReadLine(in)
+	line, err := ReadLine(in)
+	if errors.Is(err, ErrLineTooLong) {
+		return fmt.Errorf("aborted: %w", err)
+	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
 		return fmt.Errorf("aborted")

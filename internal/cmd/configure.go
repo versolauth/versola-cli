@@ -82,7 +82,7 @@ than something that happens silently — e.g. deploying onto a server.`,
 }
 
 func init() {
-	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps, or replacing a recorded vps deployment)")
+	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
@@ -165,12 +165,17 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// replaced state, if any, is asked about via case 1's own message
 	// instead -- so this is deliberately if/else-if, not two independent
 	// ifs, to avoid a double prompt when both technically apply.
+	//
+	// The second branch passes false for confirmIfVpsState's assumeYes on
+	// purpose, whatever --yes says: it guards the record being REPLACED, and
+	// answering it for a script would leave status/down/uninstall unable to
+	// find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("make Versola %s the deployment this machine tracks for the VPS, replacing its current record (nothing is started or stopped yet)", version)
 		if err := deploy.ConfirmVpsDeployYes(configureYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(configureYes, func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state confirmIfVpsState loaded (if any) describes the record

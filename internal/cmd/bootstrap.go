@@ -79,7 +79,7 @@ touches a live database, or to run migrate on its own schedule.`,
 }
 
 func init() {
-	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps, or replacing a recorded vps deployment)")
+	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
@@ -156,13 +156,15 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// Finalize would silently orphan (flagged in review). confirmIfVpsState
 	// covers that second case by reading stored state instead of this run's
 	// target; only one of the two branches ever fires, same reasoning as
-	// configure.go.
+	// configure.go. That second branch passes false for assumeYes on purpose,
+	// whatever --yes says (see configure.go): answering it for a script would
+	// leave status/down/uninstall unable to find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
 		if err := deploy.ConfirmVpsDeployYes(bootstrapYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(bootstrapYes, func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state loaded here (if any) describes the record this run is

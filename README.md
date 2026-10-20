@@ -253,11 +253,12 @@ as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
 `uninstall` accept it too. With `--yes`, `configure`, `migrate`, `up`,
 `bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
 script's log shows what it agreed to) and then go on without asking.
-`local` never asks about its own deployment, so there `--yes` only matters
-when the machine's record still points at a running VPS deployment: then
-`configure local` / `bootstrap local` ask before replacing that record, and
-`--yes` answers for you, leaving `status`, `down` and `uninstall` unable to
-find the VPS containers until you configure vps again.
+`local` never asks about its own deployment, so `--yes` changes nothing there.
+The one exception it does not cover: `configure local` / `bootstrap local` on a
+machine whose record still points at a running VPS deployment ask before
+replacing that record, even with `--yes`, because replacing it leaves `status`,
+`down` and `uninstall` unable to find the VPS containers. In a script that
+question is answered by stdin, or the command aborts.
 
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
 

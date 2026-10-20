@@ -34,7 +34,7 @@ real traffic, so it asks for confirmation first.`,
 }
 
 func init() {
-	upCmd.Flags().BoolVarP(&upYes, "yes", "y", false, "don't ask for confirmation (vps, or replacing a recorded vps deployment)")
+	upCmd.Flags().BoolVarP(&upYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	upCmd.Flags().BoolVar(&upNoBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 }
 

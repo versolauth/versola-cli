@@ -901,6 +901,13 @@ func samePorts(oldTopo, newTopo topology.Topology, slots map[string][]state.Slot
 			if base == AuthService {
 				same = same && a.AdditionalPort == b.AdditionalPort && a.MutualTLSPort == b.MutualTLSPort
 			}
+			// Central gains or loses its mutual-TLS listener with the release (a
+			// release that has it is deployed next to one that has not, and
+			// the rollout routes by what the new bundle says); moving the
+			// port of a listener both have is another matter.
+			if base == CentralService && a.MutualTLSSet() && b.MutualTLSSet() {
+				same = same && a.MutualTLSPort == b.MutualTLSPort
+			}
 			if !same {
 				return fmt.Errorf("the new version's compose file moves %s's ports (PORT/DPORT/APORT/MPORT %d/%d/%d/%d, now %d/%d/%d/%d): a rolling upgrade can't route to the running replicas by the new ports -- deploy this version with `versola configure`, `migrate` and `up` (a short stop)",
 					was[i].Service, a.Port, a.DiagnosticsPort, a.AdditionalPort, a.MutualTLSPort, b.Port, b.DiagnosticsPort, b.AdditionalPort, b.MutualTLSPort)

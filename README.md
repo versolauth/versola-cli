@@ -519,8 +519,10 @@ shared by TLS it terminates and TLS it must not touch, so it is a stream
 Central's connection takes a hop through a loopback relay
 (`127.0.0.1:8445`) that drops that header, which its TLS listener would
 take for a broken handshake. All three loopback ports must be free;
-`configure` checks. Central's own port 8093 stays open on all interfaces,
-as before, for edges that use the host address.
+`configure` checks. Port 8093 stays open on all interfaces, as before, for
+edges that use the host address: central itself listens there on a
+deployment without the proxy's front of it, and the proxy does (balancing
+over central's replicas, see below) on one with it.
 
 The generated file is `proxy/stream.d/central-mtls.conf` in the proxy's
 config (see `~/.versola/active/proxy-vps/current/`).
@@ -586,6 +588,21 @@ ephemeral ports (from 32768). Only the proxy may use 8090 on a vps now, and cent
 (`/readiness`) is no longer on 8091 but on 28091: point anything outside the
 CLI that probes it there. `replica add|remove` refuses on a deployment that
 has not been moved yet (`versola up` does it; central restarts once).
+
+A release whose central serves edges on its own mutual-TLS listener (its
+compose file sets `MPORT: 8093` for central, with `MBIND_HOST: "0.0.0.0"`;
+versola#607) gets that listener moved the same way: the proxy listens on
+8093 on every interface (the address edges and the `central.<domain>` relay
+below use, unchanged) and balances over the central replicas, which listen
+on the loopback 20000 higher (28093; 28193 for a second replica) --
+`overrides.yml` and `replicas.yml` set `MPORT` and `MBIND_HOST: "127.0.0.1"`
+for them. Port 8093 is then the proxy's: `configure` and `up` refuse another
+service on it, and a rollout's central stand-in takes its own pair of ports
+(28190/28191, 28193) instead of fighting the running central for 8093. A
+release whose central has no `MPORT` in its compose file (0.7.x) is
+untouched: the proxy listens on nothing there. Moving the listener's port
+between two releases is refused by `rollout` like any other moved port;
+gaining or losing it is not.
 `up` starts the proxy as soon as central is ready, before auth and edge:
 they reach central through it. The first `rollout` of a deployment made
 before this change moves central to the new ports within its usual central

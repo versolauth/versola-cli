@@ -6,8 +6,10 @@ import (
 )
 
 const (
-	// CentralMutualTLSPort is central's own mutual-TLS listener (MPORT in
-	// its compose service), bound on all interfaces of the host.
+	// CentralMutualTLSPort is where edges reach central's mutual-TLS listener
+	// (MPORT in its compose service), on all interfaces of the host: central
+	// itself, or on vps the proxy's front of it (Fronts.CentralMutualTLS),
+	// which balances over the replicas listening elsewhere.
 	CentralMutualTLSPort = 8093
 	// CentralFrontPort is where the proxy's http server listens when the
 	// stream block on 443 sits in front of it (see CentralHost): loopback

@@ -96,16 +96,41 @@ type listener struct {
 }
 
 // listeners are the ports a replica's process binds: PORT and DPORT
-// everywhere, and APORT and MPORT for auth, the only service with an
-// additional and a mutual-TLS listener. (topology.Service carries default
-// APORT/MPORT for every service, but edge and central never bind them;
-// counting them would report auth's as clashing with them.)
+// everywhere, APORT and MPORT for auth, and MPORT for a central whose compose
+// file sets one (see centralMutualTLS). (topology.Service carries default
+// APORT/MPORT for every service, but edge never binds them and central only
+// the MPORT it is given; counting the defaults would report auth's as
+// clashing with them.)
 func (r replica) listeners() []listener {
 	ls := []listener{{"PORT", r.Ports.Port}, {"DPORT", r.Ports.DiagnosticsPort}}
 	if r.Base == AuthService {
 		ls = append(ls, listener{"APORT", r.Ports.AdditionalPort}, listener{"MPORT", r.Ports.MutualTLSPort})
 	}
+	if r.centralMutualTLS() {
+		ls = append(ls, listener{"MPORT", r.Ports.MutualTLSPort})
+	}
 	return ls
+}
+
+// centralMutualTLS: this is a central replica with a mutual-TLS listener --
+// the edge surface, which a release serves on the MPORT its compose file
+// sets for central (8093; versola#607). A release without one sets none and
+// central binds nothing there, so nothing about it is moved or routed.
+func (r replica) centralMutualTLS() bool {
+	return r.Base == CentralService && r.Ports.MutualTLSSet()
+}
+
+// extraEnv is the environment a replica needs besides its listeners. A
+// fronted central's mutual-TLS listener needs MBIND_HOST: the compose file binds it on every interface
+// (MBIND_HOST 0.0.0.0, because the listener is public by design), and so
+// would every replica on its moved port, next to the proxy that is the
+// public address. The replicas listen on the loopback, where the proxy
+// reaches them.
+func (r replica) extraEnv() [][2]string {
+	if r.Fronted && r.centralMutualTLS() {
+		return [][2]string{{"MBIND_HOST", "127.0.0.1"}}
+	}
+	return nil
 }
 
 // frontOffset is how far auth's APORT and MPORT move on a host network
@@ -162,6 +187,14 @@ func frontCentral(central []replica, hostNetwork bool) ([]replica, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", r.Service, err)
 		}
+		if r.centralMutualTLS() {
+			// The mutual-TLS listener moves behind the proxy with the rest,
+			// to the proxy's address for it (the compose file's own port).
+			ports.MutualTLSPort += centralFrontOffset
+			if ports.MutualTLSPort > 65535 {
+				return nil, fmt.Errorf("%s: moving the ports by %d would need port %d for MPORT, which is out of range", r.Service, centralFrontOffset, ports.MutualTLSPort)
+			}
+		}
 		r.Ports = ports
 		r.Fronted = true
 		out[i] = r
@@ -173,7 +206,9 @@ func frontCentral(central []replica, hostNetwork bool) ([]replica, error) {
 // network: in front of auth, its APORT and MPORT as the compose file sets
 // them, on loopback (where auth binds and edge and central connect); and in
 // front of central, its PORT as the compose file sets it (where auth, edge
-// and the admin console's resource connect).
+// and the admin console's resource connect) and, when the compose file sets
+// one, its MPORT (where edges reach central's mutual-TLS listener, on every
+// interface as central itself did).
 func proxyFronts(topo topology.Topology) (proxy.Fronts, error) {
 	auth, err := topo.Service(AuthService)
 	if err != nil {
@@ -186,7 +221,11 @@ func proxyFronts(topo topology.Topology) (proxy.Fronts, error) {
 	if err != nil {
 		return proxy.Fronts{}, err
 	}
-	return proxy.Fronts{Additional: auth.AdditionalPort, MutualTLS: auth.MutualTLSPort, Central: central.Port}, nil
+	f := proxy.Fronts{Additional: auth.AdditionalPort, MutualTLS: auth.MutualTLSPort, Central: central.Port}
+	if central.MutualTLSSet() {
+		f.CentralMutualTLS = central.MutualTLSPort
+	}
+	return f, nil
 }
 
 // proxyGenerationsDir is the vps proxy's own configuration directory (see
@@ -232,11 +271,16 @@ func routedConfig(mode string, fronts proxy.Fronts, genDir string, central, auth
 
 // frontReservations are proxyFronts as ports nothing else may take.
 func frontReservations(f proxy.Fronts) []reservation {
-	return []reservation{
+	out := []reservation{
 		{Name: proxyHolder + " (in front of auth's APORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.Additional}},
 		{Name: proxyHolder + " (in front of auth's MPORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.MutualTLS}},
 		{Name: proxyHolder + " (in front of central's PORT)", Binding: topology.Binding{HostIP: "127.0.0.1", Port: f.Central}},
 	}
+	if f.CentralMutualTLS != 0 {
+		// On every interface: it is the address edges on other hosts use.
+		out = append(out, reservation{Name: proxyHolder + " (in front of central's MPORT)", Binding: topology.Binding{Port: f.CentralMutualTLS}})
+	}
+	return out
 }
 
 // reservation is a host port something other than the replicas holds, the
@@ -644,12 +688,16 @@ func serviceNames(replicas ...[]replica) []string {
 	return names
 }
 
-// centralBackends is what the proxy's central upstream routes to: each
-// replica's PORT, nothing else (central has no APORT or MPORT).
+// centralBackends is what the proxy's central upstreams route to: each
+// replica's PORT and, when it has a mutual-TLS listener behind the proxy,
+// its MPORT (central has no APORT).
 func centralBackends(replicas []replica) []proxy.Backend {
 	backends := make([]proxy.Backend, len(replicas))
 	for i, r := range replicas {
 		backends[i] = proxy.Backend{Service: r.Service, Port: r.Ports.Port}
+		if r.Fronted && r.centralMutualTLS() {
+			backends[i].MutualTLSPort = r.Ports.MutualTLSPort
+		}
 	}
 	return backends
 }

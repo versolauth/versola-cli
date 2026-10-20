@@ -251,7 +251,7 @@ has already taken the next line as typed-ahead input, and the prompt reads it
 as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
 `migrate`, `up`, `bootstrap` and `replica add|remove` (as `rollout`, `upgrade`
 and `uninstall` already accept): the "This will …" line is still printed,
-the question is not asked. `--yes` changes nothing against `local`, which
+(for `rollout` too, which printed nothing extra with `-y` before) the question is not asked. `--yes` changes nothing against `local`, which
 never asks.
 
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`

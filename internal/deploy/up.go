@@ -133,7 +133,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// the old containers might still be the ones really serving traffic
 	// (flagged in review on versolauth/versola-cli#7). cmd/bootstrap.go
 	// asks once, before Configure runs at all; cmd/up.go asks again on its
-	// own when Up is run standalone (see ConfirmVpsDeploy's own comment on
+	// own when Up is run standalone (see ConfirmVpsDeployYes's own comment on
 	// why one fixed prompt can't cover both callers).
 
 	// The compose file declares this volume `external: true` (see the
@@ -297,7 +297,7 @@ func Up(opts UpOptions, st *state.State) error {
 	return nil
 }
 
-// ConfirmVpsDeploy asks for an explicit go-ahead before anything touches
+// ConfirmVpsDeployYes asks for an explicit go-ahead before anything touches
 // a real VPS deployment. action is the already-formatted sentence
 // describing what this particular call is actually about to do --
 // configure/migrate/up are separate commands now (see cmd/configure.go,
@@ -308,13 +308,9 @@ func Up(opts UpOptions, st *state.State) error {
 // the whole chain in one prompt; cmd/migrate.go and cmd/up.go each call
 // it again themselves when run standalone, since nothing then guarantees
 // the same process just showed one moments ago.
-func ConfirmVpsDeploy(action string) error {
-	return confirmVpsFrom(os.Stdin, false, action)
-}
-
-// ConfirmVpsDeployYes is ConfirmVpsDeploy for commands with a -y/--yes flag:
-// with assumeYes the action is still printed (so a script's log says what it
-// agreed to) but nothing is read from stdin.
+//
+// assumeYes is the command's -y/--yes: the action is still printed (so a
+// script's log says what it agreed to) but nothing is read from stdin.
 func ConfirmVpsDeployYes(assumeYes bool, action string) error {
 	return confirmVpsFrom(os.Stdin, assumeYes, action)
 }
@@ -345,7 +341,8 @@ var errLineTooLong = errors.New("input line too long")
 // and the second saw EOF and said "aborted". Reading no further than the
 // newline leaves the rest of the pipe for whoever reads next, in this process
 // or the next one. The newline is not returned (nor a "\r" before it); a final
-// line without one is. A line longer than maxLineLen is cut there with
+// line without one is. A line longer than maxLineLen is cut there (the
+// rest of it is discarded) with
 // errLineTooLong: the answers asked for are a word, and a stream with no
 // newline must not be read into memory until EOF.
 func ReadLine(r io.Reader) (string, error) {
@@ -359,6 +356,14 @@ func ReadLine(r io.Reader) (string, error) {
 			}
 			line = append(line, b[0])
 			if len(line) >= maxLineLen {
+				// Drop the rest of the line (unstored, so memory stays
+				// bounded): left in the pipe it would become the next
+				// prompt's answer.
+				for b[0] != '\n' {
+					if n, err := r.Read(b); n == 0 && err != nil {
+						break
+					}
+				}
 				return string(line), errLineTooLong
 			}
 		}

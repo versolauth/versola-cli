@@ -7,7 +7,7 @@ import (
 )
 
 // callsOverStdin feeds input to os.Stdin through a real pipe (what a script or
-// `printf 'y\ny\n' | versola ...` provides) and calls ConfirmVpsDeploy n times
+// `printf 'y\ny\n' | versola ...` provides) and calls ConfirmVpsDeployYes n times
 // in one process, returning each call's error.
 func callsOverStdin(t *testing.T, input string, n int) []error {
 	t.Helper()
@@ -25,7 +25,7 @@ func callsOverStdin(t *testing.T, input string, n int) []error {
 
 	errs := make([]error, n)
 	for i := range errs {
-		errs[i] = ConfirmVpsDeploy("do a thing")
+		errs[i] = ConfirmVpsDeployYes(false, "do a thing")
 	}
 	return errs
 }
@@ -82,6 +82,12 @@ func TestReadLine(t *testing.T) {
 	long := strings.NewReader(strings.Repeat("x", 3*maxLineLen))
 	if got, err := ReadLine(long); err == nil || len(got) != maxLineLen {
 		t.Errorf("long line: len=%d err=%v, want len %d and an error", len(got), err, maxLineLen)
+	}
+	// The tail of an over-long line is dropped, not left for the next prompt.
+	rest := strings.NewReader(strings.Repeat("x", 2*maxLineLen) + "\ny\n")
+	ReadLine(rest)
+	if got, _ := ReadLine(rest); got != "y" {
+		t.Errorf("line after an over-long one = %q, want y", got)
 	}
 	// Does not consume past the newline.
 	r := strings.NewReader("a\nb\n")

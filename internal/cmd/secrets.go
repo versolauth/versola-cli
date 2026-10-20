@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -113,8 +114,8 @@ func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {
 		line, err := deploy.ReadLine(os.Stdin)
-		if errors.Is(err, deploy.ErrLineTooLong) || strings.TrimSpace(line) == "" {
-			// A cut or missing ID would be stored or tried and fail later as a
+		if (err != nil && !errors.Is(err, io.EOF)) || strings.TrimSpace(line) == "" {
+			// A cut, failed or missing ID would be stored or tried and fail later as a
 			// confusing auth error.
 			if err == nil {
 				err = errors.New("empty input")

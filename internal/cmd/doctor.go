@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"io"
 	"fmt"
 	"net"
 	"os"
@@ -295,7 +297,12 @@ func stdinIsInteractive() bool {
 }
 
 func readLine() string {
-	line, _ := deploy.ReadLine(os.Stdin)
+	line, err := deploy.ReadLine(os.Stdin)
+	if err != nil && !errors.Is(err, io.EOF) {
+		// A read error (or an over-long line) is no answer, even if what came
+		// before it looks like "y".
+		return ""
+	}
 	return strings.TrimSpace(line)
 }
 

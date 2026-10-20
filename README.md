@@ -747,5 +747,19 @@ internal/wait/          polls a readiness endpoint until it answers 200 or times
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 install.sh              one-line installer for macOS/Linux
 install.ps1             one-line installer for Windows
+LICENSE                 Apache License 2.0 (also published as a release asset)
 .github/workflows/      ci.yml (vet/build/test on every push+PR), release.yml (builds binaries + checksums on tag push)
 ```
+
+## License
+
+`versola-cli` is licensed under the [Apache License 2.0](LICENSE).
+Copyright 2026 Georgii Kovalev.
+
+This covers the CLI only. The Versola server images it deploys
+(`ghcr.io/versolauth/versola-*`) are distributed under the
+[Versola Community License v1.0](https://github.com/versolauth/versola/blob/main/LICENCE.md);
+installing the CLI does not grant any rights to them.
+
+The Versola name and logo (including the files in `docs/brand/`) are not
+licensed under Apache 2.0.

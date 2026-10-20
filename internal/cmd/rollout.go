@@ -74,7 +74,10 @@ the earlier version out instead.
 --no-surge replaces replicas without a stand-in (for a server without the
 memory for one more JVM): one replica fewer serves meanwhile, so it needs
 two or more -- with one, --allow-downtime accepts that it is down until
-the new one is ready.
+the new one is ready. It goes with --abort too: going back starts a stand-in
+for each service it moves back (all of them if the previous version is
+configured anew), so it checks free memory and Postgres
+connections first, and --abort --no-surge skips both checks.
 
 --dry-run prints the plan, and from the new version's versola-tools (run
 into a temporary directory) its secrets plan and the migrations it would
@@ -103,7 +106,7 @@ func init() {
 	rolloutCmd.Flags().BoolVar(&rolloutAllowDowntime, "allow-downtime", false, "with --no-surge: recreate a service that has one replica in place, unreachable until it is ready")
 	rolloutCmd.Flags().StringSliceVar(&rolloutGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
-	rolloutCmd.Flags().BoolVar(&rolloutAbort, "abort", false, "go back to the version the unfinished rollout came from (migrations and secrets stay)")
+	rolloutCmd.Flags().BoolVar(&rolloutAbort, "abort", false, "go back to the version the unfinished rollout came from (migrations and secrets stay; add --no-surge if memory or Postgres connections are short)")
 	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "you checked the release notes: the running version works on the new version's schema (releases before 1.0 don't promise it)")
 }
 

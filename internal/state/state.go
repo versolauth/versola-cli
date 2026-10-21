@@ -144,6 +144,17 @@ type State struct {
 	// the flag, and for any that has no https domain to derive it from.
 	CentralURL string `json:"centralUrl,omitempty"`
 
+	// MTLSDomain, CentralMTLSDomain and CentralDomain are the public names
+	// (--mtls-domain, --central-mtls-domain, --central-domain) the proxy
+	// publishes beyond AuthURL's: auth's and central's mutual-TLS listeners
+	// and central's enrollment route. Empty: not published, which is what a
+	// record from before they existed means. Recorded so that rollout, which
+	// configures from the record, keeps them, and so that `certs renew` knows
+	// whether a remote edge may exist.
+	MTLSDomain        string `json:"mtlsDomain,omitempty"`
+	CentralMTLSDomain string `json:"centralMtlsDomain,omitempty"`
+	CentralDomain     string `json:"centralDomain,omitempty"`
+
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
@@ -404,6 +415,8 @@ type FinalizeOptions struct {
 	ProxyMode string
 	// CentralURL is the normalized --central-url, "" for none.
 	CentralURL string
+	// MTLSDomain, CentralMTLSDomain, CentralDomain: the public names, "" for none.
+	MTLSDomain, CentralMTLSDomain, CentralDomain string
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
@@ -484,9 +497,13 @@ func Finalize(o FinalizeOptions) error {
 		BundleDir:     filepath.Base(o.BundleDir),
 		AuthURL:       o.AuthURL,
 		CentralURL:    o.CentralURL,
-		ProxyMode:     o.ProxyMode,
-		PostgresHost:  o.PostgresHost,
-		PostgresDB:    o.PostgresDB,
+
+		MTLSDomain:        o.MTLSDomain,
+		CentralMTLSDomain: o.CentralMTLSDomain,
+		CentralDomain:     o.CentralDomain,
+		ProxyMode:         o.ProxyMode,
+		PostgresHost:      o.PostgresHost,
+		PostgresDB:        o.PostgresDB,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,
 		MigratedAt:      o.MigratedAt,

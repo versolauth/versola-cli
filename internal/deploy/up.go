@@ -258,9 +258,7 @@ func Up(opts UpOptions, st *state.State) error {
 		fmt.Printf("\nVersola %s is running at %s\n", st.Version, authURL)
 		if st.ProxyMode == proxy.ModeExternal {
 			fmt.Printf("It listens on http://127.0.0.1:%d -- your own web server has to forward %s there, keeping the Host header, setting X-Forwarded-For and X-Forwarded-Proto ($proxy_add_x_forwarded_for and $scheme in nginx) and allowing 8m request bodies (client_max_body_size 8m).\n", proxy.ExternalPort, authURL)
-			if c, ok, err := proxy.ParseCentralURL(st.CentralURL, proxy.AuthURL{}); err == nil && ok && c.Port == "" {
-				fmt.Printf("%s is not served by Versola's proxy in this mode, and it must not be terminated either: your web server has to pass its TLS on port 443 through to 127.0.0.1:%d by SNI (nginx: a stream block with ssl_preread), so the edge's client certificate reaches central untouched. See the README.\n", st.CentralURL, proxy.CentralMutualTLSPort)
-			}
+			printExternalPublicNames(os.Stdout, st)
 		}
 		// vps doesn't use a fixed literal password the way local's
 		// "Admin1234!" is — it's a real, standing admin credential Configure
@@ -467,4 +465,38 @@ func markRunning() {
 	if err := state.MarkRunning(openbaoBundles()...); err != nil {
 		fmt.Printf("(couldn't record which deployment is running: %v)\n", err)
 	}
+}
+
+// printExternalPublicNames says what the operator's own web server has to do
+// for the public names of a --proxy external deployment: Versola's proxy
+// listens on 127.0.0.1:2821 only and does not see 443.
+func printExternalPublicNames(w io.Writer, st *state.State) {
+	if st.MTLSDomain != "" || st.CentralMTLSDomain != "" {
+		fmt.Fprintf(w, "%s is not served by Versola's proxy in this mode, and it must not be terminated either: your web server has to pass its TLS on port 443 through by SNI (nginx: a stream block with ssl_preread) -- %s -- so the caller's client certificate reaches the service untouched. Limit the connections per client address there too. See the README.\n",
+			strings.Join(nonEmpty(st.MTLSDomain, st.CentralMTLSDomain), " and "), externalStreamTargets(st))
+	}
+	if st.CentralDomain != "" {
+		fmt.Fprintf(w, "%s is not served by Versola's proxy in this mode: your web server has to terminate TLS for it and forward only POST /edge/enroll to central's enrollment listener, 127.0.0.1:%d, rate limited per client address. See the README.\n", st.CentralDomain, proxy.CentralEnrollPort)
+	}
+}
+
+func externalStreamTargets(st *state.State) string {
+	var parts []string
+	if st.MTLSDomain != "" {
+		parts = append(parts, fmt.Sprintf("%s to 127.0.0.1:%d", st.MTLSDomain, proxy.AuthMutualTLSPort))
+	}
+	if st.CentralMTLSDomain != "" {
+		parts = append(parts, fmt.Sprintf("%s to 127.0.0.1:%d", st.CentralMTLSDomain, proxy.CentralMutualTLSPort))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func nonEmpty(ss ...string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -89,8 +89,8 @@ func OpenbaoContainerName(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions, genEnvArgs ...string) error {
-	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg, genEnvArgs...)
+func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions, extras toolsExtras) error {
+	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg, extras)
 }
 
 // pullAndRunToolsTo is pullAndRunTools with the container's stdout sent to
@@ -98,9 +98,10 @@ func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg Postgr
 // machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
 // so the progress of the pull does not end up inside the result.
 //
-// genEnvArgs are gen-env.scala's own flags (--central-mutual-tls-url=...),
-// handed to the image as its arguments.
-func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions, genEnvArgs ...string) error {
+// extras.GenEnvArgs are gen-env.scala's own flags (--central-mutual-tls-url=...),
+// handed to the image as its arguments; extras.Public are the names to put
+// into the leaf certificates.
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions, extras toolsExtras) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -220,9 +221,13 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		// above) or as root on a rootless daemon, so it can read a file
 		// this user can read, and never needs to write it.
 		args = append(args, pg.toolsArgs()...)
+		// -e MTLS_DOMAIN / CENTRAL_MTLS_DOMAIN: the public names, which
+		// versola-tools puts into the leaf certificates' names (and auth's
+		// external-url). Only when set: unset, nothing is published.
+		args = append(args, extras.Public.toolsArgs()...)
 	}
 	args = append(args, "-v", dir+":/out", image)
-	args = append(args, genEnvArgs...)
+	args = append(args, extras.GenEnvArgs...)
 	c := docker.Cmd(args...)
 	c.Stdout = stdout
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
@@ -234,6 +239,25 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		return err
 	}
 	return nil
+}
+
+// toolsExtras is what configure hands versola-tools beyond the target's own
+// facts: gen-env flags and the public names.
+type toolsExtras struct {
+	GenEnvArgs []string
+	Public     PublicDomains
+}
+
+// toolsArgs are the docker run arguments forwarding the public names.
+func (p PublicDomains) toolsArgs() []string {
+	var args []string
+	if p.MTLS != "" {
+		args = append(args, "-e", "MTLS_DOMAIN="+p.MTLS)
+	}
+	if p.CentralMTLS != "" {
+		args = append(args, "-e", "CENTRAL_MTLS_DOMAIN="+p.CentralMTLS)
+	}
+	return args
 }
 
 // centralGenEnvArgs is gen-env's flag for where edge reaches central, none

@@ -140,16 +140,23 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		authURL = auth.URL
 	}
 	// vps: where edge reaches central's mutual-TLS listener, validated the
-	// same way. "" when nothing was given and there is no https domain to
-	// derive central.<domain> from: gen-env keeps its own default then.
-	var central proxy.CentralURL
+	// same way. "" when nothing was given: gen-env keeps its own default,
+	// the loopback address (a local edge never uses a public name).
+	var public proxy.PublicNames
 	if target == "vps" {
-		var err error
-		central, _, err = proxy.ParseCentralURL(proxyOpts.CentralURL, auth)
+		central, _, err := proxy.ParseCentralURL(proxyOpts.CentralURL, auth)
 		if err != nil {
 			return ConfigureResult{}, err
 		}
 		proxyOpts.CentralURL = central.URL
+		// The public names: opt-in, validated against the auth URL and each
+		// other, normalized (lowercase) before they are recorded and handed
+		// to versola-tools, which puts them into the leaf certificates.
+		public, err = proxy.ParsePublicNames(proxyOpts.Public.MTLS, proxyOpts.Public.CentralMTLS, proxyOpts.Public.Enroll, auth)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		proxyOpts.Public = PublicDomains{MTLS: public.MTLS, CentralMTLS: public.CentralMTLS, Enroll: public.Enroll}
 	}
 	// local: its proxy is versola-cli's too (proxy.ModeLocal), at the
 	// address versola-tools builds every local issuer and redirect URI on.
@@ -183,7 +190,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 	}
 	if target == "vps" {
-		if err := checkProxyPorts(auth, proxyOpts.Mode, central.RoutedHost(auth, proxyOpts.Mode) != ""); err != nil {
+		if err := checkProxyPorts(auth, proxyOpts.Mode, public); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -201,7 +208,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, centralGenEnvArgs(proxyOpts.CentralURL)...); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, toolsExtras{GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public}); err != nil {
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
@@ -498,6 +505,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll,
 		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}

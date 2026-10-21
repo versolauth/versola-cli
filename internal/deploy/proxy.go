@@ -23,14 +23,41 @@ type ProxyOptions struct {
 	// environment: untrusted, but without production's rate limits.
 	ACMEStaging bool
 	// CentralURL is --central-url: how edge reaches central's mutual-TLS
-	// listener. Empty: central.<domain> of the auth URL where there is one.
+	// listener. Empty: gen-env's own default, the loopback address.
 	CentralURL string
+	// Public are the names published beyond the auth URL's (--mtls-domain,
+	// --central-mtls-domain, --central-domain); the zero value publishes
+	// nothing.
+	Public PublicDomains
+}
+
+// PublicDomains are the raw values of --mtls-domain, --central-mtls-domain
+// and --central-domain, as recorded in the state: validated by
+// proxy.ParsePublicNames against the auth URL.
+type PublicDomains struct {
+	MTLS, CentralMTLS, Enroll string
+}
+
+// PublicDomainsOf are the names a recorded deployment publishes.
+func PublicDomainsOf(st *state.State) PublicDomains {
+	return PublicDomains{MTLS: st.MTLSDomain, CentralMTLS: st.CentralMTLSDomain, Enroll: st.CentralDomain}
+}
+
+// StoredPublicDomains are the names the vps deployment this machine tracks
+// publishes: what a configure without the flags keeps. Nothing for another
+// target or when there is no readable record.
+func StoredPublicDomains() PublicDomains {
+	st, err := state.Load()
+	if err != nil || st.Target != "vps" {
+		return PublicDomains{}
+	}
+	return PublicDomainsOf(st)
 }
 
 // checkProxyPorts fails early, before anything is generated, when the
 // port(s) the proxy is about to bind are already taken by something
 // else -- typically a web server already installed on the host.
-func checkProxyPorts(auth proxy.AuthURL, mode string, routesCentral bool) error {
+func checkProxyPorts(auth proxy.AuthURL, mode string, public proxy.PublicNames) error {
 	// Ports our own proxy from the current deployment holds are fine --
 	// `up` replaces it. Only those: if this configure switches mode (say
 	// external -> nginx), the ports the new mode needs must still be free
@@ -52,9 +79,9 @@ func checkProxyPorts(auth proxy.AuthURL, mode string, routesCentral bool) error 
 	}
 
 	ports := proxy.Ports(auth, mode)
-	if routesCentral {
-		// Loopback ports of the stream server on 443 and its relay.
-		ports = append(ports, proxy.CentralFrontPort, proxy.CentralRelayPort)
+	if auth.TLS(mode) {
+		// Loopback ports of the stream server on 443's fallback and its relays.
+		ports = append(ports, public.LoopbackPorts()...)
 	}
 	for _, port := range ports {
 		if ours[port] || !proxy.PortInUse(port) {
@@ -91,12 +118,16 @@ func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, routed proxy.
 	if opts.Mode == proxy.ModeNginx {
 		cfg.IPv6 = proxy.HostHasGlobalIPv6()
 	}
-	if central, ok, err := proxy.ParseCentralURL(opts.CentralURL, auth); err != nil {
-		return err
-	} else if ok {
-		cfg.CentralHost = central.RoutedHost(auth, opts.Mode)
-	}
 	tls := auth.TLS(opts.Mode)
+	if tls {
+		// Only the proxy that owns 443 can publish a name; behind
+		// --proxy external the operator's own web server has to (README).
+		public, err := proxy.ParsePublicNames(opts.Public.MTLS, opts.Public.CentralMTLS, opts.Public.Enroll, auth)
+		if err != nil {
+			return err
+		}
+		cfg.Public = public
+	}
 	if tls {
 		r, err := proxy.Resolvers()
 		if err != nil {

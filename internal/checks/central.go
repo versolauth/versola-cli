@@ -20,8 +20,12 @@ var (
 // host: the proxy routes it by SNI, so the name has to lead here. A server
 // behind NAT has a public address that is none of its own, which is told
 // apart from a wrong record only by the operator -- reported, not failed.
-func CentralName(host string) Result {
-	name := "Central name " + host
+func CentralName(host string) Result { return NameResolves("Central name", host) }
+
+// NameResolves is CentralName for any published name, labelled by what it is
+// for: it has to resolve, and to this host.
+func NameResolves(label, host string) Result {
+	name := label + " " + host
 	addrs, err := lookupHost(host)
 	if err != nil || len(addrs) == 0 {
 		return Result{Name: name, OK: false, Detail: "doesn't resolve -- add a DNS record for it pointing at this server"}

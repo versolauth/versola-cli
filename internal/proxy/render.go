@@ -52,13 +52,12 @@ type Config struct {
 	// Empty: the bundle's files are mounted as they are (local).
 	GenerationsDir string
 
-	// CentralHost, vps with TLS only: the public name (central.<domain>)
-	// whose TCP/TLS the proxy forwards to central's mutual-TLS port by SNI,
-	// without terminating it. Empty: no such name (see CentralURL.RoutedHost).
-	// Setting it moves the https server from 443 to CentralFrontPort, where
-	// the stream block on 443 forwards every other name, and needs the
-	// stream block (Fronts set).
-	CentralHost string
+	// Public, vps with TLS only: the names published beyond the auth URL's
+	// (see PublicNames). A mutual-TLS name moves the https server from 443
+	// to FrontPort, where the stream block on 443 forwards every other name,
+	// and needs that stream block (Fronts set); Enroll is one more https
+	// server on whatever listener the first has.
+	Public PublicNames
 }
 
 // Fronts are the ports the proxy listens on, on 127.0.0.1, in front of
@@ -250,10 +249,11 @@ const (
 	CentralFile = "proxy/conf.d/central.conf"
 )
 
-// CentralStreamFile is the stream server on 443 (see Config.CentralHost):
-// written by configure like versola.conf, which it belongs to, and absent
-// when no name is routed.
-const CentralStreamFile = "proxy/stream.d/central-mtls.conf"
+// PublicStreamFile is the stream block's servers for the public mutual-TLS
+// names (see Config.Public): the server on 443 and one relay per name.
+// Written by configure like versola.conf, which it belongs to, and absent
+// when no such name is published.
+const PublicStreamFile = "proxy/stream.d/public-mtls.conf"
 
 // dynamicData is what the files that change with the replicas are
 // rendered from.
@@ -384,10 +384,10 @@ func (c Config) Files() (map[string][]byte, error) {
 		listen = []string{strconv.Itoa(LocalPort)}
 	case c.Mode == ModeExternal:
 		listen = []string{"127.0.0.1:" + strconv.Itoa(ExternalPort)}
-	case tls && c.CentralHost != "":
-		// Behind the stream server on 443 (CentralStreamFile), which says
+	case tls && c.Public.SharesHTTPS():
+		// Behind the stream server on 443 (PublicStreamFile), which says
 		// who the client was in a PROXY protocol header.
-		listen = []string{fmt.Sprintf("127.0.0.1:%d ssl proxy_protocol", CentralFrontPort)}
+		listen = []string{fmt.Sprintf("127.0.0.1:%d ssl proxy_protocol", FrontPort)}
 	case tls:
 		listen = []string{"443 ssl"}
 		if ipv6 {
@@ -400,14 +400,22 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 	}
 
-	if c.CentralHost != "" {
+	if c.Public.Any() {
 		switch {
 		case !tls:
-			return nil, fmt.Errorf("the proxy routes central's name only when it terminates TLS itself (--proxy nginx, https --auth-url)")
-		case c.CentralHost == c.AuthURL.Host:
-			return nil, fmt.Errorf("central's name %s is the auth URL's: SNI could not tell them apart", c.CentralHost)
-		case !c.Fronts.set():
-			return nil, fmt.Errorf("routing central's name needs the stream block, which is vps's")
+			return nil, fmt.Errorf("the proxy publishes names only when it terminates TLS itself (--proxy nginx, https --auth-url)")
+		case c.Public.SharesHTTPS() && !c.Fronts.set():
+			return nil, fmt.Errorf("routing the mutual-TLS names needs the stream block, which is vps's")
+		}
+		names := map[string]bool{c.AuthURL.Host: true}
+		for _, n := range []string{c.Public.MTLS, c.Public.CentralMTLS, c.Public.Enroll} {
+			if n == "" {
+				continue
+			}
+			if names[n] {
+				return nil, fmt.Errorf("the name %s is used twice (or is the auth URL's): SNI could not tell them apart", n)
+			}
+			names[n] = true
 		}
 	}
 	if c.GenerationsDir != "" && c.Mode == ModeLocal {
@@ -428,11 +436,13 @@ func (c Config) Files() (map[string][]byte, error) {
 		"TLS":           tls,
 		"IPv6":          ipv6,
 		"RealIP":        c.Mode == ModeExternal,
-		"ProxyProtocol": tls && c.CentralHost != "",
-		"CentralHost":   c.CentralHost,
-		"CentralPort":   CentralMutualTLSPort,
-		"FrontPort":     CentralFrontPort,
-		"RelayPort":     CentralRelayPort,
+		"ProxyProtocol": tls && c.Public.SharesHTTPS(),
+		"Enroll":        tls && c.Public.Enroll != "",
+		"EnrollHost":    c.Public.Enroll,
+		"EnrollPort":    CentralEnrollPort,
+		"Relays":        c.Public.Relays(),
+		"FrontPort":     FrontPort,
+		"ConnLimit":     PublicConnLimit,
 		"Listen":        listen,
 		"Host":          c.AuthURL.Host,
 		"Resolvers":     c.Resolvers,
@@ -445,7 +455,7 @@ func (c Config) Files() (map[string][]byte, error) {
 		"ExternalPort":  ExternalPort,
 		"LocalPort":     LocalPort,
 		"HostNetwork":   c.Mode != ModeLocal,
-		"Stream":        c.Fronts.set() || c.CentralHost != "",
+		"Stream":        c.Fronts.set() || c.Public.SharesHTTPS(),
 		"Generations":   c.GenerationsDir != "",
 		// JSON strings are YAML's double-quoted scalars, so a path with
 		// spaces stays one value; `$` is doubled, or Compose would
@@ -470,12 +480,12 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 		files[out] = b
 	}
-	if c.CentralHost != "" {
-		b, err := render("templates/central-mtls.conf.tmpl", data)
+	if tls && c.Public.SharesHTTPS() {
+		b, err := render("templates/public-mtls.conf.tmpl", data)
 		if err != nil {
 			return nil, err
 		}
-		files[CentralStreamFile] = b
+		files[PublicStreamFile] = b
 	}
 	for out, src := range map[string]string{
 		"proxy/proxy_params.conf": "templates/proxy_params.conf",
@@ -532,9 +542,9 @@ func Write(bundleDir string, c Config) error {
 		}
 	}
 	// A bundle reconfigured without a routed name must not keep the stream
-	// server of the last one: versola.conf is back on 443 itself.
-	if _, ok := files[CentralStreamFile]; !ok {
-		if err := os.Remove(filepath.Join(bundleDir, CentralStreamFile)); err != nil && !os.IsNotExist(err) {
+	// servers of the last one: versola.conf is back on 443 itself.
+	if _, ok := files[PublicStreamFile]; !ok {
+		if err := os.Remove(filepath.Join(bundleDir, PublicStreamFile)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

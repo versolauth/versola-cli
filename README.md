@@ -133,15 +133,18 @@ an install page in your browser, and only after you confirm:
 - Port 2821 free on localhost (`local` only — for `vps`, `configure`
   itself checks the ports its reverse proxy needs, which depend on
   `--proxy` and `--auth-url`: see "Deploying to a VPS" below)
-- With `--target vps` and `--auth-url` and/or `--central-url`: central's
-  second public name (see "Central's second name" below) resolves, to
-  this server, and answers a TLS handshake on its port 8093 and, if the
-  URL has no port, on 443. Meant for a server where central already runs
-  (after `versola up`): before that there is nothing to answer
+- With `--target vps` and `--auth-url`, and any of `--mtls-domain`,
+  `--central-mtls-domain`, `--central-domain` (the names you will deploy
+  with, see "Public names" below): each name resolves, to this server, and
+  443 answers a TLS handshake for it. `--central-url`, when you pass one,
+  is checked the same way on its own port. Meant for a server where Versola
+  already runs (after `versola up`): before that there is nothing to answer
 - With `--target vps`, on a host that already has a deployment: the
   mutual-TLS certificates in the `versola-mtls-vps` volume are not
   expired and not within the last third of their lifetime (a warning
-  then; see `certs renew`)
+  then; see `certs renew`), and then a list of every certificate with its
+  `notAfter` -- the volume's, and what each public name presents --
+  soonest to expire first. `status` prints the same list
 - Enough free memory (differs by target, see below)
 - Enough free disk space (~4 GiB, for pulling Versola's images)
 
@@ -229,7 +232,8 @@ versola up
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
   it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
-  and accepts `--postgres-db` and `--postgres-ca`.
+  and accepts `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
+  `--central-mtls-domain` and `--central-domain` (see "Public names").
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -451,9 +455,8 @@ serves the admin console at `/central/admin/`.
   without production's rate limits (a handful of certificates per domain
   per week).
 
-  The name central is reached at (see "Central's second name" below) also
-  needs a DNS record pointing at this server: `central.<domain>`, next to
-  `--auth-url`'s name.
+  Each public name you ask for (see "Public names" below) also needs a DNS
+  record pointing at this server, next to `--auth-url`'s name.
 
 - **`external`** — this server already runs its own web server on 80/443
   (other sites, its own TLS). Versola's proxy then listens only on
@@ -478,86 +481,146 @@ serves the admin console at `/central/admin/`.
   in a container with host networking): 127.0.0.1:2821 isn't reachable
   from anywhere else.
 
-  Versola's proxy doesn't hold 443 here, so it can't route central's
-  second name; your web server has to (see "Central's second name").
+  Versola's proxy doesn't hold 443 here, so it can't publish a name on it;
+  your web server has to (see "Public names").
 
-### Central's second name: `--central-url`
+### Public names: `--mtls-domain`, `--central-mtls-domain`, `--central-domain`
 
-A deployment is addressed by two host names: `id.<domain>` (auth,
-`--auth-url`) and `central.<domain>` (central's edge surface, which edges
-reach over mutual TLS). `--central-url` (on `configure` and `bootstrap`,
-vps only) is that second one, as `https://<name>[:<port>]`. Left out, it is
-`https://central.<domain>`: `--auth-url`'s host with its first label
-replaced (`id.example.com` and `example.com` both give
-`central.example.com`); `configure` passes it to versola-tools as
-gen-env's `--central-mutual-tls-url`, so it is what an edge's
-`central.url` is generated with, and records it. Nothing is derived from
-an `http://` or IP `--auth-url`: versola-tools keeps its own default
-(`https://127.0.0.1:8093`, the host itself). Pass the flag to override
-the name or to point at central's own port instead
-(`https://203.0.113.7:8093`: nothing routes it then).
+A deployment is addressed by `id.<domain>` (`--auth-url`: the web UI, the
+OAuth endpoints, the admin console). Everything else is **private by
+default**: auth's and central's mutual-TLS listeners, and central's
+enrollment route, answer on this host's loopback only, and an edge on the
+same host reaches them there, by address (`https://127.0.0.1:8083` and
+`:8093`), never through a public name. With none of the three flags below,
+nothing but 80 and 443 for `--auth-url` is open, and no stream block is
+generated.
 
-The name's DNS record points at this server. No public certificate is
-needed for it: central's server certificate comes from the deployment's
-own PKI and the edge pins it.
+You need a public name only when something *outside this host* has to reach
+one of those listeners:
 
-With `--proxy nginx` the proxy routes the name itself. Port 443 is then
-shared by TLS it terminates and TLS it must not touch, so it is a stream
-(TCP) server that reads the server name from the ClientHello
-(`ssl_preread`):
+| Flag | Name (by convention) | Publishes | You need it when |
+|---|---|---|---|
+| `--mtls-domain` | `id-mtls.<domain>` | auth's mutual-TLS listener | an edge in another network (or a partner's `tls_client_auth` client, or a FAPI client) calls `/par`, `/token`, `/userinfo`, ... with a client certificate |
+| `--central-mtls-domain` | `central-mtls.<domain>` | central's mutual-TLS listener (the edge surface) | an edge in another network syncs its configuration from central |
+| `--central-domain` | `central.<domain>` | central's enrollment route only | a new remote edge gets its first certificate (`versola edge bootstrap`) |
 
-- `central.<domain>` goes, as bytes, to central's mutual-TLS listener on
-  `127.0.0.1:8093` -- the handshake and the edge's client certificate
-  reach central untouched;
-- every other name -- `--auth-url`'s -- goes to the http server it was
-  always served by, which moves to `127.0.0.1:8444` and keeps the ACME
-  certificate. Port 80 is unchanged, so Let's Encrypt's HTTP-01 challenge
-  works as before. The stream server tells it who the client is in a
-  PROXY protocol header (the http server trusts only that loopback peer),
-  so auth's per-IP throttling still sees real addresses.
+A partner's edge ("Sign in with X" on the partner's own domain) is an
+ordinary OAuth client of auth: it uses `id.<domain>`, plus `--mtls-domain`
+when it authenticates with a certificate -- never central. A first-party
+edge in another region or cloud uses all three. A single-host deployment
+uses none.
 
-Central's connection takes a hop through a loopback relay
-(`127.0.0.1:8445`) that drops that header, which its TLS listener would
-take for a broken handshake. All three loopback ports must be free;
-`configure` checks. Central's own port 8093 stays open on all interfaces,
-as before, for edges that use the host address.
+All three are optional, independent, remembered by the deployment (a later
+`configure`, and `rollout`, keep them; `--mtls-domain=` with an empty value
+stops publishing one) and need `--auth-url` to be `https`. Each name needs a
+DNS record pointing at this server. They have to differ from each other and
+from `--auth-url`'s name.
 
-The generated file is `proxy/stream.d/central-mtls.conf` in the proxy's
-config (see `~/.versola/active/proxy-vps/current/`).
+```
+versola configure vps 0.8.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 \
+    --mtls-domain id-mtls.example.com \
+    --central-mtls-domain central-mtls.example.com \
+    --central-domain central.example.com
+```
 
-With `--proxy external`, Versola's proxy only listens on
-`127.0.0.1:2821` and doesn't see 443, so the web server in front has to do
-the same, without terminating TLS for this name -- for nginx, a `stream`
-block in the main context sharing 443 with the `http` server that handles
-`--auth-url`'s name:
+What each does, with `--proxy nginx`:
+
+- **The mutual-TLS names** are routed on 443 *without terminating TLS*, by the
+  server name in the ClientHello (`ssl_preread`), so the handshake, the
+  service's own certificate and the caller's client certificate reach it
+  untouched. The listener's certificate (from the deployment's own CA, not
+  from a public one) gets the name in its subject alternative names -- adding
+  a name later re-issues it at the next `versola up` or `certs renew`. A
+  remote edge pins that certificate rather than trusting a CA.
+  Port 443 is then a stream (TCP) server, and the http server that was on it
+  moves to `127.0.0.1:8444`, still with the ACME certificate; the stream server
+  hands it the client's address in a PROXY protocol header, so auth's per-IP
+  throttling still sees real addresses. Port 80 is unchanged, so Let's
+  Encrypt's HTTP-01 challenge works as before. All of `127.0.0.1:8444`,
+  `8445` and `8446` must be free; `configure` checks.
+- Two servers per mutual-TLS port: the **internal** one is what a local
+  edge uses -- auth's on `127.0.0.1:8083` (balanced over every auth replica)
+  and central's own listener on `127.0.0.1:8093` -- with no SNI and no
+  limits; the **public** one is a loopback relay per name
+  (`127.0.0.1:8446` for `--mtls-domain`, `:8445` for `--central-mtls-domain`)
+  that the 443 server forwards to, with `limit_conn` of
+  100 connections per client address (the only thing that can be said about a
+  client before its certificate is checked; a refused connection is logged at
+  `warn` in nginx's error log) and a log of its own: one line per connection
+  tagged `mtls-public` on the proxy's stdout (`docker logs versola-proxy | grep
+  mtls-public`), with the name, the client address, the status and the bytes.
+  Alert on a spike of sessions that end within a second after a few hundred
+  bytes there: from outside, that is what failed handshakes look like (nginx
+  does not see inside the TLS it passes through).
+- **`--central-domain`** is plain https, terminated by Versola's proxy with a
+  Let's Encrypt certificate of its own (nginx's ACME module, like
+  `--auth-url`'s -- port 80 answers its challenge too). It serves **one
+  route**, `POST /edge/enroll`, to central's enrollment listener
+  (`127.0.0.1:8094`, `EPORT`); everything else is 404. It is rate limited
+  per client address (6 a minute, burst 5) before central sees a request, and
+  central limits per token on its side.
+- Central's own mutual-TLS port 8093 and enrollment port 8094 are bound to
+  the loopback by the compose file: unlike before, nothing is open on a
+  public interface unless the proxy publishes it.
+
+The generated files are `proxy/stream.d/public-mtls.conf` and, for the
+enrollment name, a server in `proxy/conf.d/versola.conf` (see
+`~/.versola/active/proxy-vps/current/`).
+
+**Firewall:** open only 80 and 443 (and only 443 reaches the mutual-TLS
+names). Ports 8083, 8093, 8094 and 8444-8446 are loopback and must stay closed
+to the internet, as must 8082 and 8090. An edge that cannot do SNI
+through its own firewall has no alternative port: that was removed with the
+public bind of 8093.
+
+With `--proxy external`, Versola's proxy only listens on `127.0.0.1:2821` and
+doesn't see 443, so the web server in front has to do the same itself --
+`configure` and `up` print what is needed for the names you gave. For nginx,
+a `stream` block in the main context sharing 443 with the `http` server that
+handles `--auth-url`'s name, and, for the enrollment name, an `http` server
+that forwards one route:
 
 ```nginx
 stream {
     map $ssl_preread_server_name $versola_tls {
         hostnames;
-        central.example.com 127.0.0.1:8093;   # central's mutual-TLS listener
-        default             127.0.0.1:8443;   # your existing https server, moved off 443
+        id-mtls.example.com       127.0.0.1:8083;   # auth's mutual-TLS listener
+        central-mtls.example.com  127.0.0.1:8093;   # central's mutual-TLS listener
+        default                   127.0.0.1:8443;   # your existing https server, moved off 443
     }
+    limit_conn_zone $binary_remote_addr zone=mtls_conn:10m;
     server {
         listen 443;
         ssl_preread on;
+        limit_conn mtls_conn 100;
         proxy_pass $versola_tls;
     }
 }
 ```
 
-(Your `http` server for the auth name then listens on 8443 and, to keep
-the client address, uses `proxy_protocol` on both ends; or leave the
-address out of it.) Until that is in place, edges outside this host can use
-the host's address and port 8093 directly: `--central-url
-https://<host>:8093`.
+(Your `http` server for the auth name then listens on 8443; to keep the client
+address it uses `proxy_protocol` on both ends, or the address is left out of it.
+Limiting every connection on 443 per address, as here, also counts browsers: raise
+the number, or give the mutual-TLS names a listener of their own.) For
+`--central-domain`: terminate TLS for the name with your own certificate and
+`location = /edge/enroll { limit_except POST { deny all; } proxy_pass
+http://127.0.0.1:8094; }` with a `limit_req`.
 
-`versola doctor --target vps --auth-url ...` checks the name resolves to
-this server and answers a TLS handshake on 8093 (and 443).
+**Migrating from `--central-url` of an earlier version.** `--central-url` used
+to default to `https://central.<domain>`, which the proxy routed to central's
+port 8093 by SNI, and 8093 was open on every interface. Neither is the case
+now: central's mutual-TLS name is `central-mtls.<domain>` and must be asked
+for with `--central-mtls-domain`; `central.<domain>` is the enrollment name
+(`--central-domain`); a local edge no longer goes out through any name; and
+8093 answers on the loopback only. `--central-url` is still accepted, only as
+an explicit address an edge configured by hand is given -- it routes nothing,
+and is no longer derived from `--auth-url`. A deployment whose edges were
+elsewhere re-runs `configure` with `--central-mtls-domain central-mtls.<domain>`
+(its leaf certificates are re-issued with the name), points those edges at it,
+and goes through `versola up`.
 
-This needs versola-tools to read `--central-mutual-tls-url` from the
-arguments it is run with; an image that does not keeps its default
-(`https://127.0.0.1:8093`) and the proxy routes the name regardless.
+`versola doctor --target vps --auth-url ... --mtls-domain ...` checks each name
+resolves to this server and answers a TLS handshake on 443.
 
 The proxy is part of the same Docker Compose project as the rest of the
 deployment, so `status`, `down` and `uninstall` include it. Its
@@ -745,6 +808,14 @@ neither):
   slot, again on an abort) gets its own client certificate through
   central.
 
+`rollout` never replaces a mutual-TLS certificate: a leaf is replaced by
+`versola certs renew` (which publishes its successor as a pin before using it,
+see there) or by a full `versola up`, which restarts everything anyway. A
+rollout run while a renewal is staged but not committed (a `certs renew` that
+was cut off) recreates the replicas as usual -- an edge it starts reads the
+staged pin along with the current one -- and the next `certs renew` finishes
+the renewal.
+
 #### Runbook: a rolling upgrade on the vps
 
 1. Read the release notes of the new version: additive migrations, the
@@ -771,28 +842,74 @@ old version with `configure` / `migrate` / `up`.
 
 Auth's and central's mutual-TLS listeners and the certificate edge
 presents to central are issued by the deployment's own CA (step-ca) into
-the `versola-mtls-vps` volume (`versola-mtls-local` locally), valid for two
-years. `versola certs renew` keeps them valid, the way cert-manager does
-on Kubernetes: it runs versola-tools' `mtls-init` service as a one-off,
-which re-issues a certificate only when a third of its lifetime or less is
-left, and -- if it issued anything -- restarts `central`, `auth` and
-`edge` (every replica, in that order, waiting for each to be ready before
-the next), because they read their certificates at startup. When nothing
-is due it prints nothing and exits 0; a failing step exits non-zero with
-its output. Nothing needs registering in central: an edge is recognised by
-the URI name in its certificate.
+the `versola-mtls-vps` volume (`versola-mtls-local` locally). The CA has
+three intermediates under one root, and each listener trusts only the
+ones it should: **server** signs the listeners' own certificates (90
+days), **edge** signs the identity an edge presents to central (30 days),
+**client** signs the certificates of clients. Central's listener trusts
+the edge intermediate alone, so a client's certificate does not even
+complete a handshake there; auth's trusts clients and edges, and accepts an
+`urn:versola:edge:...` name only from a certificate the edge intermediate
+signed.
 
-If a restart fails after the certificates were renewed, the error names
-the services still running on the old ones; once the problem is fixed,
-`versola certs renew --restart` restarts them (a plain `renew` finds
-nothing due by then).
+`versola certs renew` keeps them valid, the way cert-manager does on
+Kubernetes: it runs versola-tools' `mtls-init` service as a one-off, which
+re-issues a certificate only when a third of its lifetime or less is left,
+and restarts what reads it, because the services read their certificates at
+startup. When nothing is due it prints nothing and exits 0; a failing step
+exits non-zero with its output. Nothing needs registering in central: an
+edge is recognised by the URI name in its certificate.
 
-The edge pins central's server certificate. An edge on the same host
-mounts the volume and picks the new one up with its restart; an edge on
-another host has to be given the renewed `central-server.crt` (and, when
-`ca.crt` changed, the CA bundle) before its next reconnect.
+**On vps it is rolling, and a leaf is never replaced before the edges know
+its successor.** The edge pins the listeners' own certificates (a leaf, not
+a CA), as a set of two files, the current and the next. For a leaf that is
+due:
 
-Run it on a schedule -- daily is plenty:
+1. `mtls-init` *stages* the replacement beside the current pair
+   (`server.next.crt`, `central-server.next.crt`): the pin set now contains
+   it, and nothing has been replaced.
+2. The edges restart to learn it, one replica at a time -- out of the proxy,
+   drained, restarted, ready, back in. (Edge identity renewals take this
+   path too.)
+3. With `--mtls-domain` or `--central-mtls-domain` published, edges in other
+   networks learn the pin from central, which reads it when it starts: central
+   restarts to publish it, and `--pin-wait` (default 15m) is left for them to
+   fetch it before the leaf is replaced.
+4. The leaf is *committed*, and central, then auth's replicas, restart onto
+   it -- auth's one at a time, drained first, so its mutual-TLS connections are
+   moved off a replica before it restarts.
+
+A service with a single replica is restarted where it stands, and is
+unreachable until it is ready (add a replica with `versola replica add` to
+restart without a gap). Central has one replica
+and always restarts in place. A renewal cut off anywhere is finished by running
+it again: staging is repeatable, and nothing is replaced before step 4.
+
+If a restart fails after the leaf was committed, the error names the services
+still running on the old one (an edge that restarts later would pin the new
+leaf while auth still presents the old); once the problem is fixed,
+`versola certs renew --restart` restarts them -- central, auth, edge, in that
+order -- and puts a replica that stayed out of the proxy back (a plain `renew`
+finds nothing due by then).
+
+Risk after a commit: if a restart failed and nobody runs `--restart`, the next
+daily run finds nothing due and prints nothing, while a replica still presents
+the old leaf; an edge restarted for another reason then pins only the new one
+and cannot reach it. Treat the error as an open task, and `status` shows
+`notAfter` of both. The lock the other commands take is held for the whole
+`--pin-wait`, so `up`, `replica`, `rollout` and `configure` wait while a
+renewal sleeps.
+
+An edge on the same host reads the pin files from the volume with its restart.
+An edge on another host gets the pins from central; to hand one a pin by hand
+use the bundle `versola edge add` prints.
+
+On local, central, auth and edge are restarted in that order, each waited for.
+
+Run it on a schedule -- daily is plenty. `versola bootstrap vps` installs the
+timer by default (`--no-certs-timer` to skip it): the certificates are
+short-lived, and a deployment without a renewal stops working when they run
+out.
 
 ```
 versola certs renew --show-timer      # prints what it would write; writes nothing
@@ -805,10 +922,68 @@ The timer is a systemd user timer (`~/.config/systemd/user/versola-certs-renew.{
 user timer stops with the user's last session unless lingering is on
 (`sudo loginctl enable-linger $USER`).
 
+`versola status` and `versola doctor` show the `notAfter` of every
+certificate, so a renewal that did not happen is visible.
+
+### `edge add` / `edge bootstrap` (vps)
+
+An edge in another network (or cloud) is registered with this deployment's
+central, and set up on its own machine from a **bootstrap bundle**. It needs
+the three names of "Public names": `--central-domain` (where it gets its first
+certificate) and `--central-mtls-domain` (where it connects), and
+`--mtls-domain` to reach auth's mutual-TLS listener.
+
+On the central's machine:
+
+```
+versola edge add eu-central --group eu > eu-central.json
+```
+
+`edge add <id> [--group <g>]` registers the edge with central's admin API
+(on this host; the credentials are the deployment's own), issues a one-time
+enrollment token and prints the bundle: the edge's id and group, the token
+(valid for an hour, spent by its first enrollment), `central.<domain>` to enroll
+at, `central-mtls.<domain>` (and `id-mtls.<domain>`) to connect to, and the
+certificates of those listeners to pin, with their fingerprints on stderr to
+compare with what the edge machine shows. The bundle holds nothing that can be
+used again. `--group` names a group of edges (central classifies groups:
+first-party, or a partner's; an edge's group does not change); without it the
+default group is used. The key central registers the edge with is shown once:
+it is written to `./<id>.edge-key.json` (mode 0600, never overwritten;
+`--key-out` moves it) and travels by another channel than the bundle.
+`--existing` only issues a new token for an edge that is already registered (a
+lost identity volume, an expired token). `-o` writes the bundle to a file
+(0600) instead of stdout; with `> file`, run `umask 077` first, since it holds
+a token (valid an hour) and the key file is created in the current directory:
+keep that out of a git working tree.
+
+On the edge's machine, with Docker and the Compose plugin:
+
+```
+versola edge bootstrap eu-central.json --key-file eu-central.edge-key.json
+```
+
+`edge bootstrap <file>` reads the bundle (an expired token, a non-https
+address or a bundle without pins is refused before anything is written) and
+writes `~/.versola/edge/<id>/` (`--dir` moves it): `edge.conf` (where to
+enroll and connect, which certificates to pin -- generated, rewritten on every
+run), the token (0600), the pins, a `compose.yml` with a volume for the edge's
+identity and the edge's image at the bundle's Versola release (`--version`
+overrides), then starts it. The identity volume holds the key and certificate
+the edge enrolled for; keep it, or it enrolls again at every start and the
+token is spent. `edge.local.conf` and `edge.secrets.env` in that directory are
+yours: created empty, never overwritten (the second takes the key from
+`--key-file`); whatever else the edge needs, such as its public URL and its
+keys, goes into the first, which `edge.conf` includes last. `--no-start` writes
+the files and stops. A partner's edge does not use any of this: it has no
+connection to central.
+
 ### `status`
 
 Shows the containers from the last `bootstrap` run and their health
-(`docker compose ps` under the hood).
+(`docker compose ps` under the hood), and on `vps` and `local` the `notAfter`
+of every mutual-TLS certificate and of each public name's own, soonest first,
+marking those due for renewal (see `certs renew`).
 
 ### `down`
 
@@ -891,7 +1066,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, certs, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, certs, edge, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up — which bootstrap chains together
 internal/state/         locates ~/.versola/active, the on-disk state configure writes

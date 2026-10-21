@@ -540,7 +540,7 @@ What each does, with `--proxy nginx`:
   `8445` and `8446` must be free; `configure` checks.
 - Two servers per mutual-TLS port: the **internal** one is what a local
   edge uses -- auth's on `127.0.0.1:8083` (balanced over every auth replica)
-  and central's own listener on `127.0.0.1:8093` -- with no SNI and no
+  and the proxy's front of central's listener on `127.0.0.1:8093` (balanced over the central replicas, which listen on 28093) -- with no SNI and no
   limits; the **public** one is a loopback relay per name
   (`127.0.0.1:8446` for `--mtls-domain`, `:8445` for `--central-mtls-domain`)
   that the 443 server forwards to, with `limit_conn` of
@@ -559,7 +559,7 @@ What each does, with `--proxy nginx`:
   (`127.0.0.1:8094`, central's `APORT`, not auth's 8082); everything else is 404. It is rate limited
   per client address (6 a minute, burst 5) before central sees a request, and
   central limits per token on its side.
-- Central's own mutual-TLS port 8093 and enrollment port 8094 are bound to
+- Central's own mutual-TLS listener (28093) and enrollment port (8094) are bound to
   the loopback by the compose file: unlike before, nothing is open on a
   public interface unless the proxy publishes it.
 
@@ -649,6 +649,21 @@ ephemeral ports (from 32768). Only the proxy may use 8090 on a vps now, and cent
 (`/readiness`) is no longer on 8091 but on 28091: point anything outside the
 CLI that probes it there. `replica add|remove` refuses on a deployment that
 has not been moved yet (`versola up` does it; central restarts once).
+
+A release whose central serves edges on its own mutual-TLS listener (its
+compose file sets `MPORT: 8093` for central; versola#607) gets that listener
+moved the same way: the proxy listens on `127.0.0.1:8093` -- the loopback
+only, never a public interface; an edge on this host uses it by address, and a
+remote edge reaches it only through `--central-mtls-domain`, whose relay ends
+there -- and balances over the central replicas, which listen on the loopback
+20000 higher (28093; 28193 for a second replica): `overrides.yml` and
+`replicas.yml` set `MPORT` and `MBIND_HOST: "127.0.0.1"` for them. Port 8093
+is then the proxy's: `configure` and `up` refuse another service on it, and a
+rollout's central stand-in takes its own pair of ports (28190/28191, 28193)
+instead of fighting the running central for 8093. A release whose central has
+no `MPORT` in its compose file (0.7.x) is untouched: the proxy listens on
+nothing there. Moving the listener's port between two releases is refused by
+`rollout` like any other moved port; gaining or losing it is not.
 `up` starts the proxy as soon as central is ready, before auth and edge:
 they reach central through it. The first `rollout` of a deployment made
 before this change moves central to the new ports within its usual central

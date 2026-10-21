@@ -21,7 +21,7 @@
 # `hostnames` matches the name case-insensitively.
 #
 # The listeners the services are reached on from this host (127.0.0.1:8083
-# for auth, central's own 127.0.0.1:8093) are not touched by any of this: no
+# for auth and for central, the proxy's fronts of the replicas) are not touched by any of this: no
 # SNI, no limits. They are what a local edge uses, by address, never by a
 # public name. What follows is only the public way in.
 map $ssl_preread_server_name $versola_public_upstream {

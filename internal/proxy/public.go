@@ -6,9 +6,10 @@ import (
 )
 
 const (
-	// CentralMutualTLSPort is central's own mutual-TLS listener (MPORT in
-	// its compose service). Versola's compose binds it on the host's
-	// loopback: the proxy below is the only thing that can publish it.
+	// CentralMutualTLSPort is where edges reach central's mutual-TLS listener
+	// (MPORT in its compose service): the proxy's front of it, on the loopback
+	// only (Fronts.CentralMutualTLS), balanced over the replicas listening
+	// elsewhere. The public relay ends here; nothing else publishes it.
 	CentralMutualTLSPort = 8093
 	// AuthMutualTLSPort is auth's mutual-TLS port as edge reaches it, the
 	// proxy's own internal server (Fronts.MutualTLS balances it over the

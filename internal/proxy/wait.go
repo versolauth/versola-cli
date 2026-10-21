@@ -200,16 +200,28 @@ func checkFronts(client *http.Client, f Fronts) error {
 			return err
 		}
 	}
+	if f.centralMutualTLSSet() {
+		if err := checkTCPFront(f.CentralMutualTLS, "central's MPORT"); err != nil {
+			return err
+		}
+	}
 	if !f.set() {
 		return nil
 	}
 	if err := checkHTTPFront(client, f.Additional, "auth's APORT", "auth"); err != nil {
 		return err
 	}
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.MutualTLS))
+	return checkTCPFront(f.MutualTLS, "auth's MPORT")
+}
+
+// checkTCPFront asks the proxy's front at port to accept a TCP connection on
+// the loopback -- which proves the proxy listens, not that a replica answers
+// behind it.
+func checkTCPFront(port int, what string) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("the proxy doesn't accept connections in front of auth's MPORT (%s): %w", addr, err)
+		return fmt.Errorf("the proxy doesn't accept connections in front of %s (%s): %w", what, addr, err)
 	}
 	conn.Close()
 	return nil

@@ -325,7 +325,8 @@ func TestNginxAcceptsPublicNames(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			c := routedConfigTLS(t)
+			c := withCentralMTLS(t, routedConfigTLS(t))
+			c.GenerationsDir = ""
 			c.Public = public
 			if err := Write(dir, c); err != nil {
 				t.Fatal(err)

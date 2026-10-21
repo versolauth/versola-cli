@@ -245,6 +245,6 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	// The certificates are short-lived: the timer is part of deploying to a
 	// server, not an afterthought in the runbook (see scheduleCertsRenewal).
-	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer, days != nil && *days == 0)
+	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer || !issuesMutualTLSCertificates(version), days != nil && *days == 0)
 	return nil
 }

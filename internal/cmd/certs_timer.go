@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
@@ -26,6 +27,23 @@ var (
 		return os.Getenv("USER")
 	}
 )
+
+// issuesMutualTLSCertificates: releases before 0.8 deploy no mutual-TLS
+// certificates, so there is nothing for a timer to renew (a pre-release such as
+// 0.8.0-rc1 counts as 0.8). A version that cannot be read is taken to have them:
+// a timer that renews nothing is a nuisance, a missing one breaks a deployment.
+func issuesMutualTLSCertificates(version string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 2 {
+		return true
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMajor != nil || errMinor != nil {
+		return true
+	}
+	return major > 0 || minor >= 8
+}
 
 // scheduleCertsRenewal installs the daily `certs renew` timer of a vps
 // deployment -- the mutual-TLS certificates are short-lived, and a deployment
@@ -81,7 +99,7 @@ func certsTimerWarning() string {
 // printCertsWarnings prints the timer warning for a vps deployment (local has
 // no timer to speak of: its certificates are renewed by hand).
 func printCertsWarnings(w io.Writer, st *state.State) {
-	if st.Target != "vps" || st.CertsUnlimited() {
+	if st.Target != "vps" || st.CertsUnlimited() || !issuesMutualTLSCertificates(st.Version) {
 		return
 	}
 	if msg := certsTimerWarning(); msg != "" {

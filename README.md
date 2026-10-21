@@ -932,7 +932,8 @@ is accepted there, and `status`/`doctor` do not warn about expiry or a missing t
 a finite lifetime the timer is required: `configure`, `up` and `bootstrap` install it, and
 `--no-certs-timer` is refused with a message. A certificate whose lifetime differs from the
 configured one is replaced at the next renewal run. The identities central issues to
-remote edges renew in-process and are not affected.
+remote edges renew in-process and are not affected. Releases before 0.8 deploy no
+mutual-TLS certificates, so on them no timer is installed and nothing warns about one.
 
 Run it on a schedule -- daily is plenty. `versola configure`, `versola up` and `versola bootstrap`
 (on vps) install the timer, however the

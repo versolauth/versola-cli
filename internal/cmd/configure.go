@@ -218,7 +218,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer, days != nil && *days == 0)
+	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer || !issuesMutualTLSCertificates(version), days != nil && *days == 0)
 	return nil
 }
 

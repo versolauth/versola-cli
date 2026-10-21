@@ -191,3 +191,18 @@ func TestUnlimitedPrintsNoWarnings(t *testing.T) {
 		t.Errorf("unlimited certificates warned about a timer: %q", out.String())
 	}
 }
+
+func TestNoTimerBeforeTheCertificatesExist(t *testing.T) {
+	for version, want := range map[string]bool{
+		"0.7.4": false, "v0.7.4": false, "0.8.0": true, "0.8.0-rc1": true, "0.10.1": true, "1.0.0": true, "latest": true, "": true,
+	} {
+		if got := issuesMutualTLSCertificates(version); got != want {
+			t.Errorf("%q: %v, want %v", version, got, want)
+		}
+	}
+	var out bytes.Buffer
+	printCertsWarnings(&out, &state.State{Target: "vps", Version: "0.7.4"})
+	if out.Len() != 0 {
+		t.Errorf("0.7.4 has no certificates to warn about: %q", out.String())
+	}
+}

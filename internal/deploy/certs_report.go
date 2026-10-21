@@ -141,7 +141,7 @@ func CertReport(st *state.State) ([]CertInfo, error) {
 // composeHasService: the compose file declares the service. A failure to ask
 // is an error, left to the caller to treat as "unknown".
 func composeHasService(composePath, service string) (bool, error) {
-	out, err := docker.Cmd(state.ComposeArgs(composePath, "config", "--services")...).Output()
+	out, err := docker.Output(state.ComposeArgs(composePath, "config", "--services")...)
 	if err != nil {
 		return false, err
 	}

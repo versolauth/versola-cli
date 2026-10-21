@@ -989,6 +989,22 @@ func (o dockerRolloutOps) readyNow(u string) bool {
 	return false
 }
 
+func (o dockerRolloutOps) certificates() error {
+	for _, svc := range []string{"step-ca", MTLSInitService} {
+		if has, err := composeHasService(o.composePath, svc); err != nil {
+			return err
+		} else if !has {
+			return nil // a release without them in its compose file needs none
+		}
+	}
+	// The CA is recreated from the new bundle (its command makes the intermediates) and waited for;
+	// mtls-init then issues what is missing and leaves what is valid.
+	if err := docker.Run(state.ComposeArgs(o.composePath, "up", "-d", "--no-deps", "--wait", "step-ca")...); err != nil {
+		return err
+	}
+	return docker.Run(state.ComposeArgs(o.composePath, "run", "--rm", "-T", "--no-deps", MTLSInitService)...)
+}
+
 func (o dockerRolloutOps) pull() error {
 	services := []string{CentralService, AuthService, EdgeService}
 	if has, err := hasMigrateService(o.composePath); err != nil {

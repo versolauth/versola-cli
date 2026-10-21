@@ -72,6 +72,13 @@ func writeReplica(buf *bytes.Buffer, composeFile string, r replica) error {
 	for _, e := range r.extraEnv() {
 		fmt.Fprintf(buf, "      %s: %s\n", e[0], quote(e[1]))
 	}
+	if r.Base == CentralService {
+		// Central binds its enrollment listener (APORT) only where the variable is set, on a
+		// port every replica would share: the stand-in of a rollout runs next to the replica it
+		// replaces and would clash on it. Slot 1 serves enrollment; any other replica serves
+		// none (an edge enrolling during the few seconds central is recreated is told to retry).
+		buf.WriteString("      APORT: !reset null\n")
+	}
 	if r.Ports.HostNetwork() {
 		return nil // the host's own ports; `network_mode: host` comes from the base
 	}

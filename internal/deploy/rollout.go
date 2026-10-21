@@ -71,6 +71,10 @@ type rolloutOps interface {
 	// readyNow asks a readiness URL up to three times (about 11 s at worst): one
 	// slow answer (a GC pause) must not take a healthy replica out.
 	readyNow(url string) bool
+	// certificates brings up the CA and issues the mutual-TLS certificates the
+	// new version needs, which `up` does through compose's depends_on and a
+	// rollout, starting everything with --no-deps, does not.
+	certificates() error
 	// pull fetches the new version's images before anything changes, so
 	// central's restart and a stand-in's start don't include the download,
 	// and a registry that can't be reached stops the rollout before the
@@ -466,6 +470,15 @@ func (e *rolloutEngine) run() error {
 	// be deleted, even if this run stops halfway (state.MarkStarting).
 	if err := e.ops.markStarting(); err != nil {
 		return fmt.Errorf("couldn't record the deployment being started: %w", err)
+	}
+	// The first release with certificates: central and auth read them at startup,
+	// and the release they replace never made any. (From then on a renewal, not a
+	// rollout, replaces them: `certs renew` stages and overlaps the pins.)
+	if e.st.Target == "vps" && IssuesMutualTLSCertificates(e.st.Version) && e.st.PreviousVersion != "" && !IssuesMutualTLSCertificates(e.st.PreviousVersion) {
+		e.say("\n%s issues mutual-TLS certificates and %s did not: starting the certificate authority and issuing them first...\n", e.st.Version, e.st.PreviousVersion)
+		if err := e.ops.certificates(); err != nil {
+			return fmt.Errorf("couldn't issue the mutual-TLS certificates of %s: %w -- run the same `versola rollout` again", e.st.Version, err)
+		}
 	}
 	services := rolloutServices
 	if e.centralInPlace {

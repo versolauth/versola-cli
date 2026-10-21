@@ -934,7 +934,7 @@ a finite lifetime the timer is required: `configure`, `up` and `bootstrap` insta
 configured one is replaced at the next renewal run. The identities central issues to
 remote edges renew in-process and are not affected. Releases before 0.8 deploy no
 mutual-TLS certificates, so on them no timer is installed, nothing warns about one and `status`/`doctor`
-read no certificates; `rollout` to 0.8 or later installs the timer, as `up` does. If a `certs renew` is
+read no certificates; `rollout` to 0.8 or later installs the timer, as `up` does, and, when it is the first release with certificates (0.7 to 0.8), first recreates the certificate authority and issues them (a rollout starts replicas with `--no-deps`, so compose's `depends_on` does not). A central stand-in serves no enrollment: only slot 1 has `APORT`. If a `certs renew` is
 cut off after it replaced the leaves but before the services restarted onto them (SIGINT, a dropped ssh), it
 leaves a marker, `~/.versola/certs-restart-pending`, and the next run (the timer's too) restarts everything and
 clears it.

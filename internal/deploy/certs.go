@@ -86,6 +86,34 @@ type certsPlan struct {
 	// host before the leaf is replaced: they learn it from central, which
 	// reads it when it starts. 0: there are none (nothing is published).
 	PinWait time.Duration
+	// RestartMarker is a file that says "the leaves were replaced but not everything
+	// was restarted onto them yet": written before the commit, removed once the
+	// restarts are done. It survives a process that dies in between (SIGINT, a dropped
+	// ssh, OOM), so the next run -- the timer's too -- restarts everything instead of
+	// finding nothing due and exiting 0 with central and auth on the old leaf.
+	// "" keeps no marker (local replaces in place and has no overlap to cross).
+	RestartMarker string
+}
+
+func (p certsPlan) markRestartPending() error {
+	if p.RestartMarker == "" {
+		return nil
+	}
+	return os.WriteFile(p.RestartMarker, []byte("a certificate renewal replaced the leaves; `versola certs renew` restarts the services onto them\n"), 0o600)
+}
+
+func (p certsPlan) restartPending() bool {
+	if p.RestartMarker == "" {
+		return false
+	}
+	_, err := os.Stat(p.RestartMarker)
+	return err == nil
+}
+
+func (p certsPlan) clearRestartPending() {
+	if p.RestartMarker != "" {
+		_ = os.Remove(p.RestartMarker)
+	}
 }
 
 // renewCerts runs mtls-init and restarts what a renewal affects, in an order
@@ -105,6 +133,10 @@ type certsPlan struct {
 func renewCerts(ops certsOps, plan certsPlan, restart bool, out io.Writer) error {
 	var prep, ident initResult
 	var err error
+	if plan.restartPending() {
+		fmt.Fprintln(out, "A previous renewal was interrupted after it replaced the certificates: restarting the services onto them")
+		restart = true
+	}
 	if prep, err = runPhase(ops, phaseOf(plan, phasePrepare)); err != nil {
 		return err
 	}
@@ -129,7 +161,11 @@ func renewCerts(ops certsOps, plan certsPlan, restart bool, out io.Writer) error
 	case len(staged) > 0:
 		return renewStaged(ops, plan, out)
 	case restart || hasLeaf(issued) || (!plan.Rolling && (prep.changed || len(issued) > 0)):
-		return restartAll(ops, plan, out)
+		if err := restartAll(ops, plan, out); err != nil {
+			return err
+		}
+		plan.clearRestartPending()
+		return nil
 	case plan.Rolling:
 		// Only the identity (or an old image's "changed" with no names).
 		return restartGroup(ops, plan, plan.Edge, out, nil)
@@ -184,13 +220,22 @@ func renewStaged(ops certsOps, plan certsPlan, out io.Writer) error {
 		fmt.Fprintf(out, "Waiting %s for edges outside this host to learn the next pin...\n", plan.PinWait)
 		ops.wait(plan.PinWait)
 	}
-	// 3. Replace the leaves.
+	// 3. Replace the leaves. The marker comes first: a commit that dies half way
+	//    must also end in a restart.
+	if err := plan.markRestartPending(); err != nil {
+		return fmt.Errorf("couldn't write %s: %w -- %s", plan.RestartMarker, err, resume)
+	}
 	if _, err := runPhase(ops, phaseCommit); err != nil {
 		return fmt.Errorf("%w -- %s", err, resume)
 	}
 	// 4. Central, then auth, onto the new leaves. From here on, a failure
-	//    leaves the old leaf in whoever has not restarted: --restart.
-	return restartTail(ops, plan, out)
+	//    leaves the old leaf in whoever has not restarted: --restart, or the
+	//    next run, which finds the marker.
+	if err := restartTail(ops, plan, out); err != nil {
+		return err
+	}
+	plan.clearRestartPending()
+	return nil
 }
 
 // restartTail restarts central and auth onto leaves that are replaced.
@@ -373,6 +418,13 @@ func RenewCerts(opts RenewCertsOptions, st *state.State) error {
 		return err
 	}
 	plan := certsPlan{Rolling: isVps}
+	if isVps {
+		stateDir, err := state.Dir()
+		if err != nil {
+			return err
+		}
+		plan.RestartMarker = filepath.Join(filepath.Dir(stateDir), "certs-restart-pending")
+	}
 	stepsOf := func(group []replica) []certsStep {
 		var out []certsStep
 		for _, r := range group {

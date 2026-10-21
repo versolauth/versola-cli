@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -196,7 +197,7 @@ func TestNoTimerBeforeTheCertificatesExist(t *testing.T) {
 	for version, want := range map[string]bool{
 		"0.7.4": false, "v0.7.4": false, "0.8.0": true, "0.8.0-rc1": true, "0.10.1": true, "1.0.0": true, "latest": true, "": true,
 	} {
-		if got := issuesMutualTLSCertificates(version); got != want {
+		if got := deploy.IssuesMutualTLSCertificates(version); got != want {
 			t.Errorf("%q: %v, want %v", version, got, want)
 		}
 	}

@@ -397,6 +397,11 @@ func (a *httpEdgeAdmin) register(id, group string) (string, string, error) {
 	if err := a.do(http.MethodPost, "/configuration/edges", req, &resp); err != nil {
 		return "", "", err
 	}
+	// Central shows the key once: a 2xx without it is not a success to report, and
+	// the body is not echoed (it may hold the half that did arrive).
+	if resp.KeyID == "" || resp.PrivateKey == "" {
+		return "", "", fmt.Errorf("central answered 2xx for POST /configuration/edges without a keyId and privateKey -- the edge %s may be registered, but its key was not delivered: delete it in central and add it again", id)
+	}
 	return resp.KeyID, resp.PrivateKey, nil
 }
 

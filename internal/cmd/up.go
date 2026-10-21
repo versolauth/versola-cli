@@ -83,6 +83,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	// Whichever way a vps deployment was made, something has to renew its
 	// certificates (the same as `bootstrap` does).
-	scheduleCertsRenewal(os.Stdout, st.Target, upNoCertsTimer || !issuesMutualTLSCertificates(st.Version), st.CertsUnlimited())
+	scheduleCertsRenewal(os.Stdout, st.Target, upNoCertsTimer || !deploy.IssuesMutualTLSCertificates(st.Version), st.CertsUnlimited())
 	return nil
 }

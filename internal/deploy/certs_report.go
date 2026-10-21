@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,6 +88,23 @@ func parseCertReport(output []byte) []CertInfo {
 	return out
 }
 
+// IssuesMutualTLSCertificates: releases before 0.8 deploy no mutual-TLS
+// certificates, so there is nothing for a timer to renew or a report to read (a pre-release such as
+// 0.8.0-rc1 counts as 0.8). A version that cannot be read is taken to have them:
+// a timer that renews nothing is a nuisance, a missing one breaks a deployment.
+func IssuesMutualTLSCertificates(version string) bool {
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 2 {
+		return true
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMajor != nil || errMinor != nil {
+		return true
+	}
+	return major > 0 || minor >= 8
+}
+
 // CertReport asks mtls-init (its report phase, which changes nothing) for
 // every certificate in the deployment's mutual-TLS volume. The deployment
 // must have a compose file; a volume that has not been filled yet is an
@@ -102,6 +120,15 @@ func CertReport(st *state.State) ([]CertInfo, error) {
 	if !exists {
 		return nil, fmt.Errorf("the deployment in ~/.versola/active is incomplete (no compose file)")
 	}
+	// An older release has no certificates, and a tools image from before the
+	// report phase would run mtls-init in its default mode -- which replaces what
+	// is due in place and restarts nothing. Neither is asked a report of.
+	if !IssuesMutualTLSCertificates(st.Version) {
+		return nil, nil
+	}
+	if has, err := composeHasService(composePath, MTLSInitService); err == nil && !has {
+		return nil, nil
+	}
 	c := docker.Cmd(state.ComposeArgs(composePath, "run", "--rm", "-T", "--no-deps", "-e", "MTLS_INIT_PHASE="+phaseReport, MTLSInitService)...)
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
@@ -109,6 +136,21 @@ func CertReport(st *state.State) ([]CertInfo, error) {
 		return nil, fmt.Errorf("%s (report) failed: %w\n%s", MTLSInitService, err, bytes.TrimSpace(buf.Bytes()))
 	}
 	return parseCertReport(buf.Bytes()), nil
+}
+
+// composeHasService: the compose file declares the service. A failure to ask
+// is an error, left to the caller to treat as "unknown".
+func composeHasService(composePath, service string) (bool, error) {
+	out, err := docker.Cmd(state.ComposeArgs(composePath, "config", "--services")...).Output()
+	if err != nil {
+		return false, err
+	}
+	for _, name := range strings.Fields(string(out)) {
+		if name == service {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // PublicEndpoints are the addresses a deployment's names present a

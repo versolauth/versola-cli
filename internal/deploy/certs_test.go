@@ -3,7 +3,10 @@ package deploy
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -376,5 +379,62 @@ func TestCertsCronLine(t *testing.T) {
 	}
 	if got := CertsCronLine("/opt/my tools/100%/versola"); got != `17 3 * * * '/opt/my tools/100\%/versola' certs renew` {
 		t.Error(got)
+	}
+}
+
+// A renewal that dies after the commit and before the restarts are done leaves
+// the old leaf in central and auth. Nothing is staged or issued the next time,
+// so only the marker says the restarts are owed: the next run -- the timer's
+// too -- does them, and clears it.
+func TestRenewCertsFinishesRestartsAnInterruptedRenewalOwed(t *testing.T) {
+	plan := vpsPlan
+	plan.RestartMarker = filepath.Join(t.TempDir(), "certs-restart-pending")
+	f := &fakeCerts{
+		outputs:    map[string]string{phasePrepare: "mtls-init: staged server\n"},
+		restartErr: map[string]error{"central": errors.New("killed")},
+	}
+	if err := renewCerts(f, plan, false, &bytes.Buffer{}); err == nil {
+		t.Fatal("no error")
+	}
+	if _, err := os.Stat(plan.RestartMarker); err != nil {
+		t.Fatalf("no marker after a renewal that did not finish its restarts: %v", err)
+	}
+
+	// The next run: nothing due, yet everything is restarted, and the marker goes.
+	f = &fakeCerts{}
+	var out bytes.Buffer
+	if err := renewCerts(f, plan, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"restart central", "restart auth", "restart edge"} {
+		if !slices.Contains(f.calls, w) {
+			t.Errorf("calls = %v, lack %q", f.calls, w)
+		}
+	}
+	if !strings.Contains(out.String(), "interrupted") {
+		t.Errorf("says nothing about the interrupted renewal: %q", out.String())
+	}
+	if _, err := os.Stat(plan.RestartMarker); !os.IsNotExist(err) {
+		t.Errorf("the marker stays after the restarts: %v", err)
+	}
+
+	// And then it is silent again.
+	f = &fakeCerts{}
+	out.Reset()
+	if err := renewCerts(f, plan, false, &out); err != nil || out.Len() != 0 {
+		t.Errorf("err %v, out %q", err, out.String())
+	}
+}
+
+// A renewal that completes leaves no marker behind.
+func TestRenewCertsClearsTheMarkerWhenDone(t *testing.T) {
+	plan := vpsPlan
+	plan.RestartMarker = filepath.Join(t.TempDir(), "certs-restart-pending")
+	f := &fakeCerts{outputs: map[string]string{phasePrepare: "mtls-init: staged server\n"}}
+	if err := renewCerts(f, plan, false, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(plan.RestartMarker); !os.IsNotExist(err) {
+		t.Errorf("marker left behind: %v", err)
 	}
 }

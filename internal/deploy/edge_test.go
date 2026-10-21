@@ -489,3 +489,29 @@ func readFile(t *testing.T, dir, name string) string {
 	}
 	return string(b)
 }
+
+// Central shows an edge's key once. A 2xx that carries none is an error that
+// says the key was not delivered, and does not echo what came back.
+func TestRegisterRefusesAnAnswerWithoutTheKey(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty object":   `{}`,
+		"renamed fields": `{"key_id":"k1","private_key":"SECRET-HALF"}`,
+		"key id only":    `{"keyId":"k1","privateKey":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			api := &httpEdgeAdmin{base: srv.URL, password: "x", http: srv.Client()}
+			keyID, key, err := api.register("eu-central", "")
+			if err == nil {
+				t.Fatalf("registered with %q, key %q", keyID, key)
+			}
+			if !strings.Contains(err.Error(), "eu-central") || strings.Contains(err.Error(), "SECRET-HALF") {
+				t.Errorf("error = %v", err)
+			}
+		})
+	}
+}

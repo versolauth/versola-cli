@@ -933,7 +933,11 @@ a finite lifetime the timer is required: `configure`, `up` and `bootstrap` insta
 `--no-certs-timer` is refused with a message. A certificate whose lifetime differs from the
 configured one is replaced at the next renewal run. The identities central issues to
 remote edges renew in-process and are not affected. Releases before 0.8 deploy no
-mutual-TLS certificates, so on them no timer is installed and nothing warns about one.
+mutual-TLS certificates, so on them no timer is installed, nothing warns about one and `status`/`doctor`
+read no certificates; `rollout` to 0.8 or later installs the timer, as `up` does. If a `certs renew` is
+cut off after it replaced the leaves but before the services restarted onto them (SIGINT, a dropped ssh), it
+leaves a marker, `~/.versola/certs-restart-pending`, and the next run (the timer's too) restarts everything and
+clears it.
 
 Run it on a schedule -- daily is plenty. `versola configure`, `versola up` and `versola bootstrap`
 (on vps) install the timer, however the

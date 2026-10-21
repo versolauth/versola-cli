@@ -225,6 +225,7 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		// versola-tools puts into the leaf certificates' names (and auth's
 		// external-url). Only when set: unset, nothing is published.
 		args = append(args, extras.Public.toolsArgs()...)
+		args = append(args, certDaysArgs(extras.CertDays)...)
 	}
 	args = append(args, "-v", dir+":/out", image)
 	args = append(args, extras.GenEnvArgs...)
@@ -246,6 +247,8 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 type toolsExtras struct {
 	GenEnvArgs []string
 	Public     PublicDomains
+	// CertDays: nil leaves versola-tools' default (365); 0 is unlimited.
+	CertDays *int
 }
 
 // toolsArgs are the docker run arguments forwarding the public names.
@@ -293,3 +296,12 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (c *cappedBuffer) String() string { return c.buf.String() }
+
+// certDaysArgs forwards --cert-lifetime-days (0 = unlimited) to versola-tools;
+// nothing when it was not set, which leaves its default.
+func certDaysArgs(days *int) []string {
+	if days == nil {
+		return nil
+	}
+	return []string{"-e", fmt.Sprintf("MTLS_CERT_DAYS=%d", *days)}
+}

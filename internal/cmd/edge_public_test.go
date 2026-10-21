@@ -32,6 +32,9 @@ func TestPublicFlagsOnConfigureBootstrapAndDoctor(t *testing.T) {
 		}
 	}
 	for _, name := range publicFlagNames {
+		if name == "cert-lifetime-days" {
+			continue // a deployment setting; doctor checks names
+		}
 		if doctorCmd.Flags().Lookup(name) == nil {
 			t.Errorf("doctor has no --%s", name)
 		}

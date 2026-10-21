@@ -90,7 +90,7 @@ touches a live database, or to run migrate on its own schedule.`,
 
 func init() {
 	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
-	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); they expire (leaves in 90 days, the edge's identity in 30) without it")
+	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
@@ -193,8 +193,17 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(bootstrapNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public},
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {
 		return err
@@ -236,6 +245,6 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	// The certificates are short-lived: the timer is part of deploying to a
 	// server, not an afterthought in the runbook (see scheduleCertsRenewal).
-	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer)
+	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer, days != nil && *days == 0)
 	return nil
 }

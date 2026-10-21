@@ -41,7 +41,7 @@ real traffic, so it asks for confirmation first.`,
 
 func init() {
 	upCmd.Flags().BoolVarP(&upYes, "yes", "y", false, "don't ask for confirmation (vps)")
-	upCmd.Flags().BoolVar(&upNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); without something running it they expire and the deployment stops working")
+	upCmd.Flags().BoolVar(&upNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited at configure)")
 	upCmd.Flags().BoolVar(&upNoBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 }
 
@@ -67,6 +67,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if recorded, err := state.Load(); err == nil && recorded.Target == "vps" {
+		if err := refuseNoTimerWhenFinite(upNoCertsTimer, recorded.CertLifetimeDays); err != nil {
+			return err
+		}
+	}
 	st, err := confirmIfVpsState(upYes, func(version string) string {
 		return fmt.Sprintf("start Versola %s on the VPS, replacing whatever's currently serving traffic there", version)
 	})
@@ -78,6 +83,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	// Whichever way a vps deployment was made, something has to renew its
 	// certificates (the same as `bootstrap` does).
-	scheduleCertsRenewal(os.Stdout, st.Target, upNoCertsTimer)
+	scheduleCertsRenewal(os.Stdout, st.Target, upNoCertsTimer, st.CertsUnlimited())
 	return nil
 }

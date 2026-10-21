@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // The tools the timer checks shell out to, replaceable in tests.
@@ -33,9 +34,9 @@ var (
 // a deployment that is up: it is said, loudly. A user timer also stops with the
 // user's last session unless lingering is on, which gets a line of its own with
 // the exact command.
-func scheduleCertsRenewal(w io.Writer, target string, skip bool) {
-	if target != "vps" || skip {
-		return
+func scheduleCertsRenewal(w io.Writer, target string, skip, unlimited bool) {
+	if target != "vps" || skip || unlimited {
+		return // unlimited certificates never need renewing: no timer
 	}
 	fmt.Fprintln(w, "\nScheduling the daily renewal of the mutual-TLS certificates...")
 	if err := certsTimer(true); err != nil {
@@ -79,8 +80,8 @@ func certsTimerWarning() string {
 
 // printCertsWarnings prints the timer warning for a vps deployment (local has
 // no timer to speak of: its certificates are renewed by hand).
-func printCertsWarnings(w io.Writer, target string) {
-	if target != "vps" {
+func printCertsWarnings(w io.Writer, st *state.State) {
+	if st.Target != "vps" || st.CertsUnlimited() {
 		return
 	}
 	if msg := certsTimerWarning(); msg != "" {

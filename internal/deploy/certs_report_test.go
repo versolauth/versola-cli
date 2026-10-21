@@ -260,10 +260,10 @@ func TestParseCertReportOfARealRun(t *testing.T) {
 	for _, c := range infos {
 		by[c.Name] = c
 	}
-	if c := by["edge-client.crt"]; c.Subject != "urn:versola:edge:edge-default" || c.NotAfter.Sub(c.NotBefore).Round(24*time.Hour) != 30*24*time.Hour {
+	if c := by["edge-client.crt"]; c.Subject != "urn:versola:edge:edge-default" || c.NotAfter.Sub(c.NotBefore).Round(24*time.Hour) != 365*24*time.Hour {
 		t.Errorf("edge-client = %+v", c)
 	}
-	if c := by["server.crt"]; c.NotAfter.Sub(c.NotBefore).Round(24*time.Hour) != 90*24*time.Hour {
+	if c := by["server.crt"]; c.NotAfter.Sub(c.NotBefore).Round(24*time.Hour) != 365*24*time.Hour {
 		t.Errorf("server = %+v", c)
 	}
 	if c := by["server-ca.crt"]; c.Subject != "Versola Server CA" {
@@ -284,5 +284,19 @@ func TestExpiryWarnings(t *testing.T) {
 	got := ExpiryWarnings(infos, now)
 	if len(got) != 2 || !strings.Contains(got[0], "late.crt runs out in 45 days") || !strings.Contains(got[0], "should have been renewed") || !strings.Contains(got[1], "gone.crt has expired") {
 		t.Errorf("= %q", got)
+	}
+}
+
+func TestToolsArgsForCertLifetime(t *testing.T) {
+	// The lifetime reaches versola-tools as MTLS_CERT_DAYS, unlimited as 0, nothing when not set.
+	zero, ninety := 0, 90
+	if got := certDaysArgs(nil); got != nil {
+		t.Errorf("nil = %v", got)
+	}
+	if got := strings.Join(certDaysArgs(&zero), " "); got != "-e MTLS_CERT_DAYS=0" {
+		t.Errorf("0 = %q", got)
+	}
+	if got := strings.Join(certDaysArgs(&ninety), " "); got != "-e MTLS_CERT_DAYS=90" {
+		t.Errorf("90 = %q", got)
 	}
 }

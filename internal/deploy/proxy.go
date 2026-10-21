@@ -29,6 +29,8 @@ type ProxyOptions struct {
 	// --central-mtls-domain, --central-domain); the zero value publishes
 	// nothing.
 	Public PublicDomains
+	// CertDays is --cert-lifetime-days: nil for the default, 0 for unlimited.
+	CertDays *int
 }
 
 // PublicDomains are the raw values of --mtls-domain, --central-mtls-domain
@@ -41,6 +43,16 @@ type PublicDomains struct {
 // PublicDomainsOf are the names a recorded deployment publishes.
 func PublicDomainsOf(st *state.State) PublicDomains {
 	return PublicDomains{MTLS: st.MTLSDomain, CentralMTLS: st.CentralMTLSDomain, Enroll: st.CentralDomain}
+}
+
+// StoredCertDays is the certificate lifetime the vps deployment this machine
+// tracks was configured with: what a configure without the flag keeps.
+func StoredCertDays() *int {
+	st, err := state.Load()
+	if err != nil || st.Target != "vps" {
+		return nil
+	}
+	return st.CertLifetimeDays
 }
 
 // StoredPublicDomains are the names the vps deployment this machine tracks

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ var configureSetupOpenBao bool
 var configureProxy string
 var configureACMEStaging bool
 var configureCentralURL string
+var configureNoCertsTimer bool
 var configureGenerateMissing []string
 var configureAllowLegacy bool
 var configurePostgresDB string
@@ -97,6 +99,7 @@ func init() {
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
 	addPublicFlags(configureCmd)
+	configureCmd.Flags().BoolVar(&configureNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates; refused unless --cert-lifetime-days is unlimited")
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -200,10 +203,23 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(configureNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public},
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
-	return err
+	if err != nil {
+		return err
+	}
+	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer, days != nil && *days == 0)
+	return nil
 }
 
 // rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps

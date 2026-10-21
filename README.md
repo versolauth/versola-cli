@@ -859,9 +859,10 @@ Auth's and central's mutual-TLS listeners and the certificate edge
 presents to central are issued by the deployment's own CA (step-ca) into
 the `versola-mtls-vps` volume (`versola-mtls-local` locally). The CA has
 three intermediates under one root, and each listener trusts only the
-ones it should: **server** signs the listeners' own certificates (90
-days), **edge** signs the identity an edge presents to central (30 days),
-**client** signs the certificates of clients. Central's listener trusts
+ones it should: **server** signs the listeners' own certificates, **edge** signs the
+identity an edge presents to central, **client** signs the certificates of
+clients. The files `mtls-init` writes (the listeners' leaves and the identity of the
+edge on this host) live 365 days by default. Central's listener trusts
 the edge intermediate alone, so a client's certificate does not even
 complete a handshake there; auth's trusts clients and edges, and accepts an
 `urn:versola:edge:...` name only from a certificate the edge intermediate
@@ -921,8 +922,20 @@ use the bundle `versola edge add` prints.
 
 On local, central, auth and edge are restarted in that order, each waited for.
 
-Run it on a schedule -- daily is plenty. `versola bootstrap vps` and `versola up`
-(on vps) install the timer by default (`--no-certs-timer` to skip it), however the
+**How long they live: `--cert-lifetime-days`** (on `configure` and `bootstrap`,
+vps only, remembered; also kept by `rollout`). The default is 365 days, renewed at a
+third of the life left, so with the timer running months before they run out. Give a
+number of days (1-36500) for another lifetime, or `unlimited` (or `0`): a notAfter
+100 years away, so the files never need renewing. Unlimited gives up the expiry as a
+limit on what a leaked key can do; a deployment that has it gets no timer, `--no-certs-timer`
+is accepted there, and `status`/`doctor` do not warn about expiry or a missing timer. With
+a finite lifetime the timer is required: `configure`, `up` and `bootstrap` install it, and
+`--no-certs-timer` is refused with a message. A certificate whose lifetime differs from the
+configured one is replaced at the next renewal run. The identities central issues to
+remote edges renew in-process and are not affected.
+
+Run it on a schedule -- daily is plenty. `versola configure`, `versola up` and `versola bootstrap`
+(on vps) install the timer, however the
 deployment was made: the certificates are short-lived, and a deployment without a
 renewal stops working when they run out. If lingering is off for the user, `up`
 says so in a line of its own with `sudo loginctl enable-linger $USER`: a user

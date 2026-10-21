@@ -112,7 +112,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if st, err := state.Load(); err == nil && st.Target == doctorTarget {
 		fmt.Println()
 		deploy.PrintCertificates(os.Stdout, st, time.Now())
-		printCertsWarnings(os.Stdout, st.Target)
+		printCertsWarnings(os.Stdout, st)
 	}
 
 	fmt.Println()

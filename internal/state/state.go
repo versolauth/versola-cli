@@ -155,6 +155,11 @@ type State struct {
 	CentralMTLSDomain string `json:"centralMtlsDomain,omitempty"`
 	CentralDomain     string `json:"centralDomain,omitempty"`
 
+	// CertLifetimeDays is --cert-lifetime-days: how long the certificates
+	// `mtls-init` writes live. nil: the default (365). 0: unlimited (a
+	// notAfter 100 years away: nothing renews them, and no timer is installed).
+	CertLifetimeDays *int `json:"certLifetimeDays,omitempty"`
+
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
@@ -417,6 +422,8 @@ type FinalizeOptions struct {
 	CentralURL string
 	// MTLSDomain, CentralMTLSDomain, CentralDomain: the public names, "" for none.
 	MTLSDomain, CentralMTLSDomain, CentralDomain string
+	// CertLifetimeDays: see State.CertLifetimeDays.
+	CertLifetimeDays *int
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
@@ -501,6 +508,7 @@ func Finalize(o FinalizeOptions) error {
 		MTLSDomain:        o.MTLSDomain,
 		CentralMTLSDomain: o.CentralMTLSDomain,
 		CentralDomain:     o.CentralDomain,
+		CertLifetimeDays:  o.CertLifetimeDays,
 		ProxyMode:         o.ProxyMode,
 		PostgresHost:      o.PostgresHost,
 		PostgresDB:        o.PostgresDB,
@@ -936,4 +944,11 @@ func pruneBundles(dir string, keep ...string) {
 			fmt.Printf("(couldn't remove a previous deployment's files at %s: %v — safe to delete by hand)\n", old, err)
 		}
 	}
+}
+
+// CertsUnlimited reports whether the deployment's mutual-TLS certificates were
+// configured with no expiry (--cert-lifetime-days 0): nothing renews them, so
+// there is no timer to install and nothing to warn about.
+func (s *State) CertsUnlimited() bool {
+	return s != nil && s.CertLifetimeDays != nil && *s.CertLifetimeDays == 0
 }

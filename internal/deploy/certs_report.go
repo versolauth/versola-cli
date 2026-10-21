@@ -237,6 +237,10 @@ func PrintCertificates(w io.Writer, st *state.State, now time.Time) {
 		return
 	}
 	WriteCertReport(w, infos, now)
+	// Certificates that never expire are not warned about.
+	if st.CertsUnlimited() {
+		return
+	}
 	for _, msg := range ExpiryWarnings(infos, now) {
 		fmt.Fprintf(w, "WARNING: %s\n", msg)
 	}

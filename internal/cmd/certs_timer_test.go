@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // fakeRun answers the commands the timer checks ask, by their joined text.
@@ -73,11 +77,11 @@ func TestPrintCertsWarningsOnlyForVps(t *testing.T) {
 	withUnitDir(t, false)
 	fakeRun(t, nil)
 	var out bytes.Buffer
-	printCertsWarnings(&out, "local")
+	printCertsWarnings(&out, &state.State{Target: "local"})
 	if out.Len() != 0 {
 		t.Errorf("local: %q", out.String())
 	}
-	printCertsWarnings(&out, "vps")
+	printCertsWarnings(&out, &state.State{Target: "vps"})
 	if !strings.HasPrefix(out.String(), "WARNING: nothing renews") {
 		t.Errorf("vps: %q", out.String())
 	}
@@ -85,10 +89,11 @@ func TestPrintCertsWarningsOnlyForVps(t *testing.T) {
 
 func TestScheduleCertsRenewalSkips(t *testing.T) {
 	var out bytes.Buffer
-	scheduleCertsRenewal(&out, "local", false)
-	scheduleCertsRenewal(&out, "vps", true)
+	scheduleCertsRenewal(&out, "local", false, false)
+	scheduleCertsRenewal(&out, "vps", true, false)
+	scheduleCertsRenewal(&out, "vps", false, true) // unlimited: nothing to renew
 	if out.Len() != 0 {
-		t.Errorf("printed %q for local / --no-certs-timer", out.String())
+		t.Errorf("printed %q for local / --no-certs-timer / unlimited", out.String())
 	}
 }
 
@@ -100,5 +105,89 @@ func TestUpAndBootstrapHaveTheTimerOptOut(t *testing.T) {
 	}
 	if upCmd.Flags().Lookup("no-certs-timer").DefValue != "false" {
 		t.Error("the timer is not on by default for up")
+	}
+}
+
+func TestCertLifetimeFlag(t *testing.T) {
+	for raw, want := range map[string]int{"365": 365, "30": 30, "36500": 36500, "0": 0, "unlimited": 0, " Unlimited ": 0} {
+		got, err := parseCertDays(raw)
+		if err != nil || *got != want {
+			t.Errorf("%q = %v, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "abc", "-1", "36501", "1.5", "forever"} {
+		if _, err := parseCertDays(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestCertDaysKeepsAndOverrides(t *testing.T) {
+	fresh := func() *cobra.Command {
+		c := &cobra.Command{Use: "x"}
+		addPublicFlags(c)
+		return c
+	}
+	t.Setenv("HOME", t.TempDir())
+	if d, err := certDays(fresh(), "vps"); err != nil || d != nil {
+		t.Fatalf("nothing recorded: %v, %v", d, err)
+	}
+	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","authUrl":"https://id.example.com","proxyMode":"nginx","certLifetimeDays":90}`)
+	if d, _ := certDays(fresh(), "vps"); d == nil || *d != 90 {
+		t.Errorf("recorded 90 not kept: %v", d)
+	}
+	c := fresh()
+	_ = c.Flags().Set("cert-lifetime-days", "unlimited")
+	if d, _ := certDays(c, "vps"); d == nil || *d != 0 {
+		t.Errorf("override to unlimited: %v", d)
+	}
+	if d, err := certDays(c, "local"); d != nil || err != nil {
+		t.Errorf("local: %v %v", d, err)
+	}
+	_ = c.Flags().Set("cert-lifetime-days", "soon")
+	if _, err := certDays(c, "vps"); err == nil {
+		t.Error("a bad value")
+	}
+	// Recorded 0 survives the round trip as unlimited, not as "not set".
+	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","authUrl":"https://id.example.com","proxyMode":"nginx","certLifetimeDays":0}`)
+	if d, _ := certDays(fresh(), "vps"); d == nil || *d != 0 {
+		t.Errorf("recorded unlimited lost: %v", d)
+	}
+}
+
+func TestNoCertsTimerRefusedUnlessUnlimited(t *testing.T) {
+	zero, ninety := 0, 90
+	if err := refuseNoTimerWhenFinite(false, nil); err != nil {
+		t.Errorf("no flag: %v", err)
+	}
+	for _, d := range []*int{nil, &ninety} {
+		if err := refuseNoTimerWhenFinite(true, d); err == nil || !strings.Contains(err.Error(), "unlimited") {
+			t.Errorf("--no-certs-timer with %v: %v", d, err)
+		}
+	}
+	if err := refuseNoTimerWhenFinite(true, &zero); err != nil {
+		t.Errorf("unlimited: %v", err)
+	}
+}
+
+func TestStateCertsUnlimited(t *testing.T) {
+	zero, n := 0, 365
+	if (&state.State{}).CertsUnlimited() || (&state.State{CertLifetimeDays: &n}).CertsUnlimited() || !(&state.State{CertLifetimeDays: &zero}).CertsUnlimited() {
+		t.Error("CertsUnlimited")
+	}
+	var nilState *state.State
+	if nilState.CertsUnlimited() {
+		t.Error("nil state")
+	}
+}
+
+func TestUnlimitedPrintsNoWarnings(t *testing.T) {
+	withUnitDir(t, false)
+	fakeRun(t, nil)
+	zero := 0
+	var out bytes.Buffer
+	printCertsWarnings(&out, &state.State{Target: "vps", CertLifetimeDays: &zero})
+	if out.Len() != 0 {
+		t.Errorf("unlimited certificates warned about a timer: %q", out.String())
 	}
 }

@@ -208,7 +208,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, toolsExtras{GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public}); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, toolsExtras{GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays}); err != nil {
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
@@ -505,7 +505,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
-		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll,
+		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays,
 		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}

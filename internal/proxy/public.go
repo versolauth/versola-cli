@@ -14,7 +14,7 @@ const (
 	// proxy's own internal server (Fronts.MutualTLS balances it over the
 	// auth replicas).
 	AuthMutualTLSPort = 8083
-	// CentralEnrollPort is central's enrollment listener (EPORT in its
+	// CentralEnrollPort is central's enrollment listener (central's APORT, not auth's 8082, in its
 	// compose service): the one route a new edge uses to get its first
 	// certificate (POST /edge/enroll). Loopback; the proxy terminates TLS
 	// for central.<domain> in front of it.

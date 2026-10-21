@@ -556,7 +556,7 @@ What each does, with `--proxy nginx`:
   Let's Encrypt certificate of its own (nginx's ACME module, like
   `--auth-url`'s -- port 80 answers its challenge too). It serves **one
   route**, `POST /edge/enroll`, to central's enrollment listener
-  (`127.0.0.1:8094`, `EPORT`); everything else is 404. It is rate limited
+  (`127.0.0.1:8094`, central's `APORT`, not auth's 8082); everything else is 404. It is rate limited
   per client address (6 a minute, burst 5) before central sees a request, and
   central limits per token on its side.
 - Central's own mutual-TLS port 8093 and enrollment port 8094 are bound to

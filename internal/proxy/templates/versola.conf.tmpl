@@ -56,7 +56,7 @@ server {
 {{- if .IPv6 }}
     listen [::]:80;
 {{- end }}
-    server_name {{ .Host }};
+    server_name {{ .Host }}{{ if .Enroll }} {{ .EnrollHost }}{{ end }};
 
     location / {
         return 301 https://$host$request_uri;
@@ -98,7 +98,7 @@ server {
 {{- end }}
 {{- if .ProxyProtocol }}
 
-    # Reached only through the stream server on 443 (central-mtls.conf),
+    # Reached only through the stream server on 443 (public-mtls.conf),
     # which sends a PROXY protocol header first: $remote_addr is the
     # client's real address again, not 127.0.0.1 -- auth reads the client
     # IP from X-Real-IP for per-IP throttling. Only that loopback peer is
@@ -110,3 +110,60 @@ server {
 
 {{ .Routes -}}
 }
+{{- if .Enroll }}
+
+# {{ .EnrollHost }}: where an edge gets its first certificate (POST /edge/enroll,
+# a one-time token and a CSR, no client certificate yet), TLS terminated here
+# like the auth URL's, with a certificate of its own from the same ACME issuer.
+# Nothing else is served on it, and the request goes to central's enrollment
+# listener (127.0.0.1:{{ .EnrollPort }}), which serves nothing else either.
+#
+# Attempts are limited per client address, before central ever sees them:
+# a token is guessable only by trying, and each try costs a request here.
+# (central limits per token on its side, and answers a wrong and a used
+# token the same way.)
+limit_req_zone $binary_remote_addr zone=versola_enroll:1m rate=6r/m;
+
+server {
+{{- range .Listen }}
+    listen {{ . }};
+{{- end }}
+    server_name {{ .EnrollHost }};
+    absolute_redirect off;
+{{- if .TLS }}
+
+    http2 on;
+    acme_certificate letsencrypt;
+    ssl_certificate $acme_certificate;
+    ssl_certificate_key $acme_certificate_key;
+    ssl_certificate_cache max=2;
+{{- end }}
+{{- if .ProxyProtocol }}
+
+    # Same as the auth URL's server above: the stream server on 443 shares
+    # this listener and says who the client was.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+{{- end }}
+
+    location = /edge/enroll {
+        limit_except POST { deny all; }
+        limit_req zone=versola_enroll burst=5 nodelay;
+        limit_req_status 429;
+        # A CSR and a token: a few KB.
+        client_max_body_size 64k;
+        proxy_pass http://127.0.0.1:{{ .EnrollPort }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        # Overwritten, not appended: nothing before this proxy is trusted
+        # to say who the client was.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Connection "";
+    }
+
+    location / {
+        return 404;
+    }
+}
+{{- end }}

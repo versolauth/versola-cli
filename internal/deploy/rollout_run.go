@@ -461,7 +461,10 @@ func prepareStaged(st *state.State, version string, o RolloutOptions, staged *st
 	if err != nil {
 		return nil, err
 	}
-	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL}
+	if st.CentralURL != "" && st.CentralMTLSDomain == "" && st.CentralDomain == "" {
+		fmt.Printf("Warning: this deployment records --central-url %s from an earlier version, which derived it as central.<domain> and routed it. The proxy no longer routes it: a local edge reaches central on the loopback, an edge elsewhere needs --central-mtls-domain (README, \"Public names\"). Re-run `versola configure` with the flag.\n", st.CentralURL)
+	}
+	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL, Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}
 	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, staged); err != nil {
 		return nil, err
 	}
@@ -905,7 +908,7 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	defer removeOnSignal(os.Stdout, cleanup)()
 
 	fmt.Printf("Running versola-tools %s into a temporary directory...\n", version)
-	if err := pullAndRunTools(dir, ToolsImage(version), st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), centralGenEnvArgs(st.CentralURL)...); err != nil {
+	if err := pullAndRunTools(dir, ToolsImage(version), st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}); err != nil {
 		if isManifestUnknown(err) {
 			return fmt.Errorf("version %q of Versola doesn't exist (no versola-tools image published for it)", version)
 		}
@@ -984,6 +987,22 @@ func (o dockerRolloutOps) readyNow(u string) bool {
 		}
 	}
 	return false
+}
+
+func (o dockerRolloutOps) certificates() error {
+	for _, svc := range []string{"step-ca", MTLSInitService} {
+		if has, err := composeHasService(o.composePath, svc); err != nil {
+			return err
+		} else if !has {
+			return nil // a release without them in its compose file needs none
+		}
+	}
+	// The CA is recreated from the new bundle (its command makes the intermediates) and waited for;
+	// mtls-init then issues what is missing and leaves what is valid.
+	if err := docker.Run(state.ComposeArgs(o.composePath, "up", "-d", "--no-deps", "--wait", "step-ca")...); err != nil {
+		return err
+	}
+	return docker.Run(state.ComposeArgs(o.composePath, "run", "--rm", "-T", "--no-deps", MTLSInitService)...)
 }
 
 func (o dockerRolloutOps) pull() error {

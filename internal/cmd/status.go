@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,7 +19,11 @@ var statusCmd = &cobra.Command{
 run and their health, straight from Docker Compose. This command
 doesn't know anything about Versola's own services — it just asks
 Docker what it knows about the compose project bootstrap created, the
-same way "doctor" doesn't know Versola's topology either.`,
+same way "doctor" doesn't know Versola's topology either.
+
+It also lists every mutual-TLS certificate with its notAfter (auth's and
+central's listeners, the edge's identity, and the public names' own),
+marking the ones a renewal is due for -- see "versola certs renew".`,
 	RunE: runStatus,
 }
 
@@ -58,6 +63,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println(deploy.ReplicaSummary(st))
 		fmt.Println()
+		// On a deployment of this machine's own (not a record of one that is
+		// gone: its volume could not be asked): when each certificate runs out.
+		if st.Target == "vps" || st.Target == "local" {
+			deploy.PrintCertificates(os.Stdout, st, time.Now())
+			printCertsWarnings(os.Stdout, st)
+			fmt.Println()
+		}
 	}
 
 	c := exec.Command("docker", state.ComposeArgs(composePath, "ps")...)

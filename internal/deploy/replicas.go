@@ -69,6 +69,16 @@ func writeReplica(buf *bytes.Buffer, composeFile string, r replica) error {
 	for _, l := range r.listeners() {
 		fmt.Fprintf(buf, "      %s: %s\n", l.Name, quote(strconv.Itoa(l.Port)))
 	}
+	for _, e := range r.extraEnv() {
+		fmt.Fprintf(buf, "      %s: %s\n", e[0], quote(e[1]))
+	}
+	if r.Base == CentralService {
+		// Central binds its enrollment listener (APORT) only where the variable is set, on a
+		// port every replica would share: the stand-in of a rollout runs next to the replica it
+		// replaces and would clash on it. Slot 1 serves enrollment; any other replica serves
+		// none (an edge enrolling during the few seconds central is recreated is told to retry).
+		buf.WriteString("      APORT: !reset null\n")
+	}
 	if r.Ports.HostNetwork() {
 		return nil // the host's own ports; `network_mode: host` comes from the base
 	}
@@ -146,8 +156,9 @@ func writeReplicasFile(dir, composeFile string, groups ...[]replica) error {
 
 // overridesYAML renders overrides.yml: what the CLI changes in a service of
 // compose.yml itself, merged over it by Compose. Today that is, on a host
-// network (vps), central's PORT and DPORT (slot 1 of central, which has no
-// other), and slot 1 of auth's APORT and MPORT -- both moved behind the
+// network (vps), central's PORT and DPORT -- and its MPORT, with MBIND_HOST
+// on the loopback, when its compose file has a mutual-TLS listener (slot 1
+// of central, which has no other) -- and slot 1 of auth's APORT and MPORT -- both moved behind the
 // reverse proxy (frontCentral, frontAuth); the replicas of auth beyond slot 1
 // get theirs in replicas.yml. Only those variables are written -- nothing
 // that could carry a secret. The bool says whether there is anything to
@@ -164,6 +175,12 @@ func overridesYAML(central, auth []replica) ([]byte, bool, error) {
 		fmt.Fprintf(&services, "  %s:\n    environment:\n", r.Service)
 		fmt.Fprintf(&services, "      PORT: %s\n", quote(strconv.Itoa(r.Ports.Port)))
 		fmt.Fprintf(&services, "      DPORT: %s\n", quote(strconv.Itoa(r.Ports.DiagnosticsPort)))
+		if r.centralMutualTLS() {
+			fmt.Fprintf(&services, "      MPORT: %s\n", quote(strconv.Itoa(r.Ports.MutualTLSPort)))
+		}
+		for _, e := range r.extraEnv() {
+			fmt.Fprintf(&services, "      %s: %s\n", e[0], quote(e[1]))
+		}
 	}
 	for _, r := range auth {
 		if r.Slot != 1 || !r.Fronted {

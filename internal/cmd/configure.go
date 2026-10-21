@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ var configureSetupOpenBao bool
 var configureProxy string
 var configureACMEStaging bool
 var configureCentralURL string
+var configureNoCertsTimer bool
 var configureGenerateMissing []string
 var configureAllowLegacy bool
 var configurePostgresDB string
@@ -65,6 +67,13 @@ confirms that the named secrets may be generated anyway;
 --allow-legacy-secrets lets a release that has no secret schema be
 configured by the old rule ("anything missing is generated").
 
+On vps nothing is published beyond --auth-url's name unless asked to:
+--mtls-domain, --central-mtls-domain and --central-domain (all optional,
+all remembered) publish auth's and central's mutual-TLS listeners and
+central's enrollment route, for edges in another network and external
+mutual-TLS clients -- see the README, "Public names". Without them every
+mutual-TLS listener answers on this host's loopback only.
+
 On vps, --postgres-db names the database (default: auth) and
 --postgres-ca points at a PEM file with the CA that signed Postgres'
 server certificate, which the services then trust for sslmode=verify-full.
@@ -89,6 +98,8 @@ func init() {
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
+	addPublicFlags(configureCmd)
+	configureCmd.Flags().BoolVar(&configureNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates; refused unless --cert-lifetime-days is unlimited")
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -188,10 +199,27 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
+	public, err := publicDomains(cmd, target)
+	if err != nil {
+		return err
+	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(configureNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL},
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
-	return err
+	if err != nil {
+		return err
+	}
+	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer || !deploy.IssuesMutualTLSCertificates(version), days != nil && *days == 0)
+	return nil
 }
 
 // rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps
@@ -201,7 +229,7 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range []string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca"} {
+	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}
@@ -209,7 +237,7 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	return nil
 }
 
-const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://central.<domain>, <domain> being --auth-url's host without its first label). With --proxy nginx that name is routed to central's port 8093 by Versola's proxy on 443 without terminating TLS, so it needs a DNS record pointing at this server; behind --proxy external your own web server has to do it (see the README)"
+const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and `versola edge add` for a remote edge's bootstrap bundle"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

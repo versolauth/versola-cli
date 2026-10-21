@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +25,7 @@ var bootstrapGenerateMissing []string
 var bootstrapAllowLegacy bool
 
 var bootstrapYes bool
+var bootstrapNoCertsTimer bool
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -39,6 +41,10 @@ Currently supported:
 
 On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
 certificate -- see "versola configure --help" for --proxy.
+
+On vps, --mtls-domain, --central-mtls-domain and --central-domain (optional)
+publish the mutual-TLS listeners and central's enrollment route -- see
+"versola configure --help".
 
 On vps, --postgres-db names the database (default: auth) and --postgres-ca
 points at a PEM file with the CA that signed Postgres' server certificate
@@ -69,6 +75,10 @@ out what it may do about each one and stops, with nothing written, if a
 secret looks lost or a key pair is only half stored -- see "versola
 configure --help" for --generate-missing and --allow-legacy-secrets.
 
+On vps it also installs the daily systemd timer that runs "versola certs
+renew" (--no-certs-timer to skip it): the mutual-TLS certificates are
+short-lived. Without systemd it prints the crontab line instead.
+
 Internally this runs "configure", "migrate", and "up" in order, asking
 for confirmation only once up front on vps rather than once per step.
 Run those separately instead of bootstrap when a deployment (e.g. onto
@@ -80,6 +90,7 @@ touches a live database, or to run migrate on its own schedule.`,
 
 func init() {
 	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
@@ -87,6 +98,7 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	bootstrapCmd.Flags().StringVar(&bootstrapCentralURL, "central-url", "", centralURLUsage)
+	addPublicFlags(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -177,8 +189,21 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
+	public, err := publicDomains(cmd, target)
+	if err != nil {
+		return err
+	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(bootstrapNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL},
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {
 		return err
@@ -215,5 +240,11 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if err := deploy.Migrate(st, deploy.MigrateOptions{}); err != nil {
 		return err
 	}
-	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st)
+	if err := deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st); err != nil {
+		return err
+	}
+	// The certificates are short-lived: the timer is part of deploying to a
+	// server, not an afterthought in the runbook (see scheduleCertsRenewal).
+	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer || !deploy.IssuesMutualTLSCertificates(version), days != nil && *days == 0)
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +14,7 @@ import (
 )
 
 var (
+	certsPinWait      time.Duration
 	certsRestart      bool
 	certsInstallTimer bool
 	certsShowTimer    bool
@@ -29,9 +31,21 @@ var certsRenewCmd = &cobra.Command{
 	Long: `renew keeps the deployment's mutual-TLS certificates (auth's and central's
 listeners, the certificate edge presents to central) valid. It runs
 versola-tools' mtls-init service, which re-issues a certificate only
-when a third of its lifetime or less is left. If it issued anything,
-central, auth and edge are restarted, in that order and each waited for,
-because they read their certificates at startup.
+when a third of its lifetime or less is left. The services read their
+certificates at startup, so they are restarted.
+
+On vps that is rolling, and a server leaf is never replaced before the
+edges know its successor: the replacement is staged first (its pin is
+added to what edges trust), the edges restart one replica at a time --
+each out of the proxy, drained, restarted, ready, back in -- central
+restarts to publish the pin to edges in other networks (only when
+--mtls-domain or --central-mtls-domain is set) and --pin-wait is left
+for them to fetch it, and then the leaf is replaced and central and auth's
+replicas are restarted onto it, auth's one at a time. A service with a
+single replica is restarted where it stands (add a replica with
+"versola replica add" to restart it without a gap). A renewal cut off
+anywhere is finished by running it again. On local, central, auth and
+edge are restarted in that order, each waited for.
 
 When nothing is due it prints nothing and exits 0, so it is meant to run
 on a schedule: --show-timer prints a daily systemd timer (or, without
@@ -46,6 +60,7 @@ for finishing a renewal whose restart failed.`,
 }
 
 func init() {
+	certsRenewCmd.Flags().DurationVar(&certsPinWait, "pin-wait", deploy.DefaultPinWait, "vps with a published mutual-TLS name: how long a staged pin is left to reach edges in other networks before the leaf is replaced")
 	certsRenewCmd.Flags().BoolVar(&certsRestart, "restart", false, "restart central, auth and edge even when nothing was renewed")
 	certsRenewCmd.Flags().BoolVar(&certsShowTimer, "show-timer", false, "print the daily timer (systemd units, or a crontab line) instead of renewing; writes nothing")
 	certsRenewCmd.Flags().BoolVar(&certsInstallTimer, "install-timer", false, "write and enable a daily systemd timer for the current user instead of renewing")
@@ -70,7 +85,7 @@ func runCertsRenew(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	return deploy.RenewCerts(deploy.RenewCertsOptions{Restart: certsRestart}, st)
+	return deploy.RenewCerts(deploy.RenewCertsOptions{Restart: certsRestart, PinWait: certsPinWait}, st)
 }
 
 // systemdUserAvailable: a systemd running as init, with systemctl on PATH.

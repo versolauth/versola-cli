@@ -296,6 +296,7 @@ func (w *world) waitDrained()        { w.events = append(w.events, "drained") }
 func (w *world) portFree(int) error  { return nil }
 func (w *world) markRunning() error  { return w.step("markRunning", nil) }
 func (w *world) pull() error         { return w.step("pull", nil) }
+func (w *world) certificates() error { return w.step("certificates", nil) }
 func (w *world) migrate() error      { return w.step("migrate", nil) }
 func (w *world) markStarting() error { return w.step("markStarting", nil) }
 
@@ -1165,5 +1166,32 @@ func TestRolloutCentralWithoutRecordedSlots(t *testing.T) {
 	w.done(t, []int{1}, []int{1})
 	if indexOf(w.events, "compose up -d --no-deps central-2") < 0 {
 		t.Errorf("no central stand-in: %v", w.events)
+	}
+}
+
+// The first release with certificates: the CA and mtls-init run once, after the
+// migrations and before any container of the new version starts, because the
+// rollout's --no-deps start does not run what compose's depends_on would.
+// Between two releases that both have certificates nothing is issued here.
+func TestRolloutIssuesCertificatesWhenTheNewReleaseIsTheFirstWithThem(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from, to string
+		want     bool
+	}{"0.7.5 to 0.8.0": {"0.7.5", "0.8.0", true}, "0.8.0 to 0.8.1": {"0.8.0", "0.8.1", false}, "0.6.2 to 0.7.0": {fromV, toV, false}} {
+		t.Run(name, func(t *testing.T) {
+			st := preparedState(old(1), old(1))
+			st.Version, st.PreviousVersion = tc.to, tc.from
+			w := newWorld(t, st)
+			if err := engineFor(w, true, false).run(); err != nil {
+				t.Fatal(err)
+			}
+			i := indexOf(w.events, "certificates")
+			if (i >= 0) != tc.want {
+				t.Fatalf("certificates step: %v, want %v: %v", i >= 0, tc.want, w.events)
+			}
+			if tc.want && (i < indexOf(w.events, "markStarting") || i > indexOf(w.events, "compose up -d --no-deps central")) {
+				t.Errorf("certificates not between markStarting and the first start: %v", w.events)
+			}
+		})
 	}
 }

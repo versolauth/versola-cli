@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -155,7 +156,16 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if err := deploy.ConfirmVpsDeployYes(rolloutYes, fmt.Sprintf("roll Versola %s out on the VPS as above, applying its migrations to the live database", version)); err != nil {
 		return err
 	}
-	return deploy.Rollout(st, version, opts)
+	if err := deploy.Rollout(st, version, opts); err != nil {
+		return err
+	}
+	// A rollout from 0.7 to 0.8 is where finite certificates first appear, and
+	// nothing else installs the timer that renews them (a rollout is not `up`).
+	// The record is read again: what runs now is the new version.
+	if now, err := state.Load(); err == nil {
+		scheduleCertsRenewal(os.Stdout, now.Target, !deploy.IssuesMutualTLSCertificates(now.Version), now.CertsUnlimited())
+	}
+	return nil
 }
 
 func runAbort(opts deploy.RolloutOptions) error {

@@ -19,9 +19,11 @@ import (
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/proxy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 var doctorTarget, doctorAuthURL, doctorCentralURL string
+var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
@@ -41,8 +43,11 @@ would actually pass, or pass one it would actually fail.`,
 }
 
 func init() {
-	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- also checks the name central.<domain> is derived from it")
-	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with (default: derived from --auth-url) -- checks that its name resolves to this server and that port 8093 answers a TLS handshake")
+	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- needed for the public name checks below")
+	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
+	doctorCmd.Flags().StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
+	doctorCmd.Flags().StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
+	doctorCmd.Flags().StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
 	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
 }
 
@@ -77,13 +82,18 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		results = append(results, central...)
+		public, err := publicNameChecks(doctorAuthURL, doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain)
+		if err != nil {
+			return err
+		}
+		results = append(results, public...)
 		// Certificates of a deployment already on this host: none to check
 		// before the first configure.
 		if r, found := checks.MTLSLeafCheck(deploy.MTLSVolumeName("vps"), "versola-step-ca"); found {
 			results = append(results, r)
 		}
-	} else if doctorAuthURL != "" || doctorCentralURL != "" {
-		return fmt.Errorf("--auth-url and --central-url only apply to --target vps")
+	} else if doctorAuthURL != "" || doctorCentralURL != "" || doctorMTLSDomain != "" || doctorCentralMTLSDomain != "" || doctorCentralDomain != "" {
+		return fmt.Errorf("--auth-url, --central-url, --mtls-domain, --central-mtls-domain and --central-domain only apply to --target vps")
 	}
 
 	failed := 0
@@ -96,6 +106,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	if !dockerDaemon.OK {
 		offerDockerHelp()
+	}
+
+	// The certificates of a deployment on this host, each with its notAfter.
+	if st, err := state.Load(); err == nil && st.Target == doctorTarget {
+		fmt.Println()
+		deploy.PrintCertificates(os.Stdout, st, time.Now())
+		printCertsWarnings(os.Stdout, st)
 	}
 
 	fmt.Println()
@@ -116,13 +133,14 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("doctor found %d problem(s)", failed)
 }
 
-// centralChecks: vps's second name, the one edge reaches central's
-// mutual-TLS listener at (see proxy.CentralURL). Only with --auth-url or
-// --central-url, since doctor otherwise knows nothing about the deployment.
-// The handshake checks are for a server whose central is running: before
-// `versola up` there is nothing to answer.
+// centralChecks: --central-url, when given, is where an edge reaches
+// central's mutual-TLS listener: its name has to resolve to this server and
+// the port answer a TLS handshake. Only with --auth-url or --central-url,
+// since doctor otherwise knows nothing about the deployment. The handshake
+// checks are for a server whose central is running: before `versola up`
+// there is nothing to answer.
 func centralChecks(authURL, centralURL string) ([]checks.Result, error) {
-	if authURL == "" && centralURL == "" {
+	if centralURL == "" {
 		return nil, nil
 	}
 	var auth proxy.AuthURL
@@ -144,15 +162,45 @@ func centralChecks(authURL, centralURL string) ([]checks.Result, error) {
 	if !name.OK {
 		return results, nil
 	}
-	// Central's own listener, where an edge outside this host can use it
-	// directly; and 443, where the proxy routes the name to it by SNI.
 	port := strconv.Itoa(proxy.CentralMutualTLSPort)
 	if c.Port != "" {
 		port = c.Port
 	}
-	results = append(results, checks.TLSAnswers("Central mutual TLS", net.JoinHostPort(c.Host, port), c.Host))
-	if c.Port == "" {
-		results = append(results, checks.TLSAnswers("Central via the proxy", net.JoinHostPort(c.Host, "443"), c.Host))
+	return append(results, checks.TLSAnswers("Central mutual TLS", net.JoinHostPort(c.Host, port), c.Host)), nil
+}
+
+// publicNameChecks: the names --mtls-domain, --central-mtls-domain and
+// --central-domain will publish: each has to resolve to this server (the
+// proxy routes it by SNI on 443), and 443 has to answer a TLS handshake for
+// it (before `versola up` nothing does: run it after). Needs --auth-url, the
+// name the others are checked against.
+func publicNameChecks(authURL, mtls, centralMTLS, enroll string) ([]checks.Result, error) {
+	if mtls == "" && centralMTLS == "" && enroll == "" {
+		return nil, nil
+	}
+	if authURL == "" {
+		return nil, fmt.Errorf("--mtls-domain, --central-mtls-domain and --central-domain are checked against --auth-url: pass it too")
+	}
+	auth, err := proxy.ParseAuthURL(authURL, proxy.ModeExternal)
+	if err != nil {
+		return nil, err
+	}
+	names, err := proxy.ParsePublicNames(mtls, centralMTLS, enroll, auth)
+	if err != nil {
+		return nil, err
+	}
+	var results []checks.Result
+	for _, n := range []struct{ label, host string }{
+		{"mutual-TLS name", names.MTLS}, {"central mutual-TLS name", names.CentralMTLS}, {"enrollment name", names.Enroll},
+	} {
+		if n.host == "" {
+			continue
+		}
+		name := checks.NameResolves(n.label, n.host)
+		results = append(results, name)
+		if name.OK {
+			results = append(results, checks.TLSAnswers(strings.ToUpper(n.label[:1])+n.label[1:], net.JoinHostPort(n.host, "443"), n.host))
+		}
 	}
 	return results, nil
 }

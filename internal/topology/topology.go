@@ -93,6 +93,12 @@ type Service struct {
 	additionalBad bool
 	// mutualBad: the same for MPORT.
 	mutualBad bool
+	// mutualSet: the service's environment names MPORT. MutualTLSPort holds
+	// VersolaApp's default (8083) when it does not, which only auth acts
+	// on; central binds a mutual-TLS listener only in a release whose
+	// compose file sets MPORT for it, so for central this is the difference
+	// between a listener to route and none.
+	mutualSet bool
 
 	// additionalSlot is the slot whose shifted APORT or MPORT does not fit
 	// in a port, or 0: an error for auth (CheckAdditional) only, since no
@@ -130,6 +136,10 @@ func (s Service) Skipped() []string { return append([]string(nil), s.skipped...)
 // UnfixedHostIP is the host address the i-th of UnfixedPorts is published
 // on, "" for every address.
 func (s Service) UnfixedHostIP(i int) string { return s.unfixedIP[i] }
+
+// MutualTLSSet reports whether the compose file sets MPORT for this service.
+// Central has a mutual-TLS listener only then (see mutualSet).
+func (s Service) MutualTLSSet() bool { return s.mutualSet }
 
 // CheckAdditional is an error when APORT or MPORT is set to something that
 // is not a port, or shifted out of range. Callers ask it for the services
@@ -397,6 +407,7 @@ func (s Service) ForSlot(slot int) (Service, error) {
 		MutualTLSPort:   s.MutualTLSPort + off,
 		additionalBad:   s.additionalBad,
 		mutualBad:       s.mutualBad,
+		mutualSet:       s.mutualSet,
 		hostNetwork:     s.hostNetwork,
 		containerName:   s.containerName,
 		image:           s.image,
@@ -750,6 +761,8 @@ func (t Topology) Service(name string) (Service, error) {
 	if svc.MutualTLSPort, err = envPort(name, raw.env, "MPORT", DefaultMutualTLSPort); err != nil {
 		svc.MutualTLSPort, svc.mutualBad = DefaultMutualTLSPort, true
 	}
+	_, svc.mutualSet = raw.env["MPORT"]
+	svc.mutualSet = svc.mutualSet && !svc.mutualBad
 	return svc, nil
 }
 

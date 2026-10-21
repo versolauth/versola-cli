@@ -290,3 +290,31 @@ func TestReplicasYAMLRefusesUnreplicablePorts(t *testing.T) {
 		t.Errorf("want an error naming the udp port, got %v", err)
 	}
 }
+
+// A central stand-in runs next to the replica it replaces, and central's
+// enrollment listener (APORT) is on one port for every replica: only slot 1
+// serves it, so the stand-in has the variable removed, not moved. Auth's APORT
+// is its own and moves with the slot.
+func TestReplicasYAMLCentralStandInServesNoEnrollment(t *testing.T) {
+	topo := testTopology(t)
+	central, err := replicasOf(topo, CentralService, []state.Slot{{N: 1}, {N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := replicasOf(topo, AuthService, []state.Slot{{N: 1}, {N: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := replicasYAML("compose.yml", central, auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	centralPart, authPart, _ := strings.Cut(got, "  auth-2:")
+	if !strings.Contains(centralPart, "  central-2:") || !strings.Contains(centralPart, "      APORT: !reset null\n") {
+		t.Errorf("the central stand-in keeps APORT:\n%s", got)
+	}
+	if strings.Contains(authPart, "!reset") {
+		t.Errorf("auth's APORT is its own:\n%s", authPart)
+	}
+}

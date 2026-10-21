@@ -52,13 +52,12 @@ type Config struct {
 	// Empty: the bundle's files are mounted as they are (local).
 	GenerationsDir string
 
-	// CentralHost, vps with TLS only: the public name (central.<domain>)
-	// whose TCP/TLS the proxy forwards to central's mutual-TLS port by SNI,
-	// without terminating it. Empty: no such name (see CentralURL.RoutedHost).
-	// Setting it moves the https server from 443 to CentralFrontPort, where
-	// the stream block on 443 forwards every other name, and needs the
-	// stream block (Fronts set).
-	CentralHost string
+	// Public, vps with TLS only: the names published beyond the auth URL's
+	// (see PublicNames). A mutual-TLS name moves the https server from 443
+	// to FrontPort, where the stream block on 443 forwards every other name,
+	// and needs that stream block (Fronts set); Enroll is one more https
+	// server on whatever listener the first has.
+	Public PublicNames
 }
 
 // Fronts are the ports the proxy listens on, on 127.0.0.1, in front of
@@ -67,10 +66,16 @@ type Config struct {
 // front of central's PORT, the one the compose file gives central, which
 // auth, edge and the admin console's resource connect to. Each replica
 // listens elsewhere, so that more than one can run behind the same address.
+//
+// CentralMutualTLS is the proxy's front of central's mutual-TLS listener
+// (MPORT), a release's edge surface: on every interface, as central itself
+// listened there before, where edges on other hosts and the 443 relay (see
+// CentralHost) reach it. 0 for a release whose central has no such listener.
 type Fronts struct {
-	Additional int
-	MutualTLS  int
-	Central    int
+	Additional       int
+	MutualTLS        int
+	Central          int
+	CentralMutualTLS int
 }
 
 // set: the proxy fronts auth's APORT and MPORT (a pair: one without the
@@ -79,6 +84,10 @@ func (f Fronts) set() bool { return f.Additional != 0 || f.MutualTLS != 0 }
 
 // centralSet: the proxy fronts central's PORT.
 func (f Fronts) centralSet() bool { return f.Central != 0 }
+
+// centralMutualTLSSet: the proxy fronts central's MPORT (which needs the
+// front of its PORT too: checkCentralFront).
+func (f Fronts) centralMutualTLSSet() bool { return f.CentralMutualTLS != 0 }
 
 // Backend is one replica an upstream routes to.
 type Backend struct {
@@ -89,7 +98,8 @@ type Backend struct {
 	// Port is the replica's PORT: the one carrying application traffic.
 	Port int
 	// AdditionalPort and MutualTLSPort: an auth replica's APORT and MPORT,
-	// when the proxy is in front of them (Config.Fronts); 0 otherwise.
+	// when the proxy is in front of them (Config.Fronts); 0 otherwise. A
+	// central replica has only MutualTLSPort, behind Fronts.CentralMutualTLS.
 	AdditionalPort int
 	MutualTLSPort  int
 }
@@ -176,6 +186,9 @@ func (c Config) checkUpstreams() error {
 // caller's, not something to quietly route nowhere.
 func (c Config) checkCentralFront() error {
 	if !c.Fronts.centralSet() {
+		if c.Fronts.centralMutualTLSSet() {
+			return fmt.Errorf("the proxy fronts central's MPORT but not its PORT")
+		}
 		if len(c.Central) > 0 {
 			return fmt.Errorf("central replicas are given but the proxy has no front for central's PORT")
 		}
@@ -197,6 +210,41 @@ func (c Config) checkCentralFront() error {
 		if b.Port == c.Fronts.Central {
 			return fmt.Errorf("central replica %s listens on %d, where the proxy itself listens for central", b.Service, b.Port)
 		}
+	}
+	return c.checkCentralMutualTLSFront()
+}
+
+// checkCentralMutualTLSFront: the proxy in front of central's MPORT needs a
+// port of its own and every central replica's listener, none on that port
+// (which would send the proxy's connections back to itself), none listed
+// twice and none clashing with the other fronts.
+func (c Config) checkCentralMutualTLSFront() error {
+	f := c.Fronts
+	if !f.centralMutualTLSSet() {
+		for _, b := range c.Central {
+			if b.MutualTLSPort != 0 {
+				return fmt.Errorf("central replica %s has a mutual-TLS listener but the proxy has no front for it", b.Service)
+			}
+		}
+		return nil
+	}
+	if f.CentralMutualTLS < 1 || f.CentralMutualTLS > 65535 {
+		return fmt.Errorf("the proxy's front of central's MPORT is on port %d, which is not a port", f.CentralMutualTLS)
+	}
+	if f.CentralMutualTLS == f.Central || f.CentralMutualTLS == f.Additional || f.CentralMutualTLS == f.MutualTLS {
+		return fmt.Errorf("the proxy's front of central's MPORT is on port %d, which another of its fronts has", f.CentralMutualTLS)
+	}
+	seen := map[int]bool{}
+	for _, b := range c.Central {
+		switch {
+		case b.MutualTLSPort < 1 || b.MutualTLSPort > 65535:
+			return fmt.Errorf("central replica %s has a mutual-TLS listener on port %d, which is not a port", b.Service, b.MutualTLSPort)
+		case b.MutualTLSPort == f.CentralMutualTLS:
+			return fmt.Errorf("central replica %s listens on %d for mutual TLS, where the proxy itself listens for central", b.Service, b.MutualTLSPort)
+		case seen[b.MutualTLSPort]:
+			return fmt.Errorf("central's mutual-TLS upstream lists port %d twice", b.MutualTLSPort)
+		}
+		seen[b.MutualTLSPort] = true
 	}
 	return nil
 }
@@ -250,10 +298,29 @@ const (
 	CentralFile = "proxy/conf.d/central.conf"
 )
 
-// CentralStreamFile is the stream server on 443 (see Config.CentralHost):
-// written by configure like versola.conf, which it belongs to, and absent
-// when no name is routed.
-const CentralStreamFile = "proxy/stream.d/central-mtls.conf"
+// PublicStreamFile is the stream block's servers for the public mutual-TLS
+// names (see Config.Public): the server on 443 and one relay per name.
+// Written by configure like versola.conf, which it belongs to, and absent
+// when no such name is published.
+const PublicStreamFile = "proxy/stream.d/public-mtls.conf"
+
+// CentralMutualTLSFile is the proxy's front of central's mutual-TLS listener
+// (see Fronts.CentralMutualTLS): written with the other files that change
+// with the replicas, absent when there is none.
+const CentralMutualTLSFile = "proxy/stream.d/central-mtls-front.conf"
+
+// centralMutualTLSAddrs are the loopback addresses of the central replicas'
+// mutual-TLS listeners. Central runs only on vps, which shares the host's
+// network, so there is no service-name form.
+func centralMutualTLSAddrs(backends []Backend) []string {
+	var addrs []string
+	for _, b := range backends {
+		if b.MutualTLSPort != 0 {
+			addrs = append(addrs, fmt.Sprintf("127.0.0.1:%d", b.MutualTLSPort))
+		}
+	}
+	return addrs
+}
 
 // dynamicData is what the files that change with the replicas are
 // rendered from.
@@ -264,17 +331,20 @@ func (c Config) dynamicData() map[string]any {
 		mutual = append(mutual, fmt.Sprintf("127.0.0.1:%d", b.MutualTLSPort))
 	}
 	return map[string]any{
-		"Resolve":             c.Mode == ModeLocal,
-		"AuthUpstreams":       upstreamAddrs(c.Mode, c.Auth),
-		"EdgeUpstreams":       upstreamAddrs(c.Mode, c.Edge),
-		"Fronted":             c.Fronts.set(),
-		"AdditionalListen":    c.Fronts.Additional,
-		"MutualTLSListen":     c.Fronts.MutualTLS,
-		"AdditionalUpstreams": additional,
-		"MutualTLSUpstreams":  mutual,
-		"CentralFronted":      c.Fronts.centralSet(),
-		"CentralListen":       c.Fronts.Central,
-		"CentralUpstreams":    upstreamAddrs(c.Mode, c.Central),
+		"Resolve":              c.Mode == ModeLocal,
+		"AuthUpstreams":        upstreamAddrs(c.Mode, c.Auth),
+		"EdgeUpstreams":        upstreamAddrs(c.Mode, c.Edge),
+		"Fronted":              c.Fronts.set(),
+		"AdditionalListen":     c.Fronts.Additional,
+		"MutualTLSListen":      c.Fronts.MutualTLS,
+		"AdditionalUpstreams":  additional,
+		"MutualTLSUpstreams":   mutual,
+		"CentralFronted":       c.Fronts.centralSet(),
+		"CentralListen":        c.Fronts.Central,
+		"CentralUpstreams":     upstreamAddrs(c.Mode, c.Central),
+		"CentralMTLSFronted":   c.Fronts.centralMutualTLSSet(),
+		"CentralMTLSListen":    c.Fronts.CentralMutualTLS,
+		"CentralMTLSUpstreams": centralMutualTLSAddrs(c.Central),
 	}
 }
 
@@ -299,6 +369,9 @@ func (c Config) DynamicFiles() (map[string][]byte, error) {
 	}
 	if c.Fronts.centralSet() {
 		templates[CentralFile] = "templates/central.conf.tmpl"
+	}
+	if c.Fronts.centralMutualTLSSet() {
+		templates[CentralMutualTLSFile] = "templates/central-mtls-front.conf.tmpl"
 	}
 	for out, tmpl := range templates {
 		b, err := render(tmpl, data)
@@ -341,7 +414,7 @@ func WriteUpstreams(bundleDir string, c Config) error {
 }
 
 func writeDynamic(dir string, files map[string][]byte) error {
-	for _, rel := range []string{UpstreamsFile, InternalFile, StreamFile, CentralFile} {
+	for _, rel := range []string{UpstreamsFile, InternalFile, StreamFile, CentralFile, CentralMutualTLSFile} {
 		path := filepath.Join(dir, rel)
 		b, ok := files[rel]
 		if !ok {
@@ -384,10 +457,10 @@ func (c Config) Files() (map[string][]byte, error) {
 		listen = []string{strconv.Itoa(LocalPort)}
 	case c.Mode == ModeExternal:
 		listen = []string{"127.0.0.1:" + strconv.Itoa(ExternalPort)}
-	case tls && c.CentralHost != "":
-		// Behind the stream server on 443 (CentralStreamFile), which says
+	case tls && c.Public.SharesHTTPS():
+		// Behind the stream server on 443 (PublicStreamFile), which says
 		// who the client was in a PROXY protocol header.
-		listen = []string{fmt.Sprintf("127.0.0.1:%d ssl proxy_protocol", CentralFrontPort)}
+		listen = []string{fmt.Sprintf("127.0.0.1:%d ssl proxy_protocol", FrontPort)}
 	case tls:
 		listen = []string{"443 ssl"}
 		if ipv6 {
@@ -400,14 +473,22 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 	}
 
-	if c.CentralHost != "" {
+	if c.Public.Any() {
 		switch {
 		case !tls:
-			return nil, fmt.Errorf("the proxy routes central's name only when it terminates TLS itself (--proxy nginx, https --auth-url)")
-		case c.CentralHost == c.AuthURL.Host:
-			return nil, fmt.Errorf("central's name %s is the auth URL's: SNI could not tell them apart", c.CentralHost)
-		case !c.Fronts.set():
-			return nil, fmt.Errorf("routing central's name needs the stream block, which is vps's")
+			return nil, fmt.Errorf("the proxy publishes names only when it terminates TLS itself (--proxy nginx, https --auth-url)")
+		case c.Public.SharesHTTPS() && !c.Fronts.set():
+			return nil, fmt.Errorf("routing the mutual-TLS names needs the stream block, which is vps's")
+		}
+		names := map[string]bool{c.AuthURL.Host: true}
+		for _, n := range []string{c.Public.MTLS, c.Public.CentralMTLS, c.Public.Enroll} {
+			if n == "" {
+				continue
+			}
+			if names[n] {
+				return nil, fmt.Errorf("the name %s is used twice (or is the auth URL's): SNI could not tell them apart", n)
+			}
+			names[n] = true
 		}
 	}
 	if c.GenerationsDir != "" && c.Mode == ModeLocal {
@@ -428,11 +509,13 @@ func (c Config) Files() (map[string][]byte, error) {
 		"TLS":           tls,
 		"IPv6":          ipv6,
 		"RealIP":        c.Mode == ModeExternal,
-		"ProxyProtocol": tls && c.CentralHost != "",
-		"CentralHost":   c.CentralHost,
-		"CentralPort":   CentralMutualTLSPort,
-		"FrontPort":     CentralFrontPort,
-		"RelayPort":     CentralRelayPort,
+		"ProxyProtocol": tls && c.Public.SharesHTTPS(),
+		"Enroll":        tls && c.Public.Enroll != "",
+		"EnrollHost":    c.Public.Enroll,
+		"EnrollPort":    CentralEnrollPort,
+		"Relays":        c.Public.Relays(),
+		"FrontPort":     FrontPort,
+		"ConnLimit":     PublicConnLimit,
 		"Listen":        listen,
 		"Host":          c.AuthURL.Host,
 		"Resolvers":     c.Resolvers,
@@ -445,7 +528,7 @@ func (c Config) Files() (map[string][]byte, error) {
 		"ExternalPort":  ExternalPort,
 		"LocalPort":     LocalPort,
 		"HostNetwork":   c.Mode != ModeLocal,
-		"Stream":        c.Fronts.set() || c.CentralHost != "",
+		"Stream":        c.Fronts.set() || c.Fronts.centralMutualTLSSet() || c.Public.SharesHTTPS(),
 		"Generations":   c.GenerationsDir != "",
 		// JSON strings are YAML's double-quoted scalars, so a path with
 		// spaces stays one value; `$` is doubled, or Compose would
@@ -470,12 +553,12 @@ func (c Config) Files() (map[string][]byte, error) {
 		}
 		files[out] = b
 	}
-	if c.CentralHost != "" {
-		b, err := render("templates/central-mtls.conf.tmpl", data)
+	if tls && c.Public.SharesHTTPS() {
+		b, err := render("templates/public-mtls.conf.tmpl", data)
 		if err != nil {
 			return nil, err
 		}
-		files[CentralStreamFile] = b
+		files[PublicStreamFile] = b
 	}
 	for out, src := range map[string]string{
 		"proxy/proxy_params.conf": "templates/proxy_params.conf",
@@ -532,9 +615,9 @@ func Write(bundleDir string, c Config) error {
 		}
 	}
 	// A bundle reconfigured without a routed name must not keep the stream
-	// server of the last one: versola.conf is back on 443 itself.
-	if _, ok := files[CentralStreamFile]; !ok {
-		if err := os.Remove(filepath.Join(bundleDir, CentralStreamFile)); err != nil && !os.IsNotExist(err) {
+	// servers of the last one: versola.conf is back on 443 itself.
+	if _, ok := files[PublicStreamFile]; !ok {
+		if err := os.Remove(filepath.Join(bundleDir, PublicStreamFile)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

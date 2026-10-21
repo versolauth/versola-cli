@@ -67,6 +67,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// gone: its volume could not be asked): when each certificate runs out.
 		if st.Target == "vps" || st.Target == "local" {
 			deploy.PrintCertificates(os.Stdout, st, time.Now())
+			printCertsWarnings(os.Stdout, st.Target)
 			fmt.Println()
 		}
 	}

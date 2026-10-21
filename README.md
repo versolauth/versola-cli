@@ -921,10 +921,12 @@ use the bundle `versola edge add` prints.
 
 On local, central, auth and edge are restarted in that order, each waited for.
 
-Run it on a schedule -- daily is plenty. `versola bootstrap vps` installs the
-timer by default (`--no-certs-timer` to skip it): the certificates are
-short-lived, and a deployment without a renewal stops working when they run
-out.
+Run it on a schedule -- daily is plenty. `versola bootstrap vps` and `versola up`
+(on vps) install the timer by default (`--no-certs-timer` to skip it), however the
+deployment was made: the certificates are short-lived, and a deployment without a
+renewal stops working when they run out. If lingering is off for the user, `up`
+says so in a line of its own with `sudo loginctl enable-linger $USER`: a user
+timer stops with the user's last session without it.
 
 ```
 versola certs renew --show-timer      # prints what it would write; writes nothing
@@ -938,7 +940,10 @@ user timer stops with the user's last session unless lingering is on
 (`sudo loginctl enable-linger $USER`).
 
 `versola status` and `versola doctor` show the `notAfter` of every
-certificate, so a renewal that did not happen is visible.
+certificate, and warn in words when one has under 60 days left and is past the point
+where it should have been renewed (or has expired), and when nothing renews them
+at all -- no enabled systemd user timer and no crontab line -- or the timer will stop
+at logout (lingering off). A missing timer is never silent.
 
 ### `edge add` / `edge bootstrap` (vps)
 
@@ -991,7 +996,8 @@ yours: created empty, never overwritten (the second takes the key from
 `--key-file`); whatever else the edge needs, such as its public URL and its
 keys, goes into the first, which `edge.conf` includes last. `--no-start` writes
 the files and stops. A partner's edge does not use any of this: it has no
-connection to central.
+connection to central. (Central's own `edge-identity` setting only matters for
+partners' edges; an operator's own, first-party, edges are always extended by central.)
 
 ### `status`
 

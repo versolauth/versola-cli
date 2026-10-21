@@ -270,3 +270,19 @@ func TestParseCertReportOfARealRun(t *testing.T) {
 		t.Errorf("server-ca = %+v", c)
 	}
 }
+
+func TestExpiryWarnings(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	infos := []CertInfo{
+		{Name: "healthy.crt", NotBefore: now.Add(-30 * day), NotAfter: now.Add(335 * day)},   // 365-day leaf, renews at 122 days left
+		{Name: "late.crt", NotBefore: now.Add(-320 * day), NotAfter: now.Add(45 * day)},      // under 60 days, past a third: the timer did not run
+		{Name: "fresh-short.crt", NotBefore: now.Add(-1 * day), NotAfter: now.Add(29 * day)}, // a 30-day one just issued is not late
+		{Name: "gone.crt", NotBefore: now.Add(-400 * day), NotAfter: now.Add(-day)},
+		{Name: "unreadable:443", Error: "refused"},
+	}
+	got := ExpiryWarnings(infos, now)
+	if len(got) != 2 || !strings.Contains(got[0], "late.crt runs out in 45 days") || !strings.Contains(got[0], "should have been renewed") || !strings.Contains(got[1], "gone.crt has expired") {
+		t.Errorf("= %q", got)
+	}
+}

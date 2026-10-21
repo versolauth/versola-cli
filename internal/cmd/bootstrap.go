@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -233,15 +234,8 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if err := deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st); err != nil {
 		return err
 	}
-	// The certificates are short-lived (90 days, 30 for the edge's identity): the
-	// deployment keeps running only if something renews them, so the timer is part
-	// of deploying to a server -- not an afterthought in the runbook. A failure
-	// to install it does not undo a deployment that is up: it is said, loudly.
-	if target == "vps" && !bootstrapNoCertsTimer {
-		fmt.Println("\nScheduling the daily renewal of the mutual-TLS certificates...")
-		if err := certsTimer(true); err != nil {
-			fmt.Printf("Warning: %v\nThe certificates expire (leaves in 90 days, the edge's identity in 30) unless `versola certs renew` runs: see `versola certs renew --show-timer`.\n", err)
-		}
-	}
+	// The certificates are short-lived: the timer is part of deploying to a
+	// server, not an afterthought in the runbook (see scheduleCertsRenewal).
+	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer)
 	return nil
 }

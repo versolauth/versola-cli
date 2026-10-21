@@ -237,6 +237,35 @@ func PrintCertificates(w io.Writer, st *state.State, now time.Time) {
 		return
 	}
 	WriteCertReport(w, infos, now)
+	for _, msg := range ExpiryWarnings(infos, now) {
+		fmt.Fprintf(w, "WARNING: %s\n", msg)
+	}
+}
+
+// ExpiryWindow is how close to its end a certificate has to be before it is
+// warned about, once a renewal is due for it: a healthy deployment renews at a
+// third of the life left, so this is the sign that nothing has.
+const ExpiryWindow = 60 * 24 * time.Hour
+
+// ExpiryWarnings say, in words, which certificates have less than ExpiryWindow
+// left and are past the point (a third of the life) where `certs renew` renews
+// them -- those are the ones a missed renewal leaves behind -- and which have
+// expired. Certificates that could not be read are reported by the table.
+func ExpiryWarnings(infos []CertInfo, now time.Time) []string {
+	var out []string
+	for _, c := range infos {
+		if c.Error != "" || c.NotAfter.IsZero() {
+			continue
+		}
+		left := c.Left(now)
+		switch {
+		case left <= 0:
+			out = append(out, fmt.Sprintf("%s has expired -- run `versola certs renew` now", c.Name))
+		case left < ExpiryWindow && c.Due(now):
+			out = append(out, fmt.Sprintf("%s runs out in %s and should have been renewed already -- run `versola certs renew`, and check that its timer runs", c.Name, strings.TrimSuffix(leftText(left), " left")))
+		}
+	}
+	return out
 }
 
 // errFirstLine is an error's first line: the rest may be a container's output.

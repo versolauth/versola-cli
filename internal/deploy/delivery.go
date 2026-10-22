@@ -115,7 +115,7 @@ func requireDelivery(dir, version string, d *state.Delivery) error {
 		return nil
 	}
 	sort.Strings(missing)
-	return fmt.Errorf("the generated auth.conf of Versola %s has no %s, although `versola configure sms|smtp` stored them: this release's versola-tools does not apply them (use a newer release, or remove the setting with `versola configure sms --disable` / `versola configure smtp --disable`)", version, strings.Join(missing, ", "))
+	return fmt.Errorf("the generated auth.conf of Versola %s lacks: %s -- although `versola configure sms|smtp` stored them: this release's versola-tools does not apply them (use a newer release, or remove the setting with `versola configure sms --disable` / `versola configure smtp --disable`)", version, strings.Join(missing, ", "))
 }
 
 // otpBody is the inside of the first body { ... } in rest (the text after

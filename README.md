@@ -268,6 +268,62 @@ replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
 question is answered by stdin, or the command aborts.
 
+### SMS and email: `configure sms`, `configure smtp`
+
+A deployment works without a way to send one-time codes (auth then only logs
+"OTP provider is not configured" / "SMTP is not configured"), so
+`configure <target> <version>` does not ask about them. They are set by their
+own commands, any time, before or after the first configure:
+
+```
+versola configure sms --url https://sms.example.com/send \
+    --username versola --password-stdin \
+    --body phones={{phone}} --body mes={{message}}
+versola configure smtp --host smtp.example.com --port 587 \
+    --username versola --password-stdin --from noreply@example.com
+```
+
+- **SMS** is an HTTP provider (auth.conf's `otp-provider`): auth sends the
+  JSON object made of the `--body name=value` entries to `--url` with
+  `--method` (default `POST`); a value may contain `{{phone}}` and
+  `{{message}}`. Without `--body` the provider receives `{}`, and `configure sms`
+  says so. Username and password are HTTP basic credentials and go together
+  (`--no-auth` drops both).
+- **SMTP** (auth.conf's `smtp`): `--host` and `--from` are required the first
+  time; `--port` defaults to 587, `--starttls` to true, `--subject` to auth's own.
+- A flag left out keeps the stored value; `--body` replaces the whole body;
+  `--disable` removes the provider or server.
+- These commands change nothing that runs. They store the settings in
+  `~/.versola/active/delivery.json` (readable by you only; not in
+  `state.json`, so the state layout is unchanged), and `configure <target>
+  <version>` and `rollout` hand them to versola-tools, which writes them into
+  `auth.conf` -- generated from scratch every time, so a value edited into it by
+  hand does not survive the next configure. To apply: repeat your usual
+  `configure` flags, then `up` (a short restart; `rollout` to the same version
+  does nothing). `uninstall` removes the file with the rest of `~/.versola/active`.
+  A rollout reads the file when it prepares the new bundle, so a change made
+  while one is under way reaches the next configure or rollout, not that one.
+- **Passwords** are never a flag (shell history, process list): `--password-stdin`
+  reads one line (no echo from a terminal), or set `VERSOLA_SMS_PASSWORD` /
+  `VERSOLA_SMTP_PASSWORD`. They are not secrets in OpenBao: they are stored in
+  that file and written as they are into the deployment's `auth.conf`. They are
+  never printed, and no error quotes them. One exposure remains: they reach
+  versola-tools as arguments of `docker run`, so other users of the machine can
+  see them in the process list for the seconds it runs (gen-env reads no
+  environment variable for them yet).
+- Values must not contain a double quote, a backslash or a line break (gen-env
+  writes them into auth.conf unescaped).
+  A body value cannot be empty.
+- What the command prints back: the URL without its user, password, query and
+  fragment, and the *names* of the body entries, never their values -- a
+  gateway's login or API key often sits in one of those, and they are kept in
+  the same file as the passwords.
+- A versola-tools release that does not pass these on would drop them without a
+  word. After generating, `configure` and `rollout` check that the new `auth.conf`
+  has the `otp-provider` block (and each `--body` entry) or the `smtp` block, and
+  stop with an error naming the release if not. `--body` needs a release whose
+  gen-env accepts `--otp-body-<name>=<value>`.
+
 ### Images from another registry: `--registry`
 
 `bootstrap`, `configure` and `secrets plan` take `--registry <prefix>`, for
@@ -1160,7 +1216,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure (+ sms, smtp), migrate, up, status, down, secrets, certs, edge, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up — which bootstrap chains together
 internal/state/         locates ~/.versola/active, the on-disk state configure writes

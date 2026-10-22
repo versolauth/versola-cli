@@ -115,7 +115,18 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 // over-long line or an empty line is an error here, not an empty answer, since
 // a cut or missing ID would only fail later as a confusing auth error.
 func readSecretID() (string, error) {
-	fmt.Print("Secret ID: ")
+	return readSecretLine("Secret ID", "secret ID", false)
+}
+
+// readSecretLine is readSecretID for any value that must not be echoed or put
+// on a command line: prompt is what the terminal shows, what is the name used in
+// the error ("couldn't read <what>"). exact keeps the value as typed (a password
+// may start or end with a space) and, for a pipe, prints no prompt into the
+// output; otherwise the value is trimmed, as an ID is.
+func readSecretLine(prompt, what string, exact bool) (string, error) {
+	if stdinIsInteractive() || !exact {
+		fmt.Print(prompt + ": ")
+	}
 	if !stdinIsInteractive() {
 		line, err := deploy.ReadLine(os.Stdin)
 		if (err != nil && !errors.Is(err, io.EOF)) || strings.TrimSpace(line) == "" {
@@ -124,14 +135,20 @@ func readSecretID() (string, error) {
 			if err == nil {
 				err = errors.New("empty input")
 			}
-			return "", fmt.Errorf("couldn't read secret ID: %w", err)
+			return "", fmt.Errorf("couldn't read %s: %w", what, err)
+		}
+		if exact {
+			return line, nil
 		}
 		return strings.TrimSpace(line), nil
 	}
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
-		return "", fmt.Errorf("couldn't read secret ID: %w", err)
+		return "", fmt.Errorf("couldn't read %s: %w", what, err)
+	}
+	if exact {
+		return string(b), nil
 	}
 	return strings.TrimSpace(string(b)), nil
 }

@@ -229,9 +229,15 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		return ConfigureResult{}, err
 	}
 
+	// Read before anything is generated: an unreadable file stops here, not
+	// after versola-tools has produced a deployment without the SMS provider.
+	delivery, err := state.LoadDelivery()
+	if err != nil {
+		return ConfigureResult{}, err
+	}
 	fmt.Println("Generating configuration (versola-tools)...")
 	toolsImage := ToolsImage(registry, version)
-	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays}); err != nil {
+	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays, Delivery: delivery}); err != nil {
 		if problem := registryProblem(err, toolsImage, registry); problem != nil {
 			return ConfigureResult{}, problem
 		}
@@ -245,6 +251,9 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)
 	}
 	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), registry, version); err != nil {
+		return ConfigureResult{}, err
+	}
+	if err := requireDelivery(dir, version, delivery); err != nil {
 		return ConfigureResult{}, err
 	}
 

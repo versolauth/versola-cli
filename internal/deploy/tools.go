@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // ToolsImage returns the versola-tools image for a given Versola release,
@@ -273,6 +274,7 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 	}
 	args = append(args, "-v", dir+":/out", image)
 	args = append(args, extras.GenEnvArgs...)
+	args = append(args, deliveryArgs(extras.Delivery)...)
 	c := docker.Cmd(args...)
 	c.Stdout = stdout
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
@@ -298,6 +300,9 @@ type toolsExtras struct {
 	Public     PublicDomains
 	// CertDays: nil leaves versola-tools' default (365); 0 is unlimited.
 	CertDays *int
+	// Delivery is the SMS provider and SMTP server `versola configure sms|smtp`
+	// stored, nil for none: given to gen-env as its --otp-*/--smtp-* flags.
+	Delivery *state.Delivery
 }
 
 // toolsArgs are the docker run arguments forwarding the public names.

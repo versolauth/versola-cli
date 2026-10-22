@@ -909,7 +909,11 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 
 	fmt.Printf("Running versola-tools %s into a temporary directory...\n", version)
 	toolsImage := ToolsImage(st.ImageRegistry, version)
-	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}); err != nil {
+	delivery, err := state.LoadDelivery()
+	if err != nil {
+		return err
+	}
+	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Delivery: delivery}); err != nil {
 		if problem := registryProblem(err, toolsImage, st.ImageRegistry); problem != nil {
 			return problem
 		}
@@ -919,6 +923,9 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 		return fmt.Errorf("versola-tools failed: %w", err)
 	}
 	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), st.ImageRegistry, version); err != nil {
+		return err
+	}
+	if err := requireDelivery(dir, version, delivery); err != nil {
 		return err
 	}
 	if err := requireAdminConsole(dir, version); err != nil {

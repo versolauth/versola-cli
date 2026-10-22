@@ -234,6 +234,8 @@ versola up
   it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
   and accepts `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
   `--central-mtls-domain` and `--central-domain` (see "Public names").
+  `--registry <prefix>` (both targets) pulls the images from another
+  registry, see "Images from another registry".
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -265,6 +267,57 @@ machine whose record still points at a running VPS deployment ask before
 replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
 question is answered by stdin, or the command aborts.
+
+### Images from another registry: `--registry`
+
+`bootstrap`, `configure` and `secrets plan` take `--registry <prefix>`, for
+test images pushed somewhere other than Versola's own registry
+(`ghcr.io/versolauth`):
+
+```
+docker login cr.yandex
+versola bootstrap local 0.8.0-test1 --registry cr.yandex/crp1a2b3c
+```
+
+The prefix is a registry host (with a port, if any) and a path, lower case,
+without a scheme or a trailing slash. The Versola images of this deployment
+are then named under it: `<prefix>/versola-tools:<version>`, and — through the compose file
+that `versola-tools` generates, which gets the prefix as `IMAGE_REGISTRY` —
+`<prefix>/versola-central:<version>`, `-auth`, `-edge`. Third-party images
+(OpenBao, Postgres, nginx, step-ca) are not affected, and neither is the
+compose file `versola edge bootstrap` writes for a remote edge, which still
+names `ghcr.io/versolauth/versola-edge` (a known gap). What the registry must
+hold:
+
+- all four images, under the **same tag** you pass as `<version>`;
+- a `versola-tools` built with `--build-arg VERSION=<that tag>` (the compose
+  file takes the images' tag from the `VERSION` baked into the tools image),
+  and from a Versola revision that knows `IMAGE_REGISTRY`.
+
+configure checks the generated compose file before anything is started: if
+a `versola-*` image in it is not under the prefix (an older `versola-tools`
+ignores the setting and would deploy from ghcr.io), or its tag is not
+`<version>`, it stops with an error and says which.
+
+The CLI does not log in to a registry. A refusal by the registry
+(`unauthorized`, `pull access denied`) when `versola-tools` is pulled is
+reported as such, with `docker login <host>` as the next step. Pulling
+central, auth and edge themselves is done by Docker Compose (`up`, and
+`rollout`'s pull step) and reports Compose's own message.
+
+The prefix is recorded in `~/.versola` (`imageRegistry` in `state.json`;
+absent means Versola's own registry, which is what every record from before
+the flag means, so the state layout did not change). It is what
+`versola rollout` (and `--abort`, and `--dry-run`) pull from: a rolling upgrade
+cannot change the registry, because the version it would go back to was
+pulled from the old one and the same tag elsewhere can be another image. To
+change the registry, `configure` again (with or without `--registry`; a
+configure without the flag is a deployment from Versola's own registry),
+`migrate` and `up` (configure prints a note when the registry changes). `status` shows the registry when it is not the default,
+and `uninstall` also removes the images pulled from it.
+
+`secrets plan` takes the flag on its own, like `configure`: it plans what a
+`configure` with the same flag would do.
 
 ### Secrets: `secrets plan`, `--generate-missing`, `--allow-legacy-secrets`
 

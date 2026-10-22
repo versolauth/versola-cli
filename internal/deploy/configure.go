@@ -54,8 +54,12 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
-	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
+//
+// registry is --registry: the prefix the Versola images are pulled from
+// ("" for the default, DefaultRegistry). It is recorded, so that the
+// rolling upgrades that follow keep pulling from the same place.
+func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string) (ConfigureResult, error) {
+	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, registry, nil)
 }
 
 // stagedConfigure is what a rolling upgrade (`versola rollout`) changes about
@@ -95,7 +99,7 @@ type stagedConfigure struct {
 // The secrets plan (0f) is applied here, before any container of the new
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
-func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
+func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, staged *stagedConfigure) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -111,6 +115,14 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 	pg, err := pg.withStored(target).Validate(target)
 	if err != nil {
+		return ConfigureResult{}, err
+	}
+	// A rolling upgrade (and its abort) stays on the registry the deployment
+	// came from: the version it goes back to was pulled from there, and the
+	// same tag in another registry can be another image.
+	if staged != nil {
+		registry = staged.from.ImageRegistry
+	} else if registry, err = ParseRegistry(registry); err != nil {
 		return ConfigureResult{}, err
 	}
 
@@ -202,13 +214,27 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 
 	fmt.Printf("\nPreparing Versola %s...\n", version)
+	if registry != "" {
+		fmt.Printf("Images come from %s, not Versola's own registry (%s).\n", registry, DefaultRegistry)
+	}
+	// configure does not keep the registry of the deployment it replaces (a
+	// tag in another registry can be another image): say when it changes.
+	if staged == nil {
+		if prev, err := state.Load(); err == nil && prev.ImageRegistry != registry {
+			fmt.Printf("Note: the deployment this replaces came from %s; this one comes from %s.\n", registryOrDefault(prev.ImageRegistry), registryOrDefault(registry))
+		}
+	}
 	dir, err := state.Prepare()
 	if err != nil {
 		return ConfigureResult{}, err
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg, toolsExtras{GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays}); err != nil {
+	toolsImage := ToolsImage(registry, version)
+	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays}); err != nil {
+		if problem := registryProblem(err, toolsImage, registry); problem != nil {
+			return ConfigureResult{}, problem
+		}
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
@@ -217,6 +243,9 @@ Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
 Check the available versions at https://github.com/orgs/versolauth/packages`, version)
 		}
 		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)
+	}
+	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), registry, version); err != nil {
+		return ConfigureResult{}, err
 	}
 
 	// The candidates versola-tools just wrote (*.generated-secrets.env)
@@ -506,7 +535,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
 		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays,
-		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
+		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile, ImageRegistry: registry,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}
 	if staged != nil {

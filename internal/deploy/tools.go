@@ -11,11 +11,12 @@ import (
 	"github.com/versolauth/versola-cli/internal/docker"
 )
 
-// ToolsImage returns the versola-tools image for a given Versola release.
-// This is the one image this CLI names by hand; everything else it runs
-// comes out of the compose file that image generates.
-func ToolsImage(version string) string {
-	return "ghcr.io/versolauth/versola-tools:" + version
+// ToolsImage returns the versola-tools image for a given Versola release,
+// from registry ("" for the default, DefaultRegistry). This is the one image
+// this CLI names by hand; everything else it runs comes out of the compose
+// file that image generates.
+func ToolsImage(registry, version string) string {
+	return registryOrDefault(registry) + "/versola-tools:" + version
 }
 
 // manifestUnknownErr wraps a docker failure whose stderr contained
@@ -30,6 +31,41 @@ func (e *manifestUnknownErr) Unwrap() error { return e.inner }
 func isManifestUnknown(err error) bool {
 	var m *manifestUnknownErr
 	return errors.As(err, &m)
+}
+
+// registryDeniedErr wraps a docker failure whose stderr says the registry
+// refused the pull for want of (valid) credentials.
+type registryDeniedErr struct{ inner error }
+
+func (e *registryDeniedErr) Error() string { return e.inner.Error() }
+func (e *registryDeniedErr) Unwrap() error { return e.inner }
+
+func isRegistryDenied(err error) bool {
+	var m *registryDeniedErr
+	return errors.As(err, &m)
+}
+
+// registryDeniedTexts are what Docker (and the registries behind it) write
+// when a pull is refused for credentials. Deliberately not a bare "denied":
+// the tools container's own "permission denied" is not a login problem.
+var registryDeniedTexts = []string{
+	"unauthorized",
+	"authentication required",
+	"no basic auth credentials",
+	"pull access denied",
+	"requested access to the resource is denied",
+	// GHCR answers a repository it will not show as `Head "...": denied`.
+	`": denied`,
+}
+
+func mentionsRegistryDenied(stderr string) bool {
+	s := strings.ToLower(stderr)
+	for _, t := range registryDeniedTexts {
+		if strings.Contains(s, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // toolsTarget maps this CLI's target names to the TARGET value
@@ -184,6 +220,14 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		}
 	}
 	args = append(args, "-e", "TARGET="+toolsTarget(target))
+	// -e IMAGE_REGISTRY=...: the prefix versola-tools writes into the compose
+	// file for central, auth and edge. Only for a registry other than the
+	// default, so that the default case runs exactly as it always has, on
+	// every versola-tools release (an old one would ignore it, which is
+	// requireRegistryImages' job to notice).
+	if extras.Registry != "" {
+		args = append(args, "-e", "IMAGE_REGISTRY="+extras.Registry)
+	}
 	// -e ENV_NAME=...: the literal environment name gen-env.scala writes
 	// into the generated configs -- deliberately not derived from target
 	// (vps isn't itself an environment: the same VPS could run "prod"
@@ -237,6 +281,9 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		if strings.Contains(stderrBuf.String(), "manifest unknown") {
 			return &manifestUnknownErr{inner: err}
 		}
+		if mentionsRegistryDenied(stderrBuf.String()) {
+			return &registryDeniedErr{inner: err}
+		}
 		return err
 	}
 	return nil
@@ -245,6 +292,8 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 // toolsExtras is what configure hands versola-tools beyond the target's own
 // facts: gen-env flags and the public names.
 type toolsExtras struct {
+	// Registry is the image registry prefix, "" for the default.
+	Registry   string
 	GenEnvArgs []string
 	Public     PublicDomains
 	// CertDays: nil leaves versola-tools' default (365); 0 is unlimited.

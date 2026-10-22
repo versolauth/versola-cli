@@ -137,7 +137,7 @@ func registryProblem(err error, image, registry string) error {
 			// token for it is stored.
 			hint = " (these images are public: if a login for it is stored and expired, `docker logout ghcr.io` instead)"
 		}
-		return fmt.Errorf("the registry refused to give out %s: it needs a login this CLI doesn't do -- run `docker login %s` first, and check the account may pull from there%s", image, registryHost(registry), hint)
+		return fmt.Errorf("the registry refused to give out %s: it needs a login this CLI doesn't do -- run `docker login %s` first, and check the account may pull from there and that the tag exists (some registries, Yandex Container Registry among them, answer 401 for a missing tag too)%s", image, registryHost(registry), hint)
 	case registry != "" && isManifestUnknown(err):
 		return fmt.Errorf("%s doesn't exist (the registry has no such image or tag, or the account can't see it) -- versola-tools has to be pushed under the version you pass, to %s/versola-tools", image, registry)
 	}

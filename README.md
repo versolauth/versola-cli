@@ -301,7 +301,9 @@ ignores the setting and would deploy from ghcr.io), or its tag is not
 
 The CLI does not log in to a registry. A refusal by the registry
 (`unauthorized`, `pull access denied`) when `versola-tools` is pulled is
-reported as such, with `docker login <host>` as the next step. Pulling
+reported as such, with `docker login <host>` as the next step (Yandex
+Container Registry answers `401 Unauthorized` for a tag that does not exist
+as well, so the same message can mean a typo in the version). Pulling
 central, auth and edge themselves is done by Docker Compose (`up`, and
 `rollout`'s pull step) and reports Compose's own message.
 

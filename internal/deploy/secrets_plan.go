@@ -39,19 +39,12 @@ const (
 // "plan-" and it is safe to delete by hand).
 //
 // Progress goes to log, never to stdout: the caller prints the result.
-//
-// registry is --registry ("" for the default): where versola-tools is pulled
-// from, as `configure --registry` would.
-func PlanSecrets(ctx context.Context, target, version, registry string, generateMissing []string, log io.Writer) (secrets.Result, error) {
+func PlanSecrets(ctx context.Context, target, version string, generateMissing []string, log io.Writer) (secrets.Result, error) {
 	if target != "local" && target != "vps" {
 		return secrets.Result{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
 	if version == "" {
 		return secrets.Result{}, errors.New("a version is required")
-	}
-	registry, err := ParseRegistry(registry)
-	if err != nil {
-		return secrets.Result{}, err
 	}
 
 	// OpenBao first: it is the cheapest thing to fail on, before anything is pulled.
@@ -100,11 +93,7 @@ func PlanSecrets(ctx context.Context, target, version, registry string, generate
 	defer removeOnSignal(log, cleanup)()
 
 	fmt.Fprintf(log, "Running versola-tools %s to get its schema and candidates...\n", version)
-	toolsImage := ToolsImage(registry, version)
-	if err := pullAndRunToolsTo(log, dir, toolsImage, target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target), toolsExtras{Registry: registry, Public: StoredPublicDomains(), CertDays: StoredCertDays()}); err != nil {
-		if problem := registryProblem(err, toolsImage, registry); problem != nil {
-			return secrets.Result{}, problem
-		}
+	if err := pullAndRunToolsTo(log, dir, ToolsImage(version), target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target), toolsExtras{Public: StoredPublicDomains(), CertDays: StoredCertDays()}); err != nil {
 		if isManifestUnknown(err) {
 			return secrets.Result{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it). Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2")`, version)
 		}

@@ -52,9 +52,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("Deployed version: %s (target: %s)\n", st.Version, st.Target)
 		}
-		if st.ImageRegistry != "" {
-			fmt.Printf("Images from: %s (not Versola's own registry)\n", st.ImageRegistry)
-		}
 		// Printed rather than kept purely internal: with configure/migrate/up
 		// available separately, "did the migrate step actually run for what's
 		// deployed here" is a real question someone asks when something looks

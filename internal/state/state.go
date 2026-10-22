@@ -160,13 +160,6 @@ type State struct {
 	// notAfter 100 years away: nothing renews them, and no timer is installed).
 	CertLifetimeDays *int `json:"certLifetimeDays,omitempty"`
 
-	// ImageRegistry is --registry: the registry prefix the Versola images were
-	// pulled from, when it is not Versola's own (ghcr.io/versolauth). Empty is
-	// the default, which is what every record from before the flag means, so
-	// the layout did not change. A rolling upgrade, and its abort, pull from
-	// the recorded registry only.
-	ImageRegistry string `json:"imageRegistry,omitempty"`
-
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
@@ -439,8 +432,6 @@ type FinalizeOptions struct {
 	// and record; "" for none (a copy left by an earlier deployment is
 	// removed).
 	PostgresCAFile string
-	// ImageRegistry: see State.ImageRegistry.
-	ImageRegistry string
 	// SecretsRevision is the schema revision secrets were settled against,
 	// 0 when the release has no schema.
 	SecretsRevision int
@@ -521,7 +512,6 @@ func Finalize(o FinalizeOptions) error {
 		ProxyMode:         o.ProxyMode,
 		PostgresHost:      o.PostgresHost,
 		PostgresDB:        o.PostgresDB,
-		ImageRegistry:     o.ImageRegistry,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,
 		MigratedAt:      o.MigratedAt,

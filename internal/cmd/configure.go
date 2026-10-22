@@ -24,7 +24,6 @@ var configureGenerateMissing []string
 var configureAllowLegacy bool
 var configurePostgresDB string
 var configurePostgresCA string
-var configureRegistry string
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -83,19 +82,6 @@ state), so rollout keeps using them and a later configure without the
 flag keeps the stored value; passing a flag again overrides it. They need a versola-tools release that
 understands POSTGRES_DB / POSTGRES_CA_FILE; an older one ignores them.
 
---registry PREFIX pulls versola-tools, and through it central, auth and
-edge, from PREFIX instead of Versola's own registry (ghcr.io/versolauth),
-for test images pushed elsewhere:
-
-  versola configure local 0.8.0-test1 --registry cr.yandex/crp1a2b3c
-
-Images are PREFIX/versola-tools:<version>, PREFIX/versola-central:<version>
-and so on, so versola-tools has to be pushed there with the same tag and
-built with that tag as its VERSION. It is not a login: run "docker login"
-for the registry first. It is remembered with the deployment, so "versola
-rollout" keeps pulling from it; a later configure without the flag goes
-back to Versola's own registry.
-
 This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a
 database migration needs to be its own explicit, reviewable step rather
@@ -110,7 +96,6 @@ func init() {
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
-	configureCmd.Flags().StringVar(&configureRegistry, "registry", "", registryUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
 	addPublicFlags(configureCmd)
@@ -140,11 +125,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
 	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
-	if err != nil {
-		return err
-	}
-
-	registry, err := deploy.ParseRegistry(configureRegistry)
 	if err != nil {
 		return err
 	}
@@ -234,7 +214,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
 		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days},
-		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
+		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
 	if err != nil {
 		return err
 	}
@@ -258,8 +238,6 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 }
 
 const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and `versola edge add` for a remote edge's bootstrap bundle"
-
-const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, `docker login` first"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

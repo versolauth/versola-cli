@@ -21,7 +21,6 @@ var bootstrapACMEStaging bool
 var bootstrapCentralURL string
 var bootstrapPostgresDB string
 var bootstrapPostgresCA string
-var bootstrapRegistry string
 var bootstrapGenerateMissing []string
 var bootstrapAllowLegacy bool
 
@@ -97,7 +96,6 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
-	bootstrapCmd.Flags().StringVar(&bootstrapRegistry, "registry", "", registryUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
 	bootstrapCmd.Flags().StringVar(&bootstrapCentralURL, "central-url", "", centralURLUsage)
 	addPublicFlags(bootstrapCmd)
@@ -136,11 +134,6 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
 	pg, err := deploy.PostgresOptions{DB: bootstrapPostgresDB, CAFile: bootstrapPostgresCA}.Validate(target)
-	if err != nil {
-		return err
-	}
-
-	registry, err := deploy.ParseRegistry(bootstrapRegistry)
 	if err != nil {
 		return err
 	}
@@ -211,7 +204,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
 		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days},
-		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
+		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
 	if err != nil {
 		return err
 	}

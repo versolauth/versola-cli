@@ -67,9 +67,10 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	// data volume (see the comment on that) -- errors here are treated the
 	// same way ComposeFile already treats them internally: no state means
 	// nothing to know a target for, not a reason to fail uninstall itself.
-	var target string
+	var target, registry string
 	if st, loadErr := state.Load(); loadErr == nil {
 		target = st.Target
+		registry = st.ImageRegistry
 	}
 
 	// If the daemon isn't reachable at all, there's nothing "docker compose
@@ -90,7 +91,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	var images []string
 	imagesUnknown := !dockerUp
 	if dockerUp {
-		images, err = versolaImages()
+		images, err = versolaImages(registry)
 		if err != nil {
 			return err
 		}
@@ -269,7 +270,8 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 // versolaImages lists locally pulled images matching Versola's own
 // repositories (versola-auth, versola-central, etc. under
-// ghcr.io/versolauth/versola-*) — not every image on the machine, and not
+// ghcr.io/versolauth/versola-*, and the registry the deployment was
+// configured with, if it was not that one) — not every image on the machine, and not
 // third-party images bootstrap also pulls (postgres) that the user almost
 // certainly has other uses for.
 //
@@ -278,9 +280,14 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 // isn't this function's job to diagnose, and folding it into "no images
 // found" here made that failure indistinguishable from any other real
 // error `docker images` could return.
-func versolaImages() ([]string, error) {
-	out, err := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}",
-		"--filter", "reference=ghcr.io/versolauth/versola-*").Output()
+func versolaImages(registry string) ([]string, error) {
+	args := []string{"images", "--format", "{{.Repository}}:{{.Tag}}",
+		"--filter", "reference=" + deploy.DefaultRegistry + "/versola-*"}
+	if registry != "" {
+		// Several reference filters match any of them.
+		args = append(args, "--filter", "reference="+registry+"/versola-*")
+	}
+	out, err := exec.Command("docker", args...).Output()
 	if err != nil {
 		// Output() populates ExitError.Stderr (since Stderr wasn't set to
 		// anything else above), but *exec.ExitError.Error() itself is just

@@ -465,7 +465,7 @@ func prepareStaged(st *state.State, version string, o RolloutOptions, staged *st
 		fmt.Printf("Warning: this deployment records --central-url %s from an earlier version, which derived it as central.<domain> and routed it. The proxy no longer routes it: a local edge reaches central on the loopback, an edge elsewhere needs --central-mtls-domain (README, \"Public names\"). Re-run `versola configure` with the flag.\n", st.CentralURL)
 	}
 	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL, Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}
-	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, staged); err != nil {
+	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, st.ImageRegistry, staged); err != nil {
 		return nil, err
 	}
 	return state.Load()
@@ -908,11 +908,18 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	defer removeOnSignal(os.Stdout, cleanup)()
 
 	fmt.Printf("Running versola-tools %s into a temporary directory...\n", version)
-	if err := pullAndRunTools(dir, ToolsImage(version), st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}); err != nil {
+	toolsImage := ToolsImage(st.ImageRegistry, version)
+	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}); err != nil {
+		if problem := registryProblem(err, toolsImage, st.ImageRegistry); problem != nil {
+			return problem
+		}
 		if isManifestUnknown(err) {
 			return fmt.Errorf("version %q of Versola doesn't exist (no versola-tools image published for it)", version)
 		}
 		return fmt.Errorf("versola-tools failed: %w", err)
+	}
+	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), st.ImageRegistry, version); err != nil {
+		return err
 	}
 	if err := requireAdminConsole(dir, version); err != nil {
 		return err

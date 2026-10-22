@@ -201,6 +201,7 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 
 var secretsPlanJSON bool
 var secretsPlanGenerateMissing []string
+var secretsPlanRegistry string
 
 var secretsPlanCmd = &cobra.Command{
 	Use:   "plan <target> <version>",
@@ -236,7 +237,7 @@ func runSecretsPlan(cmd *cobra.Command, args []string) error {
 
 	// Progress (and the tools container's own output) goes to stderr, so
 	// that stdout is the report and nothing else -- parseable with --json.
-	res, err := deploy.PlanSecrets(context.Background(), target, version, secretsPlanGenerateMissing, os.Stderr)
+	res, err := deploy.PlanSecrets(context.Background(), target, version, secretsPlanRegistry, secretsPlanGenerateMissing, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -259,6 +260,7 @@ func init() {
 	secretsCmd.AddCommand(secretsTestCmd)
 	secretsCmd.AddCommand(secretsPlanCmd)
 	secretsPlanCmd.Flags().StringSliceVar(&secretsPlanGenerateMissing, "generate-missing", nil, generateMissingUsage)
+	secretsPlanCmd.Flags().StringVar(&secretsPlanRegistry, "registry", "", registryUsage)
 	secretsPlanCmd.Flags().BoolVar(&secretsPlanJSON, "json", false, "print the report as JSON (same content, no secret values)")
 }
 

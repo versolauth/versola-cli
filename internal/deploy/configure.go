@@ -231,7 +231,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 
 	fmt.Println("Generating configuration (versola-tools)...")
 	toolsImage := ToolsImage(registry, version)
-	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays}); err != nil {
+	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays, Est: proxyOpts.Est}); err != nil {
 		if problem := registryProblem(err, toolsImage, registry); problem != nil {
 			return ConfigureResult{}, problem
 		}
@@ -534,7 +534,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
 		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
-		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays,
+		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays, EstEnabled: proxyOpts.Est,
 		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile, ImageRegistry: registry,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}

@@ -31,6 +31,8 @@ type ProxyOptions struct {
 	Public PublicDomains
 	// CertDays is --cert-lifetime-days: nil for the default, 0 for unlimited.
 	CertDays *int
+	// Est is --est: versola-tools writes auth's `est` block.
+	Est bool
 }
 
 // PublicDomains are the raw values of --mtls-domain, --central-mtls-domain
@@ -53,6 +55,13 @@ func StoredCertDays() *int {
 		return nil
 	}
 	return st.CertLifetimeDays
+}
+
+// StoredEst is whether the vps deployment this machine tracks was configured
+// with --est: what a configure without the flag keeps.
+func StoredEst() bool {
+	st, err := state.Load()
+	return err == nil && st.Target == "vps" && st.EstEnabled
 }
 
 // StoredPublicDomains are the names the vps deployment this machine tracks

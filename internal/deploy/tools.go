@@ -270,6 +270,7 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		// external-url). Only when set: unset, nothing is published.
 		args = append(args, extras.Public.toolsArgs()...)
 		args = append(args, certDaysArgs(extras.CertDays)...)
+		args = append(args, estArgs(extras.Est)...)
 	}
 	args = append(args, "-v", dir+":/out", image)
 	args = append(args, extras.GenEnvArgs...)
@@ -298,6 +299,8 @@ type toolsExtras struct {
 	Public     PublicDomains
 	// CertDays: nil leaves versola-tools' default (365); 0 is unlimited.
 	CertDays *int
+	// Est: write auth's `est` block (RFC 7030).
+	Est bool
 }
 
 // toolsArgs are the docker run arguments forwarding the public names.
@@ -353,4 +356,17 @@ func certDaysArgs(days *int) []string {
 		return nil
 	}
 	return []string{"-e", fmt.Sprintf("MTLS_CERT_DAYS=%d", *days)}
+}
+
+// estCAInAuth is where auth's container sees the client CA alone, which EST's
+// cacerts hands out: written by mtls-init into the volume auth mounts at /app/mtls.
+const estCAInAuth = "/app/mtls/client-ca.crt"
+
+// estArgs forwards --est to versola-tools (EST_ENABLED, and the CA file it must
+// name); nothing when it was not set, which leaves EST off.
+func estArgs(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return []string{"-e", "EST_ENABLED=true", "-e", "EST_CA_CERTIFICATES=" + estCAInAuth}
 }

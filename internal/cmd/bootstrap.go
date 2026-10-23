@@ -204,13 +204,17 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	est, err := estEnabled(cmd, target)
+	if err != nil {
+		return err
+	}
 	if target == "vps" {
 		if err := refuseNoTimerWhenFinite(bootstrapNoCertsTimer, days); err != nil {
 			return err
 		}
 	}
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days},
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
 	if err != nil {
 		return err

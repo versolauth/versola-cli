@@ -101,7 +101,7 @@ func PlanSecrets(ctx context.Context, target, version, registry string, generate
 
 	fmt.Fprintf(log, "Running versola-tools %s to get its schema and candidates...\n", version)
 	toolsImage := ToolsImage(registry, version)
-	if err := pullAndRunToolsTo(log, dir, toolsImage, target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target), toolsExtras{Registry: registry, Public: StoredPublicDomains(), CertDays: StoredCertDays()}); err != nil {
+	if err := pullAndRunToolsTo(log, dir, toolsImage, target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target), toolsExtras{Registry: registry, Public: StoredPublicDomains(), CertDays: StoredCertDays(), Est: StoredEst()}); err != nil {
 		if problem := registryProblem(err, toolsImage, registry); problem != nil {
 			return secrets.Result{}, problem
 		}

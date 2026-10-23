@@ -160,6 +160,11 @@ type State struct {
 	// notAfter 100 years away: nothing renews them, and no timer is installed).
 	CertLifetimeDays *int `json:"certLifetimeDays,omitempty"`
 
+	// EstEnabled is --est: auth serves RFC 7030 EST (/.well-known/est/) for
+	// clients registered with estEnrollment. Recorded so that rollout, which
+	// configures from the record, keeps it.
+	EstEnabled bool `json:"estEnabled,omitempty"`
+
 	// ImageRegistry is --registry: the registry prefix the Versola images were
 	// pulled from, when it is not Versola's own (ghcr.io/versolauth). Empty is
 	// the default, which is what every record from before the flag means, so
@@ -431,6 +436,8 @@ type FinalizeOptions struct {
 	MTLSDomain, CentralMTLSDomain, CentralDomain string
 	// CertLifetimeDays: see State.CertLifetimeDays.
 	CertLifetimeDays *int
+	// EstEnabled: see State.EstEnabled.
+	EstEnabled bool
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
@@ -518,6 +525,7 @@ func Finalize(o FinalizeOptions) error {
 		CentralMTLSDomain: o.CentralMTLSDomain,
 		CentralDomain:     o.CentralDomain,
 		CertLifetimeDays:  o.CertLifetimeDays,
+		EstEnabled:        o.EstEnabled,
 		ProxyMode:         o.ProxyMode,
 		PostgresHost:      o.PostgresHost,
 		PostgresDB:        o.PostgresDB,

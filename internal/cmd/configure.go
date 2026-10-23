@@ -227,13 +227,17 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	est, err := estEnabled(cmd, target)
+	if err != nil {
+		return err
+	}
 	if target == "vps" {
 		if err := refuseNoTimerWhenFinite(configureNoCertsTimer, days); err != nil {
 			return err
 		}
 	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days},
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
 	if err != nil {
 		return err
@@ -249,7 +253,7 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca"}, publicFlagNames...) {
+	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}

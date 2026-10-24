@@ -16,17 +16,17 @@ about Versola's own service topology (ports, service names, config schema)
 ## Status
 
 `doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
-`secrets`, `uninstall`, and `version` are all implemented and have been
-tested end-to-end against a real local deployment (Postgres + auth +
-central + edge + the reverse proxy, real browser login through to the admin
-console). `replica`, `rollout` and `certs` are implemented too (see their
-sections below); that local test did not cover them. Releases are
-automated (see Releasing below) and installed via the one-line scripts
-below.
-
-`upgrade` is newly added and not yet tested against a real published
-release — try it after the next release goes out, and expect rough edges
-before then.
+`replica`, `secrets`, `uninstall`, `upgrade` and `version` are all
+implemented and have been tested end-to-end: against a real local
+deployment (Postgres + auth + central + edge + the reverse proxy, real
+browser login through to the admin console), and on a test VPS with Versola
+0.7.1 (a from-scratch install following this README, `down`/`up`, replicas
+added and removed under load). `rollout` (vps) is implemented too, but has
+so far been exercised end-to-end with stand-in images only, not yet with two
+real Versola releases. `certs` and `edge` are implemented too (see their
+sections below); neither of those tests covered them. `upgrade` has moved a
+production server between published releases. Releases are automated (see
+Releasing below) and installed via the one-line scripts below.
 
 ## Install
 
@@ -47,10 +47,10 @@ if it isn't, the script prints the exact line to add to your shell
 profile. To pin a specific version instead of the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.2.6
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.3.2
 ```
 ```powershell
-$env:VERSOLA_VERSION = "0.2.6"
+$env:VERSOLA_VERSION = "0.3.2"
 iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 ```
 
@@ -182,6 +182,12 @@ downloads anything itself.
 
 ### `bootstrap local <version>`
 
+(`bootstrap vps <version>` does the same on a server, with the flags of
+`configure vps` below; it asks for confirmation first, and on a first
+install it stops before `migrate` -- with a non-zero exit code -- once it has
+written the SQL that sets the Postgres role's password (see Secrets below);
+run that SQL, then `versola migrate` and `versola up`.)
+
 Deploys a specific released version of Versola locally: pulls the
 matching `versola-tools` image to generate config, then brings up
 Postgres, central, auth, edge, and versola-cli's own reverse proxy (the
@@ -240,7 +246,9 @@ versola up
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
   migrations and exits when done. No server starts. Records the time in
-  `~/.versola`, which `status` then shows.
+  `~/.versola`, which `status` then shows. `--dry-run` lists the
+  migrations that would be applied and applies none; `--service
+  auth|central|edge` limits the run to one service.
 - **`up`** — starts the stack and waits until it's actually serving,
   not merely started. Assumes `migrate` already ran: services validate
   their schema at startup and refuse to start against an out-of-date
@@ -267,6 +275,35 @@ machine whose record still points at a running VPS deployment ask before
 replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
 question is answered by stdin, or the command aborts.
+
+### OpenBao: automatic setup, `--setup-openbao`, `secrets login` / `secrets test`
+
+`configure` starts an OpenBao container for the target
+(`versola-openbao-local` / `versola-openbao-vps`, on `127.0.0.1:8200`) and,
+the first time, provisions it itself: init with one unseal key, unseal, KV
+v2, AppRole, a policy limited to `secret/data/versola/<target>/*`. It keeps
+two files in `~/.versola/openbao/`: `<target>.json` (the AppRole
+credentials it reads and writes secrets with) and `<target>-admin.json`
+(the root token and unseal key). OpenBao comes back **sealed** after every
+restart of the server; the CLI unseals it with that key before it logs
+in (see Secrets below), and the next `configure` recreates the container
+if it was stopped. **Keep a copy of `<target>-admin.json` off the
+machine** -- neither value can be recovered. Versola's services never talk
+to OpenBao; it only has to run while `configure` (or `rollout`, `secrets
+plan`) does.
+
+If you run OpenBao yourself, pass `--setup-openbao` to `configure vps` /
+`bootstrap vps`: the CLI then never calls OpenBao's admin API, unsealing is
+yours, and it expects credentials stored beforehand with
+
+```
+versola secrets login vps http://127.0.0.1:8200 <role-id>   # secret-id is a hidden prompt
+versola secrets test vps                                    # logs in, writes and reads a scratch value
+```
+
+`secrets login` is also how another machine (or one whose
+`~/.versola/openbao/<target>.json` is gone) gets access. The manual setup
+steps are in the `versola` repository's `develop.md` ("Doing it by hand").
 
 ### Images from another registry: `--registry`
 
@@ -343,7 +380,7 @@ machine last deployed (recorded in `~/.versola`). If the plan has a problem,
 | `upgrade` | deployed before, OpenBao filled | keeps what is there; generates only secrets new in this release |
 | `alarm` | deployed before, OpenBao **empty** | stops: the secrets look lost |
 | `installing` | an earlier install here did not finish | continues it (a half-written key group is generated again as a whole) |
-| `unknown` | no record here, OpenBao not empty | stops: it cannot tell a new secret from a lost one |
+| `unknown` | no record here, OpenBao not empty | keeps what is there; stops if a first-install-only secret is missing (it cannot tell a new one from a lost one) |
 | `local` | `local` target (throwaway) | generates anything missing |
 
 Secret **values are never printed** by `configure`, `bootstrap`, `rollout`, or
@@ -392,12 +429,15 @@ afterwards), and prints one line per secret: `keep`, `create`, or a stop.
 Run it before upgrading a production deployment.
 
 ```
-versola secrets login vps        # once: AppRole credentials
-versola secrets plan vps 0.7.0
-versola secrets plan vps 0.7.0 --json
+versola secrets plan vps 0.7.1
+versola secrets plan vps 0.7.1 --json
 ```
 
-- Needs the AppRole credentials, Docker, and the `versola-tools` image.
+- Needs OpenBao running, this machine's AppRole credentials (`configure`
+  stores them when it provisions OpenBao; with `--setup-openbao`, `versola
+  secrets login`), Docker, and the `versola-tools` image.
+- `rollout` builds and checks the same plan for the version it moves to, so
+  a secret new in that version is generated before any of it starts.
 - Progress goes to stderr, the report to stdout.
 - Exit code is non-zero when the plan has problems
   (`the plan has N problem(s): nothing would be applied`).
@@ -425,14 +465,14 @@ Typical problems:
 
 #### `--generate-missing NAME[,NAME...]`
 
-Available on `configure`, `bootstrap`, and `secrets plan`. Allows the named
+Available on `configure`, `bootstrap`, `rollout` and `secrets plan`. Allows the named
 secrets to be generated although the plan would stop for them (one that
 looks lost, or an install of unknown origin). A key group is generated only
 if **every** member is named. Use it when you know the old value is gone
 for good, never as a routine flag.
 
 ```
-versola configure vps 0.7.0 --auth-url https://id.example.com \
+versola configure vps 0.7.1 --auth-url https://id.example.com \
   --postgres-host 127.0.0.1:5432 --generate-missing <NAME>,<NAME>
 ```
 
@@ -440,10 +480,11 @@ versola configure vps 0.7.0 --auth-url https://id.example.com \
 
 #### `--allow-legacy-secrets`
 
-Available on `configure` and `bootstrap`. For a release **without** a secret
+Available on `configure`, `bootstrap` and `rollout`. For a release **without** a secret
 schema the CLI falls back to the old rule: anything missing from OpenBao is
-generated. That is dangerous when OpenBao already holds secrets (a missing
-one may be lost, not new), so the CLI refuses unless you pass this flag.
+generated. That is dangerous when OpenBao already holds secrets, or this
+machine has deployed before (a missing one may be lost, not new), so the CLI
+refuses then unless you pass this flag.
 `local` does not need it, nor does retrying your own unfinished install.
 
 #### Upgrading the CLI
@@ -452,9 +493,10 @@ This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
 added the schema revision; layout 3 the Postgres host and the records a
 rolling upgrade needs; layout 4 the Postgres database name and CA, from
 `--postgres-db` and `--postgres-ca`). It reads the layouts older CLIs wrote,
-but an older CLI cannot read layout 4 and stops with a "newer schema" error: after the
-first command that saves state with this CLI, do not go back to an older one
-on the same machine.
+but an older CLI cannot read layout 4 and stops with a "newer schema" error
+(`state layout 4, this one reads up to N`): after the first command that
+saves state with this CLI, do not go back to an older one on the same
+machine. If you may need to, copy `~/.versola/active/state.json` first.
 
 Deployments made by much older versola-clis -- before `state.json`, before
 bundle directories, before the CLI's own reverse proxy, before replicas
@@ -494,7 +536,7 @@ serves the admin console at `/central/admin/`.
   - `--auth-url` exactly `https://<domain>`: no port, path or IP address.
 
   ```
-  versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  versola bootstrap vps 0.7.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   ```
 
   Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
@@ -503,7 +545,17 @@ serves the admin console at `/central/admin/`.
   (the CA file is copied next to the deployment's state): `rollout` reuses
   them, and a later `configure` without the flag keeps the stored value. They need a
   `versola-tools` release that understands `POSTGRES_DB` /
-  `POSTGRES_CA_FILE`.
+  `POSTGRES_CA_FILE`: **Versola 0.7.1 or later**.
+
+  The services verify Postgres's certificate (`sslmode=verify-full`) unless
+  the host is literally `127.0.0.1`, `localhost` or `[::1]`: with
+  `--postgres-host 127.0.0.1:5432` TLS is not verified, but with any other
+  host name -- even one that resolves to this very machine -- the name must be in the certificate's subject alternative names,
+  and a self-signed or private CA must be given with `--postgres-ca`.
+  On a first install `configure` writes the SQL that creates Versola's role
+  or sets its password to `~/.versola/openbao/vps-postgres-role.sql` (see
+  Secrets above): run it **before** `migrate`, or `migrate` fails with
+  `password authentication failed`.
 
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but
@@ -529,12 +581,15 @@ serves the admin console at `/central/admin/`.
   ```
 
   ```
-  versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
+  versola bootstrap vps 0.7.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   ```
 
   The forwarding web server has to run on this same host (natively, or
   in a container with host networking): 127.0.0.1:2821 isn't reachable
-  from anywhere else.
+  from anywhere else. The domain in `--auth-url` also has to resolve from
+  the server itself (central calls auth at that address); without DNS for it
+  central logs `UnknownHostException`. This mode serves no 80/443 itself, so
+  nothing answers on the domain until your web server does.
 
   Versola's proxy doesn't hold 443 here, so it can't publish a name on it;
   your web server has to (see "Public names").
@@ -744,6 +799,42 @@ does not retry it). A replica added later gets new connections only.
 This needs a Versola release whose versola-tools ships the admin console;
 `configure vps` says so clearly when pointed at an older one.
 
+### `replica add|remove <auth|edge> [count]`
+
+Runs more than one copy of auth or edge behind the reverse proxy, which
+balances requests between them (`least_conn`). central is not replicated.
+Works on `local` and `vps` (on `vps` it asks for confirmation first).
+
+```
+versola replica add auth 2
+versola replica remove edge
+```
+
+- `add` starts `count` replicas (1 if omitted) one at a time, in the lowest
+  free slots -- at most 9 per service. Each is waited for until it is
+  ready, and only then does the proxy start sending it requests. A replica
+  that doesn't come up is removed again; the ones started before it stay.
+- `remove` takes the highest slots first: the replica leaves the proxy, the
+  requests it is answering finish (up to 30 seconds), then it is stopped.
+  The last replica of a service can't be removed.
+- Slot 1 is the service as in the compose file; slot n uses the compose
+  file's ports plus 100·(n−1) (auth 8080, 8180, 8280, ...; on `vps` auth's
+  APORT/MPORT are fronted by the proxy, see above). The replicas are
+  recorded in `~/.versola`: `up` brings the same ones back and `status`
+  lists them.
+- Each replica is a whole JVM (sized at about 850-880 MiB), with its own
+  Postgres connection pool (10 connections; edge one more for LISTEN).
+  `replica add` checks ports, that central runs, the Docker Compose
+  version (2.24 or newer) and -- on `vps` -- that Postgres can take the new
+  pools (the same check as `rollout`'s, see below), **not** memory: with
+  Postgres' default `max_connections = 100`, a handful of extra replicas is
+  the limit.
+- Needs a running deployment (`versola up`; on `vps` one whose central is
+  already behind the reverse proxy -- an older deployment gets there with one
+  `versola up`) and is refused in the middle of a rolling upgrade. While a
+  service has more than one replica, `configure` refuses (remove the extra
+  ones first) -- to move such a deployment to another version, use `rollout`.
+
 ### `rollout <version>` / `rollout --abort` (vps)
 
 `versola rollout <version> --assume-compatible` moves a running vps
@@ -775,9 +866,7 @@ between 0.x releases is not guaranteed"), so `rollout` refuses to start
 without `--assume-compatible`: read the release notes first (additive
 migrations; the running version works on the new schema). A release that
 is not compatible is deployed with `configure`, `migrate` and `up` (a
-short stop) after a database backup. **0.7.0 needs a fresh database**
-(its migrations were squashed): a deployment on 0.6.x can't be rolled out
-to it, and moving to 0.7.0 means installing it on an empty schema.
+short stop) after a database backup.
 
 `versola rollout --abort` goes back to the version the unfinished rollout
 came from:
@@ -818,7 +907,7 @@ neither):
 
 - memory: free memory (`MemAvailable`) must hold one more replica --
   what a running replica of that service uses now (`docker stats`), never
-  less than 900 MiB (since 0.7.0 a replica's JVM is sized at about
+  less than 900 MiB (a replica's JVM is sized at about
   850-880 MiB, and a freshly started one has not reached that yet) -- plus
   256 MiB: a rollout with a stand-in needs at least about 1.13 GiB (1156 MiB) free. Checked before anything changes and again
   right before each stand-in. It has to run on the vps itself: with Docker
@@ -890,8 +979,7 @@ the renewal.
 
 1. Read the release notes of the new version: additive migrations, the
    running version working on the new schema. If not, this is a
-   `configure` / `migrate` / `up` deployment instead (and 0.6.x -> 0.7.0
-   needs a fresh database).
+   `configure` / `migrate` / `up` deployment instead.
 2. Back the database up (`pg_dump` of each schema) -- migrations can't be
    rolled back -- and copy `~/.versola/active/state.json`.
 3. `versola rollout <version> --dry-run`: the plan, the checks, the
@@ -1074,10 +1162,12 @@ partners' edges; an operator's own, first-party, edges are always extended by ce
 
 ### `status`
 
-Shows the containers from the last `bootstrap` run and their health
-(`docker compose ps` under the hood), and on `vps` and `local` the `notAfter`
-of every mutual-TLS certificate and of each public name's own, soonest first,
-marking those due for renewal (see `certs renew`).
+Shows the deployed version and target (and the registry, when it is not
+Versola's own), when migrations last ran, the replicas of each service, the
+progress of an unfinished rolling upgrade, and the containers with their
+health (`docker compose ps` under the hood); on `vps` and `local` also the
+`notAfter` of every mutual-TLS certificate and of each public name's own,
+soonest first, marking those due for renewal (see `certs renew`).
 
 ### `down`
 
@@ -1160,12 +1250,19 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, secrets, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, certs, edge, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
-internal/deploy/        the deployment steps themselves — configure, migrate, up — which bootstrap chains together
-internal/state/         locates ~/.versola/active, the on-disk state configure writes
+internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
+internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)
+internal/openbao/       OpenBao client, provisioning, stored credentials
+internal/proxy/         the reverse proxy's generated nginx config (local, vps nginx/external)
+internal/topology/      ports and slots read from the compose file (docker compose config)
+internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
+internal/docker/        thin wrappers around the docker CLI
+internal/fsutil/        atomic file writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
+e2e/rollout/            manual end-to-end run of rollout with stand-in images (not in CI)
 install.sh              one-line installer for macOS/Linux
 install.ps1             one-line installer for Windows
 LICENSE                 Apache License 2.0 (also published as a release asset)

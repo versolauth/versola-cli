@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -17,10 +18,15 @@ var postgresHost string
 var setupOpenBao bool
 var bootstrapProxy string
 var bootstrapACMEStaging bool
+var bootstrapCentralURL string
 var bootstrapPostgresDB string
 var bootstrapPostgresCA string
+var bootstrapRegistry string
 var bootstrapGenerateMissing []string
 var bootstrapAllowLegacy bool
+
+var bootstrapYes bool
+var bootstrapNoCertsTimer bool
 
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap <target> <version>",
@@ -36,6 +42,10 @@ Currently supported:
 
 On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
 certificate -- see "versola configure --help" for --proxy.
+
+On vps, --mtls-domain, --central-mtls-domain and --central-domain (optional)
+publish the mutual-TLS listeners and central's enrollment route -- see
+"versola configure --help".
 
 On vps, --postgres-db names the database (default: auth) and --postgres-ca
 points at a PEM file with the CA that signed Postgres' server certificate
@@ -66,6 +76,10 @@ out what it may do about each one and stops, with nothing written, if a
 secret looks lost or a key pair is only half stored -- see "versola
 configure --help" for --generate-missing and --allow-legacy-secrets.
 
+On vps it also installs the daily systemd timer that runs "versola certs
+renew" (--no-certs-timer to skip it): the mutual-TLS certificates are
+short-lived. Without systemd it prints the crontab line instead.
+
 Internally this runs "configure", "migrate", and "up" in order, asking
 for confirmation only once up front on vps rather than once per step.
 Run those separately instead of bootstrap when a deployment (e.g. onto
@@ -76,12 +90,17 @@ touches a live database, or to run migrate on its own schedule.`,
 }
 
 func init() {
+	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
+	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
+	bootstrapCmd.Flags().StringVar(&bootstrapRegistry, "registry", "", registryUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	bootstrapCmd.Flags().StringVar(&bootstrapCentralURL, "central-url", "", centralURLUsage)
+	addPublicFlags(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -121,6 +140,11 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	registry, err := deploy.ParseRegistry(bootstrapRegistry)
+	if err != nil {
+		return err
+	}
+
 	// Held for the whole configure/migrate/up sequence below -- see
 	// state.Lock's own comment, and cmd/configure.go's/cmd/migrate.go's
 	// identical use of it. Without it, a concurrent `versola configure`
@@ -151,13 +175,15 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// Finalize would silently orphan (flagged in review). confirmIfVpsState
 	// covers that second case by reading stored state instead of this run's
 	// target; only one of the two branches ever fires, same reasoning as
-	// configure.go.
+	// configure.go. That second branch passes false for assumeYes on purpose,
+	// whatever --yes says (see configure.go): answering it for a script would
+	// leave status/down/uninstall unable to find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
-		if err := deploy.ConfirmVpsDeploy(action); err != nil {
+		if err := deploy.ConfirmVpsDeployYes(bootstrapYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state loaded here (if any) describes the record this run is
@@ -170,19 +196,39 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
+	public, err := publicDomains(cmd, target)
+	if err != nil {
+		return err
+	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	est, err := estEnabled(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(bootstrapNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging},
-		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy})
+		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
+		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
 	if err != nil {
 		return err
 	}
 	// Migrate would only fail to log in to Postgres: the role doesn't
 	// have the password Configure just generated until someone runs the
-	// SQL it printed. Stop here with the next steps instead.
+	// SQL it wrote (and said where). Stop here with the next steps instead.
 	if res.PostgresRoleSetupNeeded {
 		// An error, not nil: the deployment isn't up yet, and a script
 		// running bootstrap must be able to tell that from its exit code.
-		return fmt.Errorf("stopped before migrate: set the Postgres role's password with the SQL printed above, then run `versola migrate` and `versola up`")
+		if res.PostgresRoleScript == "" {
+			return fmt.Errorf("stopped before migrate: set the Postgres role's password as said above, then run `versola migrate` and `versola up`")
+		}
+		return fmt.Errorf("stopped before migrate: set the Postgres role's password by feeding %s to psql as the Postgres superuser (see above), then run `versola migrate` and `versola up`", res.PostgresRoleScript)
 	}
 
 	// Loaded once here and passed to both Migrate and Up, rather than
@@ -205,5 +251,11 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	if err := deploy.Migrate(st, deploy.MigrateOptions{}); err != nil {
 		return err
 	}
-	return deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st)
+	if err := deploy.Up(deploy.UpOptions{NoBrowser: noBrowser}, st); err != nil {
+		return err
+	}
+	// The certificates are short-lived: the timer is part of deploying to a
+	// server, not an afterthought in the runbook (see scheduleCertsRenewal).
+	scheduleCertsRenewal(os.Stdout, target, bootstrapNoCertsTimer || !deploy.IssuesMutualTLSCertificates(version), days != nil && *days == 0)
+	return nil
 }

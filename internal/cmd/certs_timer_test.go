@@ -1,0 +1,209 @@
+package cmd
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/state"
+)
+
+// fakeRun answers the commands the timer checks ask, by their joined text.
+func fakeRun(t *testing.T, answers map[string]string) {
+	t.Helper()
+	old, oldUser := runOutput, currentUser
+	t.Cleanup(func() { runOutput, currentUser = old, oldUser })
+	currentUser = func() string { return "ops" }
+	runOutput = func(name string, args ...string) (string, error) {
+		if out, ok := answers[name+" "+strings.Join(args, " ")]; ok {
+			return out, nil
+		}
+		return "", errors.New("not found")
+	}
+}
+
+func withUnitDir(t *testing.T, installed bool) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if installed {
+		units := filepath.Join(dir, "systemd", "user")
+		if err := os.MkdirAll(units, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(units, "versola-certs-renew.timer"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCertsTimerWarningIsNeverSilent(t *testing.T) {
+	// Nothing installed: said, with what to run.
+	withUnitDir(t, false)
+	fakeRun(t, nil)
+	if w := certsTimerWarning(); !strings.Contains(w, "nothing renews") || !strings.Contains(w, "--install-timer") {
+		t.Errorf("no timer: %q", w)
+	}
+	// The unit exists but is not enabled: still nothing renews.
+	withUnitDir(t, true)
+	fakeRun(t, map[string]string{"systemctl --user is-enabled versola-certs-renew.timer": "disabled\n"})
+	if w := certsTimerWarning(); !strings.Contains(w, "nothing renews") {
+		t.Errorf("disabled timer: %q", w)
+	}
+	// Enabled: quiet (linger cannot be read here, so nothing is claimed about it).
+	fakeRun(t, map[string]string{"systemctl --user is-enabled versola-certs-renew.timer": "enabled\n"})
+	if w := certsTimerWarning(); w != "" {
+		t.Errorf("enabled timer: %q", w)
+	}
+	// A crontab line counts.
+	withUnitDir(t, false)
+	fakeRun(t, map[string]string{"crontab -l": "17 3 * * * /usr/local/bin/versola certs renew\n"})
+	if w := certsTimerWarning(); w != "" {
+		t.Errorf("cron: %q", w)
+	}
+	// A crontab of something else does not.
+	fakeRun(t, map[string]string{"crontab -l": "0 * * * * backup\n"})
+	if w := certsTimerWarning(); w == "" {
+		t.Error("an unrelated crontab silenced the warning")
+	}
+}
+
+func TestPrintCertsWarningsOnlyForVps(t *testing.T) {
+	withUnitDir(t, false)
+	fakeRun(t, nil)
+	var out bytes.Buffer
+	printCertsWarnings(&out, &state.State{Target: "local"})
+	if out.Len() != 0 {
+		t.Errorf("local: %q", out.String())
+	}
+	printCertsWarnings(&out, &state.State{Target: "vps"})
+	if !strings.HasPrefix(out.String(), "WARNING: nothing renews") {
+		t.Errorf("vps: %q", out.String())
+	}
+}
+
+func TestScheduleCertsRenewalSkips(t *testing.T) {
+	var out bytes.Buffer
+	scheduleCertsRenewal(&out, "local", false, false)
+	scheduleCertsRenewal(&out, "vps", true, false)
+	scheduleCertsRenewal(&out, "vps", false, true) // unlimited: nothing to renew
+	if out.Len() != 0 {
+		t.Errorf("printed %q for local / --no-certs-timer / unlimited", out.String())
+	}
+}
+
+func TestUpAndBootstrapHaveTheTimerOptOut(t *testing.T) {
+	for _, f := range []string{"no-certs-timer"} {
+		if upCmd.Flags().Lookup(f) == nil || bootstrapCmd.Flags().Lookup(f) == nil {
+			t.Errorf("--%s missing on up or bootstrap", f)
+		}
+	}
+	if upCmd.Flags().Lookup("no-certs-timer").DefValue != "false" {
+		t.Error("the timer is not on by default for up")
+	}
+}
+
+func TestCertLifetimeFlag(t *testing.T) {
+	for raw, want := range map[string]int{"365": 365, "30": 30, "36500": 36500, "0": 0, "unlimited": 0, " Unlimited ": 0} {
+		got, err := parseCertDays(raw)
+		if err != nil || *got != want {
+			t.Errorf("%q = %v, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "abc", "-1", "36501", "1.5", "forever"} {
+		if _, err := parseCertDays(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestCertDaysKeepsAndOverrides(t *testing.T) {
+	fresh := func() *cobra.Command {
+		c := &cobra.Command{Use: "x"}
+		addPublicFlags(c)
+		return c
+	}
+	t.Setenv("HOME", t.TempDir())
+	if d, err := certDays(fresh(), "vps"); err != nil || d != nil {
+		t.Fatalf("nothing recorded: %v, %v", d, err)
+	}
+	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","authUrl":"https://id.example.com","proxyMode":"nginx","certLifetimeDays":90}`)
+	if d, _ := certDays(fresh(), "vps"); d == nil || *d != 90 {
+		t.Errorf("recorded 90 not kept: %v", d)
+	}
+	c := fresh()
+	_ = c.Flags().Set("cert-lifetime-days", "unlimited")
+	if d, _ := certDays(c, "vps"); d == nil || *d != 0 {
+		t.Errorf("override to unlimited: %v", d)
+	}
+	if d, err := certDays(c, "local"); d != nil || err != nil {
+		t.Errorf("local: %v %v", d, err)
+	}
+	_ = c.Flags().Set("cert-lifetime-days", "soon")
+	if _, err := certDays(c, "vps"); err == nil {
+		t.Error("a bad value")
+	}
+	// Recorded 0 survives the round trip as unlimited, not as "not set".
+	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","authUrl":"https://id.example.com","proxyMode":"nginx","certLifetimeDays":0}`)
+	if d, _ := certDays(fresh(), "vps"); d == nil || *d != 0 {
+		t.Errorf("recorded unlimited lost: %v", d)
+	}
+}
+
+func TestNoCertsTimerRefusedUnlessUnlimited(t *testing.T) {
+	zero, ninety := 0, 90
+	if err := refuseNoTimerWhenFinite(false, nil); err != nil {
+		t.Errorf("no flag: %v", err)
+	}
+	for _, d := range []*int{nil, &ninety} {
+		if err := refuseNoTimerWhenFinite(true, d); err == nil || !strings.Contains(err.Error(), "unlimited") {
+			t.Errorf("--no-certs-timer with %v: %v", d, err)
+		}
+	}
+	if err := refuseNoTimerWhenFinite(true, &zero); err != nil {
+		t.Errorf("unlimited: %v", err)
+	}
+}
+
+func TestStateCertsUnlimited(t *testing.T) {
+	zero, n := 0, 365
+	if (&state.State{}).CertsUnlimited() || (&state.State{CertLifetimeDays: &n}).CertsUnlimited() || !(&state.State{CertLifetimeDays: &zero}).CertsUnlimited() {
+		t.Error("CertsUnlimited")
+	}
+	var nilState *state.State
+	if nilState.CertsUnlimited() {
+		t.Error("nil state")
+	}
+}
+
+func TestUnlimitedPrintsNoWarnings(t *testing.T) {
+	withUnitDir(t, false)
+	fakeRun(t, nil)
+	zero := 0
+	var out bytes.Buffer
+	printCertsWarnings(&out, &state.State{Target: "vps", CertLifetimeDays: &zero})
+	if out.Len() != 0 {
+		t.Errorf("unlimited certificates warned about a timer: %q", out.String())
+	}
+}
+
+func TestNoTimerBeforeTheCertificatesExist(t *testing.T) {
+	for version, want := range map[string]bool{
+		"0.7.4": false, "v0.7.4": false, "0.8.0": true, "0.8.0-rc1": true, "0.10.1": true, "1.0.0": true, "latest": true, "": true,
+	} {
+		if got := deploy.IssuesMutualTLSCertificates(version); got != want {
+			t.Errorf("%q: %v, want %v", version, got, want)
+		}
+	}
+	var out bytes.Buffer
+	printCertsWarnings(&out, &state.State{Target: "vps", Version: "0.7.4"})
+	if out.Len() != 0 {
+		t.Errorf("0.7.4 has no certificates to warn about: %q", out.String())
+	}
+}

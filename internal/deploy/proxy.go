@@ -22,12 +22,63 @@ type ProxyOptions struct {
 	// ACMEStaging requests the certificate from Let's Encrypt's staging
 	// environment: untrusted, but without production's rate limits.
 	ACMEStaging bool
+	// CentralURL is --central-url: how edge reaches central's mutual-TLS
+	// listener. Empty: gen-env's own default, the loopback address.
+	CentralURL string
+	// Public are the names published beyond the auth URL's (--mtls-domain,
+	// --central-mtls-domain, --central-domain); the zero value publishes
+	// nothing.
+	Public PublicDomains
+	// CertDays is --cert-lifetime-days: nil for the default, 0 for unlimited.
+	CertDays *int
+	// Est is --est: versola-tools writes auth's `est` block.
+	Est bool
+}
+
+// PublicDomains are the raw values of --mtls-domain, --central-mtls-domain
+// and --central-domain, as recorded in the state: validated by
+// proxy.ParsePublicNames against the auth URL.
+type PublicDomains struct {
+	MTLS, CentralMTLS, Enroll string
+}
+
+// PublicDomainsOf are the names a recorded deployment publishes.
+func PublicDomainsOf(st *state.State) PublicDomains {
+	return PublicDomains{MTLS: st.MTLSDomain, CentralMTLS: st.CentralMTLSDomain, Enroll: st.CentralDomain}
+}
+
+// StoredCertDays is the certificate lifetime the vps deployment this machine
+// tracks was configured with: what a configure without the flag keeps.
+func StoredCertDays() *int {
+	st, err := state.Load()
+	if err != nil || st.Target != "vps" {
+		return nil
+	}
+	return st.CertLifetimeDays
+}
+
+// StoredEst is whether the vps deployment this machine tracks was configured
+// with --est: what a configure without the flag keeps.
+func StoredEst() bool {
+	st, err := state.Load()
+	return err == nil && st.Target == "vps" && st.EstEnabled
+}
+
+// StoredPublicDomains are the names the vps deployment this machine tracks
+// publishes: what a configure without the flags keeps. Nothing for another
+// target or when there is no readable record.
+func StoredPublicDomains() PublicDomains {
+	st, err := state.Load()
+	if err != nil || st.Target != "vps" {
+		return PublicDomains{}
+	}
+	return PublicDomainsOf(st)
 }
 
 // checkProxyPorts fails early, before anything is generated, when the
 // port(s) the proxy is about to bind are already taken by something
 // else -- typically a web server already installed on the host.
-func checkProxyPorts(auth proxy.AuthURL, mode string) error {
+func checkProxyPorts(auth proxy.AuthURL, mode string, public proxy.PublicNames) error {
 	// Ports our own proxy from the current deployment holds are fine --
 	// `up` replaces it. Only those: if this configure switches mode (say
 	// external -> nginx), the ports the new mode needs must still be free
@@ -48,7 +99,12 @@ func checkProxyPorts(auth proxy.AuthURL, mode string) error {
 		}
 	}
 
-	for _, port := range proxy.Ports(auth, mode) {
+	ports := proxy.Ports(auth, mode)
+	if auth.TLS(mode) {
+		// Loopback ports of the stream server on 443's fallback and its relays.
+		ports = append(ports, public.LoopbackPorts()...)
+	}
+	for _, port := range ports {
 		if ours[port] || !proxy.PortInUse(port) {
 			continue
 		}
@@ -84,6 +140,15 @@ func setUpProxy(dir string, auth proxy.AuthURL, opts ProxyOptions, routed proxy.
 		cfg.IPv6 = proxy.HostHasGlobalIPv6()
 	}
 	tls := auth.TLS(opts.Mode)
+	if tls {
+		// Only the proxy that owns 443 can publish a name; behind
+		// --proxy external the operator's own web server has to (README).
+		public, err := proxy.ParsePublicNames(opts.Public.MTLS, opts.Public.CentralMTLS, opts.Public.Enroll, auth)
+		if err != nil {
+			return err
+		}
+		cfg.Public = public
+	}
 	if tls {
 		r, err := proxy.Resolvers()
 		if err != nil {
@@ -125,6 +190,8 @@ var proxyOps = struct {
 	rollBack    func(dir, previous string) error
 	waitReady   func(mode string, a proxy.AuthURL) error
 	waitFronts  func(f proxy.Fronts) error
+	// waitCentral waits for the front of central's PORT alone.
+	waitCentral func(port int) error
 }{
 	containerID: func(name string) (string, bool, error) {
 		out, found, err := docker.Inspect(name, "{{.Id}} {{.State.Running}}")
@@ -144,7 +211,8 @@ var proxyOps = struct {
 	waitReady: func(mode string, a proxy.AuthURL) error {
 		return proxy.WaitReady(mode, a, 60*time.Second, 120*time.Second)
 	},
-	waitFronts: func(f proxy.Fronts) error { return proxy.WaitFronts(f, 30*time.Second) },
+	waitFronts:  func(f proxy.Fronts) error { return proxy.WaitFronts(f, 30*time.Second) },
+	waitCentral: func(port int) error { return proxy.WaitCentralFront(port, 30*time.Second) },
 }
 
 // startProxy makes the proxy route as routed says and waits until it
@@ -162,8 +230,32 @@ var proxyOps = struct {
 // local: the bundle's files are bind-mounted one by one, which a rewrite
 // does not reach, so the container is recreated (--force-recreate).
 func startProxy(composePath string, st *state.State, routed proxy.Config) error {
-	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
-	if err != nil {
+	if err := beginProxy(composePath, st, routed); err != nil {
+		return err
+	}
+	return waitProxy(st, routed)
+}
+
+// startProxyForCentral starts the proxy early on vps, as soon as central is
+// ready and before auth and edge start: they reach central through the
+// proxy's front of central's PORT, and fail at startup when it is not there.
+// It waits for that front only -- Versola and the other fronts have nothing
+// behind them yet; waitProxy checks them once auth and edge are up.
+func startProxyForCentral(composePath string, st *state.State, routed proxy.Config) error {
+	if err := beginProxy(composePath, st, routed); err != nil {
+		return err
+	}
+	fmt.Println("Waiting for it to serve central...")
+	if err := proxyOps.waitCentral(routed.Fronts.Central); err != nil {
+		return fmt.Errorf("the reverse proxy isn't serving its front of central's PORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+	}
+	return nil
+}
+
+// beginProxy makes the proxy route as routed says, starting or reloading
+// it, without waiting for anything to be served (see startProxy).
+func beginProxy(composePath string, st *state.State, routed proxy.Config) error {
+	if _, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode); err != nil {
 		return fmt.Errorf("the recorded auth URL is no longer valid -- configure again: %w", err)
 	}
 	dir := filepath.Dir(composePath)
@@ -205,6 +297,15 @@ func startProxy(composePath string, st *state.State, routed proxy.Config) error 
 			}
 		}
 	}
+	return nil
+}
+
+// waitProxy waits until the proxy actually serves Versola, and its fronts.
+func waitProxy(st *state.State, routed proxy.Config) error {
+	auth, err := proxy.ParseAuthURL(st.AuthURL, st.ProxyMode)
+	if err != nil {
+		return fmt.Errorf("the recorded auth URL is no longer valid -- configure again: %w", err)
+	}
 	fmt.Println("Waiting for it to serve Versola...")
 	err = proxyOps.waitReady(st.ProxyMode, auth)
 	if errors.Is(err, proxy.ErrTLSPending) {
@@ -214,7 +315,7 @@ func startProxy(composePath string, st *state.State, routed proxy.Config) error 
 	}
 	if routed.Fronts != (proxy.Fronts{}) {
 		if err := proxyOps.waitFronts(routed.Fronts); err != nil {
-			return fmt.Errorf("the reverse proxy isn't serving its fronts of auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+			return fmt.Errorf("the reverse proxy isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
 		}
 	}
 	return nil

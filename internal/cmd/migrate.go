@@ -10,6 +10,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
+var migrateYes bool
 var migrateDryRun bool
 var migrateService string
 
@@ -43,6 +44,7 @@ deployment). --service limits either mode to one of "auth", "central",
 }
 
 func init() {
+	migrateCmd.Flags().BoolVarP(&migrateYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	migrateCmd.Flags().BoolVar(&migrateDryRun, "dry-run", false, "report which migrations would be applied, without applying any of them")
 	migrateCmd.Flags().StringVar(&migrateService, "service", "", `limit to one service ("auth", "central", or "edge") -- default is all three`)
 }
@@ -90,7 +92,7 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		if migrateService != "" {
 			scope = migrateService
 		}
-		st, err = confirmIfVpsState(func(version string) string {
+		st, err = confirmIfVpsState(migrateYes, func(version string) string {
 			return fmt.Sprintf("apply Versola %s's migrations (%s) to the live VPS database -- they cannot be rolled back, so back it up first", version, scope)
 		})
 		if err != nil {

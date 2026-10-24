@@ -100,7 +100,10 @@ func checkStandInMemory(p memoryProbe, st *state.State, services []string, warn 
 			basis = "the size of one replica"
 		}
 		hint := "--no-surge (one replica fewer serves while each is replaced"
-		if replicas := len(st.ActiveSlots(svc)); replicas < 2 {
+		if svc == CentralService {
+			hint = "--no-surge (central is then stopped and started in place: the admin console is down until it is ready"
+		}
+		if replicas := len(st.ActiveSlots(svc)); replicas < 2 && svc != CentralService {
 			hint += "; with one replica add --allow-downtime: it is down until the new one is ready"
 		}
 		return fmt.Errorf("not enough free memory for a stand-in %s replica: it needs about %s (%s) plus %s kept free, and %s is available -- free memory first, or run with %s)",
@@ -119,18 +122,31 @@ func mib(b int64) string { return fmt.Sprintf("%d MiB", b/(1024*1024)) }
 // refuse a rollout that only has its last steps left. (A recorded version
 // is not proof -- the engine still replaces a replica its container says
 // is not done, and checks memory again before any stand-in it starts.)
-// An abort checks every service: replicas that never moved are recorded
-// at the version it goes back to and are recreated all the same.
-func standInServices(st *state.State, o RolloutOptions, abort bool) []string {
+// An abort that goes back from the previous bundle (reuse) leaves the replicas
+// that never moved alone: a service whose every replica is recorded at the
+// version it goes back to starts no stand-in. Otherwise (the previous version
+// is configured anew) it checks every service: replicas that never moved are
+// recreated all the same.
+//
+// central is in only when centralFronted: a stand-in of central needs the
+// proxy in front of central's PORT (see rolloutEngine.centralInPlace).
+func standInServices(st *state.State, o RolloutOptions, abort, reuse, centralFronted bool) []string {
 	if o.NoSurge {
 		return nil
 	}
+	services := []string{AuthService, EdgeService}
+	if centralFronted {
+		services = rolloutServices
+	}
 	var out []string
-	for _, svc := range []string{AuthService, EdgeService} {
+	for _, svc := range services {
 		if _, ok := st.Surge[svc]; ok {
 			continue
 		}
 		if !abort && st.RolloutUnderway() && !st.RollingBack && allAt(st.ActiveSlots(svc), st.Version) {
+			continue
+		}
+		if abort && reuse && !st.RollingBack && allAt(st.ActiveSlots(svc), st.PreviousVersion) {
 			continue
 		}
 		out = append(out, svc)
@@ -160,6 +176,14 @@ const pgMargin = 3
 // read from the bundle: no secret among it.
 type pgTarget struct {
 	host, port, db, user, sslmode string
+	// rootCert is the CA file the service verifies Postgres against, as a
+	// path inside its container: the URL's sslrootcert, else the config's
+	// ssl-root-cert (what versola-tools writes for --postgres-ca), else
+	// empty (the JVM's trust store).
+	rootCert string
+	// caFile is rootCert on this host, found in the bundle by
+	// checkPgConnections; empty when there is none.
+	caFile string
 	// pool is the service's connection pool size (maximum-pool-size;
 	// minimum-idle equals it in Versola's configs, so a replica holds all
 	// of it from its start).
@@ -172,6 +196,15 @@ var (
 	pgURLRe  = regexp.MustCompile(`(?m)^\s*url\s*[=:]\s*"([^"]*)"`)
 	pgUserRe = regexp.MustCompile(`(?m)^\s*user\s*[=:]\s*"([^"]*)"`)
 	pgPoolRe = regexp.MustCompile(`(?m)^\s*maximum-pool-size\s*[=:]\s*(\d+)`)
+	pgCARe   = regexp.MustCompile(`(?m)^\s*ssl-root-cert\s*[=:]\s*"([^"]*)"`)
+)
+
+// pgCAContainerDir is where every service sees the bundle's postgres-ca
+// directory (versola-tools' compose template mounts ./postgres-ca there
+// read-only); --postgres-ca's file is ca.crt in it.
+const (
+	pgCAContainerDir = "/etc/versola/postgres-ca"
+	pgCABundleDir    = "postgres-ca"
 )
 
 // parsePgTarget reads the postgres block of a service's HOCON config as
@@ -191,7 +224,13 @@ func parsePgTarget(conf string) (pgTarget, error) {
 	if err != nil || parsed.Hostname() == "" {
 		return pgTarget{}, fmt.Errorf("can't read the postgres url")
 	}
-	t := pgTarget{host: parsed.Hostname(), port: parsed.Port(), db: strings.TrimPrefix(parsed.Path, "/"), sslmode: parsed.Query().Get("sslmode")}
+	q := parsed.Query()
+	t := pgTarget{host: parsed.Hostname(), port: parsed.Port(), db: strings.TrimPrefix(parsed.Path, "/"), sslmode: q.Get("sslmode"), rootCert: q.Get("sslrootcert")}
+	if t.rootCert == "" {
+		if c := pgCARe.FindStringSubmatch(block); c != nil {
+			t.rootCert = c[1]
+		}
+	}
 	if t.port == "" {
 		t.port = "5432"
 	}
@@ -245,19 +284,43 @@ func pgHeadroomWithin(timeout time.Duration) pgRunner {
 	return func(t pgTarget, secretsFile string) (int, error) { return runPgHeadroom(t, secretsFile, timeout) }
 }
 
-func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
+// pgVerifies reports whether sslmode makes the client check the server's
+// certificate. Empty is the services' default, verify-full.
+func pgVerifies(sslmode string) bool {
+	return sslmode == "" || sslmode == "verify-ca" || sslmode == "verify-full"
+}
+
+// pgHeadroomArgs is the docker command line of the check. TLS is set up as
+// the services connect: sslmode from the URL, else verify-full; verified
+// against the service's own CA file (mounted read-only at the path the
+// service sees it at) when it has one, else against the system's CAs (the
+// services: the JVM's trust store). No root certificate is passed for the
+// modes that do not verify: libpq, unlike the services' JDBC driver, would
+// turn require into verify-ca once it has one.
+func pgHeadroomArgs(t pgTarget, secretsFile string) []string {
 	args := []string{"run", "--rm", "--pull", "missing", "--network", "host", "--env-file", secretsFile,
 		"-e", "PGHOST=" + t.host, "-e", "PGPORT=" + t.port, "-e", "PGDATABASE=" + t.db, "-e", "PGUSER=" + t.user,
 		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-rollout-preflight"}
-	if t.sslmode != "" {
-		args = append(args, "-e", "PGSSLMODE="+t.sslmode)
-	} else {
-		// What the services do without sslmode in the URL: verify the
-		// server. Against the system's CAs here; a database behind a CA of
-		// its own fails this check, which then only warns.
-		args = append(args, "-e", "PGSSLMODE=verify-full", "-e", "PGSSLROOTCERT=system")
+	mode := t.sslmode
+	if mode == "" {
+		mode = "verify-full"
 	}
-	args = append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
+	args = append(args, "-e", "PGSSLMODE="+mode)
+	switch {
+	case !pgVerifies(mode):
+	case t.caFile != "":
+		in := pgCAContainerDir + "/ca.crt"
+		args = append(args, "-v", t.caFile+":"+in+":ro", "-e", "PGSSLROOTCERT="+in)
+	case mode == "verify-full":
+		// libpq accepts "system" only with verify-full; verify-ca
+		// without a CA file of its own fails the check, which then warns.
+		args = append(args, "-e", "PGSSLROOTCERT=system")
+	}
+	return append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
+}
+
+func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
+	args := pgHeadroomArgs(t, secretsFile)
 	out, stderr, err := docker.OutputWithin(timeout, args...)
 	if err != nil {
 		var exit *exec.ExitError
@@ -291,44 +354,105 @@ func firstLine(s string) string {
 	return ""
 }
 
+// pgAsker words the check for what it is about: a stand-in that goes again, or
+// the replicas `replica add` leaves running.
+type pgAsker struct {
+	announce string // "Checking that Postgres has the connections for <announce>..."
+	needs    string // "the Postgres connections <needs> are not checked"
+	opens    string // format of the sentence with how many connections are needed
+}
+
+var (
+	standInAsker    = pgAsker{"a stand-in replica", "a stand-in needs", "A stand-in opens %d."}
+	newReplicaAsker = pgAsker{"the new replicas", "the new replicas need", "The new replicas open %d."}
+)
+
 // checkPgConnections refuses when Postgres can't take the pool of a stand-in
 // of any of services (they run one after another: the largest counts). It
 // only warns when the check itself can't run -- a config it can't read, the
 // image out of reach, a server it can't log in to: the rollout's own
 // readiness checks still stop a stand-in that can't connect.
 func checkPgConnections(bundleDir string, services []string, run pgRunner, warn func(string, ...any)) error {
-	if len(services) == 0 {
+	headroom, need, needFor, ok := pgHeadroomFor(bundleDir, services, 1, standInAsker, run, warn)
+	if !ok || headroom >= need+pgMargin {
 		return nil
 	}
-	need, needFor := 0, ""
+	return fmt.Errorf("Postgres takes %d more connections and a stand-in %s replica opens %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or run with --no-surge",
+		headroom, needFor, need, pgMargin)
+}
+
+// checkPgForReplicas is the check of `replica add`: count more replicas of
+// service open their pools together and stay open, so Postgres has to take
+// all of them, not the largest one as for a stand-in that goes again. Like
+// checkPgConnections it only warns when it can't ask.
+func checkPgForReplicas(bundleDir, service string, count int, run pgRunner, warn func(string, ...any)) error {
+	headroom, need, _, ok := pgHeadroomFor(bundleDir, []string{service}, count, newReplicaAsker, run, warn)
+	if !ok || headroom >= need+pgMargin {
+		return nil
+	}
+	return fmt.Errorf("Postgres takes %d more connections and %d more %s replica(s) open %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or add fewer replicas",
+		headroom, count, service, need, pgMargin)
+}
+
+// pgHeadroomFor asks Postgres how many connections are free and what
+// replicas of the services need: the largest of them, times replicas. ok is
+// false when the check could not be made (a warning was given), or there is
+// nothing to check.
+func pgHeadroomFor(bundleDir string, services []string, replicas int, who pgAsker, run pgRunner, warn func(string, ...any)) (headroom, need int, needFor string, ok bool) {
+	if len(services) == 0 {
+		return 0, 0, "", false
+	}
 	var target pgTarget
 	var secrets string
+	per := 0
 	for _, svc := range services {
 		b, err := os.ReadFile(filepath.Join(bundleDir, svc+".conf"))
 		if err != nil {
-			warn("Warning: couldn't read %s.conf (%v) -- the Postgres connections a stand-in needs are not checked.\n", svc, err)
-			return nil
+			warn("Warning: couldn't read %s.conf (%v) -- the Postgres connections %s are not checked.\n", svc, err, who.needs)
+			return 0, 0, "", false
 		}
 		t, err := parsePgTarget(string(b))
 		if err != nil {
-			warn("Warning: couldn't read the Postgres settings of %s (%v) -- the connections a stand-in needs are not checked.\n", svc, err)
-			return nil
+			warn("Warning: couldn't read the Postgres settings of %s (%v) -- the connections %s are not checked.\n", svc, err, who.needs)
+			return 0, 0, "", false
 		}
-		if n := t.pool + pgListenConns[svc]; n > need {
-			need, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
+		if n := t.pool + pgListenConns[svc]; n > per {
+			per, needFor, target, secrets = n, svc, t, filepath.Join(bundleDir, svc+".secrets.env")
 		}
 	}
-	fmt.Println("Checking that Postgres has the connections for a stand-in replica...")
+	need = per * replicas
+	if target.rootCert != "" && pgVerifies(target.sslmode) {
+		ca, err := pgCAOnHost(bundleDir, target.rootCert)
+		if err != nil {
+			warn("Warning: %v -- the Postgres connections %s are not checked.\n", err, who.needs)
+			return 0, 0, "", false
+		}
+		target.caFile = ca
+	}
+	fmt.Printf("Checking that Postgres has the connections for %s...\n", who.announce)
 	headroom, err := run(target, secrets)
 	if err != nil {
-		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. A stand-in opens %d.\n", err, need)
-		return nil
+		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. "+who.opens+"\n", err, need)
+		return 0, 0, "", false
 	}
-	if headroom < need+pgMargin {
-		return fmt.Errorf("Postgres takes %d more connections and a stand-in %s replica opens %d (plus %d kept free): the replicas already serving would start failing to reconnect -- raise max_connections, or run with --no-surge",
-			headroom, needFor, need, pgMargin)
+	return headroom, need, needFor, true
+}
+
+// pgCAOnHost maps the CA file a service names (a path in its container) to
+// the file in the bundle it is mounted from.
+func pgCAOnHost(bundleDir, inContainer string) (string, error) {
+	rel, ok := strings.CutPrefix(inContainer, pgCAContainerDir+"/")
+	if !ok || rel == "" || strings.Contains(rel, "..") {
+		return "", fmt.Errorf("the Postgres CA file %s is not one versola-cli mounts (%s/...)", inContainer, pgCAContainerDir)
 	}
-	return nil
+	abs, err := filepath.Abs(filepath.Join(bundleDir, pgCABundleDir, filepath.FromSlash(rel)))
+	if err != nil {
+		return "", err
+	}
+	if fi, err := os.Stat(abs); err != nil || !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("the Postgres CA file %s is not in the bundle (%s)", inContainer, abs)
+	}
+	return abs, nil
 }
 
 // ---- the real probes ----

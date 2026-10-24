@@ -12,6 +12,9 @@ import (
 // standalone migrate/up commands, which act on whatever configure last
 // prepared rather than on a target named on the command line.
 //
+// assumeYes (the command's -y/--yes) skips the question, not the printing of
+// what is about to happen.
+//
 // Returns the state it loaded (nil if nothing is configured yet) so callers
 // that go on to act on it -- cmd/migrate.go, cmd/up.go -- can hand this same
 // value to deploy.Migrate/deploy.Up instead of re-loading state themselves.
@@ -33,7 +36,7 @@ import (
 // ErrNotConfigured is silently tolerated here; any other read error is
 // returned, since silently skipping a vps confirmation because state.json
 // happened to be unreadable is exactly the wrong failure mode.
-func confirmIfVpsState(action func(version string) string) (*state.State, error) {
+func confirmIfVpsState(assumeYes bool, action func(version string) string) (*state.State, error) {
 	st, err := state.Load()
 	if err != nil {
 		if errors.Is(err, state.ErrNotConfigured) {
@@ -44,7 +47,7 @@ func confirmIfVpsState(action func(version string) string) (*state.State, error)
 	if st.Target != "vps" {
 		return st, nil
 	}
-	if err := deploy.ConfirmVpsDeploy(action(st.Version)); err != nil {
+	if err := deploy.ConfirmVpsDeployYes(assumeYes, action(st.Version)); err != nil {
 		return nil, err
 	}
 	return st, nil

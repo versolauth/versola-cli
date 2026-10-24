@@ -1,12 +1,15 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +17,13 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/proxy"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
-var doctorTarget string
+var doctorTarget, doctorAuthURL, doctorCentralURL string
+var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
@@ -37,6 +43,11 @@ would actually pass, or pass one it would actually fail.`,
 }
 
 func init() {
+	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- needed for the public name checks below")
+	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
+	doctorCmd.Flags().StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
+	doctorCmd.Flags().StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
+	doctorCmd.Flags().StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
 	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
 }
 
@@ -65,6 +76,25 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		results = append(results, checks.PortFree(proxy.LocalPort, proxy.LocalContainerName))
 	}
 	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
+	if doctorTarget == "vps" {
+		central, err := centralChecks(doctorAuthURL, doctorCentralURL)
+		if err != nil {
+			return err
+		}
+		results = append(results, central...)
+		public, err := publicNameChecks(doctorAuthURL, doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain)
+		if err != nil {
+			return err
+		}
+		results = append(results, public...)
+		// Certificates of a deployment already on this host: none to check
+		// before the first configure.
+		if r, found := checks.MTLSLeafCheck(deploy.MTLSVolumeName("vps"), "versola-step-ca"); found {
+			results = append(results, r)
+		}
+	} else if doctorAuthURL != "" || doctorCentralURL != "" || doctorMTLSDomain != "" || doctorCentralMTLSDomain != "" || doctorCentralDomain != "" {
+		return fmt.Errorf("--auth-url, --central-url, --mtls-domain, --central-mtls-domain and --central-domain only apply to --target vps")
+	}
 
 	failed := 0
 	for _, r := range results {
@@ -76,6 +106,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	if !dockerDaemon.OK {
 		offerDockerHelp()
+	}
+
+	// The certificates of a deployment on this host, each with its notAfter.
+	if st, err := state.Load(); err == nil && st.Target == doctorTarget {
+		fmt.Println()
+		deploy.PrintCertificates(os.Stdout, st, time.Now())
+		printCertsWarnings(os.Stdout, st)
 	}
 
 	fmt.Println()
@@ -94,6 +131,78 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
 	return fmt.Errorf("doctor found %d problem(s)", failed)
+}
+
+// centralChecks: --central-url, when given, is where an edge reaches
+// central's mutual-TLS listener: its name has to resolve to this server and
+// the port answer a TLS handshake. Only with --auth-url or --central-url,
+// since doctor otherwise knows nothing about the deployment. The handshake
+// checks are for a server whose central is running: before `versola up`
+// there is nothing to answer.
+func centralChecks(authURL, centralURL string) ([]checks.Result, error) {
+	if centralURL == "" {
+		return nil, nil
+	}
+	var auth proxy.AuthURL
+	if authURL != "" {
+		var err error
+		if auth, err = proxy.ParseAuthURL(authURL, proxy.ModeExternal); err != nil {
+			return nil, err
+		}
+	}
+	c, ok, err := proxy.ParseCentralURL(centralURL, auth)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	name := checks.CentralName(c.Host)
+	results := []checks.Result{name}
+	if !name.OK {
+		return results, nil
+	}
+	port := strconv.Itoa(proxy.CentralMutualTLSPort)
+	if c.Port != "" {
+		port = c.Port
+	}
+	return append(results, checks.TLSAnswers("Central mutual TLS", net.JoinHostPort(c.Host, port), c.Host)), nil
+}
+
+// publicNameChecks: the names --mtls-domain, --central-mtls-domain and
+// --central-domain will publish: each has to resolve to this server (the
+// proxy routes it by SNI on 443), and 443 has to answer a TLS handshake for
+// it (before `versola up` nothing does: run it after). Needs --auth-url, the
+// name the others are checked against.
+func publicNameChecks(authURL, mtls, centralMTLS, enroll string) ([]checks.Result, error) {
+	if mtls == "" && centralMTLS == "" && enroll == "" {
+		return nil, nil
+	}
+	if authURL == "" {
+		return nil, fmt.Errorf("--mtls-domain, --central-mtls-domain and --central-domain are checked against --auth-url: pass it too")
+	}
+	auth, err := proxy.ParseAuthURL(authURL, proxy.ModeExternal)
+	if err != nil {
+		return nil, err
+	}
+	names, err := proxy.ParsePublicNames(mtls, centralMTLS, enroll, auth)
+	if err != nil {
+		return nil, err
+	}
+	var results []checks.Result
+	for _, n := range []struct{ label, host string }{
+		{"mutual-TLS name", names.MTLS}, {"central mutual-TLS name", names.CentralMTLS}, {"enrollment name", names.Enroll},
+	} {
+		if n.host == "" {
+			continue
+		}
+		name := checks.NameResolves(n.label, n.host)
+		results = append(results, name)
+		if name.OK {
+			results = append(results, checks.TLSAnswers(strings.ToUpper(n.label[:1])+n.label[1:], net.JoinHostPort(n.host, "443"), n.host))
+		}
+	}
+	return results, nil
 }
 
 // offerDockerHelp runs when the Docker daemon check failed. It distinguishes
@@ -236,8 +345,12 @@ func stdinIsInteractive() bool {
 }
 
 func readLine() string {
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
+	line, err := deploy.ReadLine(os.Stdin)
+	if err != nil && !errors.Is(err, io.EOF) {
+		// A read error (or an over-long line) is no answer, even if what came
+		// before it looks like "y".
+		return ""
+	}
 	return strings.TrimSpace(line)
 }
 

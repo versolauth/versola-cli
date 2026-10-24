@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -84,6 +85,9 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 	// mode (surfaces later, inside configure/migrate) than rejecting it
 	// here, at the moment it was typed in.
 	fmt.Printf("Verifying credentials against %s...\n", address)
+	if err := openbao.EnsureUnsealed(context.Background(), target, address, os.Stdout); err != nil {
+		return err
+	}
 	if err := openbao.NewClient(creds).Login(context.Background()); err != nil {
 		return fmt.Errorf("couldn't log in with these credentials: %w", err)
 	}
@@ -106,10 +110,23 @@ func runSecretsLogin(cmd *cobra.Command, args []string) error {
 // scripted/CI invocation piping the value in) -- term.ReadPassword
 // requires a real TTY and errors otherwise, and a script feeding this in
 // isn't the case this masking exists for anyway.
+//
+// That plain read is stricter than readLine() (doctor.go): a read error, an
+// over-long line or an empty line is an error here, not an empty answer, since
+// a cut or missing ID would only fail later as a confusing auth error.
 func readSecretID() (string, error) {
 	fmt.Print("Secret ID: ")
 	if !stdinIsInteractive() {
-		return readLine(), nil
+		line, err := deploy.ReadLine(os.Stdin)
+		if (err != nil && !errors.Is(err, io.EOF)) || strings.TrimSpace(line) == "" {
+			// A cut, failed or missing ID would be stored or tried and fail later as a
+			// confusing auth error.
+			if err == nil {
+				err = errors.New("empty input")
+			}
+			return "", fmt.Errorf("couldn't read secret ID: %w", err)
+		}
+		return strings.TrimSpace(line), nil
 	}
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -147,6 +164,9 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 	client := openbao.NewClient(creds)
 	ctx := context.Background()
 
+	if err := openbao.EnsureUnsealed(ctx, target, creds.Address, os.Stdout); err != nil {
+		return err
+	}
 	fmt.Printf("Logging into OpenBao at %s...\n", creds.Address)
 	if err := client.Login(ctx); err != nil {
 		return err
@@ -181,6 +201,7 @@ func runSecretsTest(cmd *cobra.Command, args []string) error {
 
 var secretsPlanJSON bool
 var secretsPlanGenerateMissing []string
+var secretsPlanRegistry string
 
 var secretsPlanCmd = &cobra.Command{
 	Use:   "plan <target> <version>",
@@ -216,7 +237,7 @@ func runSecretsPlan(cmd *cobra.Command, args []string) error {
 
 	// Progress (and the tools container's own output) goes to stderr, so
 	// that stdout is the report and nothing else -- parseable with --json.
-	res, err := deploy.PlanSecrets(context.Background(), target, version, secretsPlanGenerateMissing, os.Stderr)
+	res, err := deploy.PlanSecrets(context.Background(), target, version, secretsPlanRegistry, secretsPlanGenerateMissing, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -239,6 +260,7 @@ func init() {
 	secretsCmd.AddCommand(secretsTestCmd)
 	secretsCmd.AddCommand(secretsPlanCmd)
 	secretsPlanCmd.Flags().StringSliceVar(&secretsPlanGenerateMissing, "generate-missing", nil, generateMissingUsage)
+	secretsPlanCmd.Flags().StringVar(&secretsPlanRegistry, "registry", "", registryUsage)
 	secretsPlanCmd.Flags().BoolVar(&secretsPlanJSON, "json", false, "print the report as JSON (same content, no secret values)")
 }
 

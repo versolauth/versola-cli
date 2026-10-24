@@ -11,11 +11,12 @@ import (
 	"github.com/versolauth/versola-cli/internal/docker"
 )
 
-// ToolsImage returns the versola-tools image for a given Versola release.
-// This is the one image this CLI names by hand; everything else it runs
-// comes out of the compose file that image generates.
-func ToolsImage(version string) string {
-	return "ghcr.io/versolauth/versola-tools:" + version
+// ToolsImage returns the versola-tools image for a given Versola release,
+// from registry ("" for the default, DefaultRegistry). This is the one image
+// this CLI names by hand; everything else it runs comes out of the compose
+// file that image generates.
+func ToolsImage(registry, version string) string {
+	return registryOrDefault(registry) + "/versola-tools:" + version
 }
 
 // manifestUnknownErr wraps a docker failure whose stderr contained
@@ -30,6 +31,41 @@ func (e *manifestUnknownErr) Unwrap() error { return e.inner }
 func isManifestUnknown(err error) bool {
 	var m *manifestUnknownErr
 	return errors.As(err, &m)
+}
+
+// registryDeniedErr wraps a docker failure whose stderr says the registry
+// refused the pull for want of (valid) credentials.
+type registryDeniedErr struct{ inner error }
+
+func (e *registryDeniedErr) Error() string { return e.inner.Error() }
+func (e *registryDeniedErr) Unwrap() error { return e.inner }
+
+func isRegistryDenied(err error) bool {
+	var m *registryDeniedErr
+	return errors.As(err, &m)
+}
+
+// registryDeniedTexts are what Docker (and the registries behind it) write
+// when a pull is refused for credentials. Deliberately not a bare "denied":
+// the tools container's own "permission denied" is not a login problem.
+var registryDeniedTexts = []string{
+	"unauthorized",
+	"authentication required",
+	"no basic auth credentials",
+	"pull access denied",
+	"requested access to the resource is denied",
+	// GHCR answers a repository it will not show as `Head "...": denied`.
+	`": denied`,
+}
+
+func mentionsRegistryDenied(stderr string) bool {
+	s := strings.ToLower(stderr)
+	for _, t := range registryDeniedTexts {
+		if strings.Contains(s, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // toolsTarget maps this CLI's target names to the TARGET value
@@ -89,15 +125,19 @@ func OpenbaoContainerName(target string) string {
 // clearer error in Configure, without changing behavior for every other
 // docker call site (compose up/down, uninstall's rmi, etc.) that has no
 // need for this.
-func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
-	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg)
+func pullAndRunTools(dir, image, target, authURL, postgresHost string, pg PostgresOptions, extras toolsExtras) error {
+	return pullAndRunToolsTo(os.Stdout, dir, image, target, authURL, postgresHost, pg, extras)
 }
 
 // pullAndRunToolsTo is pullAndRunTools with the container's stdout sent to
 // stdout instead of always to this process's own: a command that prints a
 // machine-readable result on stdout (`secrets plan --json`) sends it to stderr,
 // so the progress of the pull does not end up inside the result.
-func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions) error {
+//
+// extras.GenEnvArgs are gen-env.scala's own flags (--central-mutual-tls-url=...),
+// handed to the image as its arguments; extras.Public are the names to put
+// into the leaf certificates.
+func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHost string, pg PostgresOptions, extras toolsExtras) error {
 	// "manifest unknown" (when it happens at all) comes from Docker
 	// failing to resolve the image before any pull output follows, so a
 	// few KB is more than enough to catch it -- capped rather than a plain
@@ -180,6 +220,14 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		}
 	}
 	args = append(args, "-e", "TARGET="+toolsTarget(target))
+	// -e IMAGE_REGISTRY=...: the prefix versola-tools writes into the compose
+	// file for central, auth and edge. Only for a registry other than the
+	// default, so that the default case runs exactly as it always has, on
+	// every versola-tools release (an old one would ignore it, which is
+	// requireRegistryImages' job to notice).
+	if extras.Registry != "" {
+		args = append(args, "-e", "IMAGE_REGISTRY="+extras.Registry)
+	}
 	// -e ENV_NAME=...: the literal environment name gen-env.scala writes
 	// into the generated configs -- deliberately not derived from target
 	// (vps isn't itself an environment: the same VPS could run "prod"
@@ -217,8 +265,15 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		// above) or as root on a rootless daemon, so it can read a file
 		// this user can read, and never needs to write it.
 		args = append(args, pg.toolsArgs()...)
+		// -e MTLS_DOMAIN / CENTRAL_MTLS_DOMAIN: the public names, which
+		// versola-tools puts into the leaf certificates' names (and auth's
+		// external-url). Only when set: unset, nothing is published.
+		args = append(args, extras.Public.toolsArgs()...)
+		args = append(args, certDaysArgs(extras.CertDays)...)
+		args = append(args, estArgs(extras.Est)...)
 	}
 	args = append(args, "-v", dir+":/out", image)
+	args = append(args, extras.GenEnvArgs...)
 	c := docker.Cmd(args...)
 	c.Stdout = stdout
 	c.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
@@ -227,9 +282,46 @@ func pullAndRunToolsTo(stdout io.Writer, dir, image, target, authURL, postgresHo
 		if strings.Contains(stderrBuf.String(), "manifest unknown") {
 			return &manifestUnknownErr{inner: err}
 		}
+		if mentionsRegistryDenied(stderrBuf.String()) {
+			return &registryDeniedErr{inner: err}
+		}
 		return err
 	}
 	return nil
+}
+
+// toolsExtras is what configure hands versola-tools beyond the target's own
+// facts: gen-env flags and the public names.
+type toolsExtras struct {
+	// Registry is the image registry prefix, "" for the default.
+	Registry   string
+	GenEnvArgs []string
+	Public     PublicDomains
+	// CertDays: nil leaves versola-tools' default (365); 0 is unlimited.
+	CertDays *int
+	// Est: write auth's `est` block (RFC 7030).
+	Est bool
+}
+
+// toolsArgs are the docker run arguments forwarding the public names.
+func (p PublicDomains) toolsArgs() []string {
+	var args []string
+	if p.MTLS != "" {
+		args = append(args, "-e", "MTLS_DOMAIN="+p.MTLS)
+	}
+	if p.CentralMTLS != "" {
+		args = append(args, "-e", "CENTRAL_MTLS_DOMAIN="+p.CentralMTLS)
+	}
+	return args
+}
+
+// centralGenEnvArgs is gen-env's flag for where edge reaches central, none
+// when there is no URL (it keeps its own default then).
+func centralGenEnvArgs(centralURL string) []string {
+	if centralURL == "" {
+		return nil
+	}
+	return []string{"--central-mutual-tls-url=" + centralURL}
 }
 
 // cappedBuffer is a bytes.Buffer that silently stops accumulating past a
@@ -256,3 +348,25 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (c *cappedBuffer) String() string { return c.buf.String() }
+
+// certDaysArgs forwards --cert-lifetime-days (0 = unlimited) to versola-tools;
+// nothing when it was not set, which leaves its default.
+func certDaysArgs(days *int) []string {
+	if days == nil {
+		return nil
+	}
+	return []string{"-e", fmt.Sprintf("MTLS_CERT_DAYS=%d", *days)}
+}
+
+// estCAInAuth is where auth's container sees the client CA alone, which EST's
+// cacerts hands out: written by mtls-init into the volume auth mounts at /app/mtls.
+const estCAInAuth = "/app/mtls/client-ca.crt"
+
+// estArgs forwards --est to versola-tools (EST_ENABLED, and the CA file it must
+// name); nothing when it was not set, which leaves EST off.
+func estArgs(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return []string{"-e", "EST_ENABLED=true", "-e", "EST_CA_CERTIFICATES=" + estCAInAuth}
+}

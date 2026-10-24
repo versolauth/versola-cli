@@ -1,0 +1,12 @@
+mtls-init: cert ca.crt notBefore=2026-10-21T09:16:32Z notAfter=2036-10-18T09:16:32Z subject=Versola Client CA Root CA
+mtls-init: cert ca.crt notBefore=2026-10-21T09:16:33Z notAfter=2036-10-18T09:16:33Z subject=Versola Client CA Intermediate CA
+mtls-init: cert client-ca.crt notBefore=2026-10-21T09:16:33Z notAfter=2036-10-18T09:16:33Z subject=Versola Client CA Intermediate CA
+mtls-init: cert edge-ca.crt notBefore=2026-10-21T09:16:33Z notAfter=2035-10-19T09:16:33Z subject=Versola Edge CA
+mtls-init: cert server-ca.crt notBefore=2026-10-21T09:16:33Z notAfter=2035-10-19T09:16:33Z subject=Versola Server CA
+mtls-init: cert auth-trust.crt notBefore=2026-10-21T09:16:33Z notAfter=2036-10-18T09:16:33Z subject=Versola Client CA Intermediate CA
+mtls-init: cert auth-trust.crt notBefore=2026-10-21T09:16:33Z notAfter=2035-10-19T09:16:33Z subject=Versola Edge CA
+mtls-init: cert server.crt notBefore=2026-10-21T09:16:33Z notAfter=2027-10-21T09:16:33Z subject=localhost
+mtls-init: cert server.next.crt notBefore=2026-10-21T09:16:33Z notAfter=2027-10-21T09:16:33Z subject=localhost
+mtls-init: cert central-server.crt notBefore=2026-10-21T09:16:33Z notAfter=2027-10-21T09:16:33Z subject=central
+mtls-init: cert central-server.next.crt notBefore=2026-10-21T09:16:33Z notAfter=2027-10-21T09:16:33Z subject=central
+mtls-init: cert edge-client.crt notBefore=2026-10-21T09:16:34Z notAfter=2027-10-21T09:16:33Z subject=urn:versola:edge:edge-default

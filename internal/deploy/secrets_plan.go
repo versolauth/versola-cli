@@ -33,18 +33,25 @@ const (
 // of its last deployment (see secrets.Plan for the rules).
 //
 // Read-only: nothing is written to OpenBao, to the deployment's state, or to its
-// bundle. The candidates are real random values, so the temporary directory is
+// bundle (a sealed OpenBao is unsealed first, see openbao.EnsureUnsealed). The candidates are real random values, so the temporary directory is
 // created 0700 under ~/.versola, and removed before this returns whatever
 // happens (except a kill -9, which leaves it behind: its name starts with
 // "plan-" and it is safe to delete by hand).
 //
 // Progress goes to log, never to stdout: the caller prints the result.
-func PlanSecrets(ctx context.Context, target, version string, generateMissing []string, log io.Writer) (secrets.Result, error) {
+//
+// registry is --registry ("" for the default): where versola-tools is pulled
+// from, as `configure --registry` would.
+func PlanSecrets(ctx context.Context, target, version, registry string, generateMissing []string, log io.Writer) (secrets.Result, error) {
 	if target != "local" && target != "vps" {
 		return secrets.Result{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
 	if version == "" {
 		return secrets.Result{}, errors.New("a version is required")
+	}
+	registry, err := ParseRegistry(registry)
+	if err != nil {
+		return secrets.Result{}, err
 	}
 
 	// OpenBao first: it is the cheapest thing to fail on, before anything is pulled.
@@ -57,6 +64,9 @@ func PlanSecrets(ctx context.Context, target, version string, generateMissing []
 	}
 	client := openbao.NewClient(creds)
 	fmt.Fprintf(log, "Reading what OpenBao holds for %s...\n", target)
+	if err := openbao.EnsureUnsealed(ctx, target, creds.Address, log); err != nil {
+		return secrets.Result{}, err
+	}
 	if err := client.Login(ctx); err != nil {
 		return secrets.Result{}, err
 	}
@@ -90,7 +100,11 @@ func PlanSecrets(ctx context.Context, target, version string, generateMissing []
 	defer removeOnSignal(log, cleanup)()
 
 	fmt.Fprintf(log, "Running versola-tools %s to get its schema and candidates...\n", version)
-	if err := pullAndRunToolsTo(log, dir, ToolsImage(version), target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target)); err != nil {
+	toolsImage := ToolsImage(registry, version)
+	if err := pullAndRunToolsTo(log, dir, toolsImage, target, planAuthURL, planPostgresHost, PostgresOptions{}.withStored(target), toolsExtras{Registry: registry, Public: StoredPublicDomains(), CertDays: StoredCertDays(), Est: StoredEst()}); err != nil {
+		if problem := registryProblem(err, toolsImage, registry); problem != nil {
+			return secrets.Result{}, problem
+		}
 		if isManifestUnknown(err) {
 			return secrets.Result{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it). Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2")`, version)
 		}

@@ -24,12 +24,17 @@ type Result struct {
 	Name   string // human-readable name, e.g. "Docker daemon"
 	OK     bool
 	Detail string // version string on success, or a hint on failure
+	// Warn: passed, but worth the reader's attention. Doesn't fail doctor.
+	Warn bool
 }
 
 func (r Result) String() string {
 	mark := "[ok]"
-	if !r.OK {
+	switch {
+	case !r.OK:
 		mark = "[!!]"
+	case r.Warn:
+		mark = "[warn]"
 	}
 	if r.Detail == "" {
 		return fmt.Sprintf("%s %s", mark, r.Name)

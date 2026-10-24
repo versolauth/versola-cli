@@ -129,6 +129,15 @@ func fillGeneration(gen, bundleDir string, dynamic map[string][]byte) error {
 			return err
 		}
 	}
+	// Only a deployment that publishes a mutual-TLS name has one (see
+	// Config.Public).
+	if b, err := os.ReadFile(filepath.Join(bundleDir, PublicStreamFile)); err == nil {
+		if err := write(PublicStreamFile, b); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("couldn't read the bundle's %s: %w", PublicStreamFile, err)
+	}
 	for rel, b := range dynamic {
 		if err := write(rel, b); err != nil {
 			return err
@@ -363,5 +372,21 @@ func ReloadCurrent(mode string) error {
 // to reload into: such a bundle is configured again, not started.
 func UsesGenerations(bundleDir string) bool {
 	b, err := os.ReadFile(filepath.Join(bundleDir, ComposeFile))
+	// CRLF too: a CLI built from a Windows checkout embeds templates with
+	// CRLF line endings and writes them as they are.
+	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 	return err == nil && bytes.Contains(b, []byte("target: "+GenerationMount+"\n"))
+}
+
+// CurrentFrontsCentral reports whether the configuration nginx runs now (the
+// `current` generation under genDir) fronts central's PORT -- that is, whether
+// central already listens on its moved ports behind it. A deployment from
+// before the front still has central itself on PORT, where nothing else can
+// listen until central has been restarted once.
+func CurrentFrontsCentral(genDir string) bool {
+	if genDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(genDir, CurrentGeneration, strings.TrimPrefix(CentralFile, "proxy/")))
+	return err == nil
 }

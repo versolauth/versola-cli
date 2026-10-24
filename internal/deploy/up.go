@@ -1,8 +1,10 @@
 package deploy
 
 import (
-	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,8 +73,12 @@ func Up(opts UpOptions, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	// vps: APORT/MPORT behind the proxy, slot 1's included (frontAuth).
+	// vps: APORT/MPORT behind the proxy, slot 1's included (frontAuth), and
+	// central's PORT/DPORT (frontCentral).
 	if authReplicas, err = frontAuth(authReplicas, isVps); err != nil {
+		return err
+	}
+	if centralReplicas, err = frontCentral(centralReplicas, isVps); err != nil {
 		return err
 	}
 	fronts, genDir, err := proxyRouting(topo, isVps)
@@ -102,7 +108,7 @@ func Up(opts UpOptions, st *state.State) error {
 		return err
 	}
 	// Slot 1's moved ports, merged over compose.yml (see overridesYAML).
-	if err := writeOverridesFile(dir, authReplicas); err != nil {
+	if err := writeOverridesFile(dir, centralReplicas, authReplicas); err != nil {
 		return err
 	}
 	steps := appStartSteps(authReplicas, edgeReplicas)
@@ -127,7 +133,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// the old containers might still be the ones really serving traffic
 	// (flagged in review on versolauth/versola-cli#7). cmd/bootstrap.go
 	// asks once, before Configure runs at all; cmd/up.go asks again on its
-	// own when Up is run standalone (see ConfirmVpsDeploy's own comment on
+	// own when Up is run standalone (see ConfirmVpsDeployYes's own comment on
 	// why one fixed prompt can't cover both callers).
 
 	// The compose file declares this volume `external: true` (see the
@@ -178,6 +184,20 @@ func Up(opts UpOptions, st *state.State) error {
 		return fmt.Errorf("central never became ready: %w", err)
 	}
 
+	// vps: auth, edge and the admin console's resource reach central through
+	// the proxy's front of its PORT, and auth/edge fail at startup when they
+	// cannot, so the proxy is started now, before them, rather than last. It
+	// routes to auth and edge replicas that are not up yet; what it serves of
+	// Versola is waited for below, once they are.
+	routed := routedConfig(st.ProxyMode, fronts, genDir, centralReplicas, authReplicas, edgeReplicas)
+	proxyStarted := false
+	if routed.Fronts.Central != 0 {
+		if err := startProxyForCentral(composePath, st, routed); err != nil {
+			return err
+		}
+		proxyStarted = true
+	}
+
 	// Named explicitly, not a bare "up -d" ("start everything not already
 	// running under this project") -- openbao is deliberately left out of
 	// that: Configure starts it (or leaves an already-running one alone —
@@ -206,10 +226,15 @@ func Up(opts UpOptions, st *state.State) error {
 
 	// The reverse proxy versola-cli generated at configure time (see
 	// package proxy) -- started last, once what it routes to is ready, so
-	// it never serves traffic to a backend that isn't. Its upstreams follow
-	// the replicas recorded in state, whatever configure or the last
-	// `replica add|remove` wrote.
-	if err := startProxy(composePath, st, routedConfig(st.ProxyMode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
+	// it never serves traffic to a backend that isn't (vps: it was started
+	// before auth and edge, see above, and what is left is to wait for it to
+	// serve them). Its upstreams follow the replicas recorded in state,
+	// whatever configure or the last `replica add|remove` wrote.
+	if proxyStarted {
+		if err := waitProxy(st, routed); err != nil {
+			return err
+		}
+	} else if err := startProxy(composePath, st, routed); err != nil {
 		return err
 	}
 
@@ -233,6 +258,7 @@ func Up(opts UpOptions, st *state.State) error {
 		fmt.Printf("\nVersola %s is running at %s\n", st.Version, authURL)
 		if st.ProxyMode == proxy.ModeExternal {
 			fmt.Printf("It listens on http://127.0.0.1:%d -- your own web server has to forward %s there, keeping the Host header, setting X-Forwarded-For and X-Forwarded-Proto ($proxy_add_x_forwarded_for and $scheme in nginx) and allowing 8m request bodies (client_max_body_size 8m).\n", proxy.ExternalPort, authURL)
+			printExternalPublicNames(os.Stdout, st)
 		}
 		// vps doesn't use a fixed literal password the way local's
 		// "Admin1234!" is — it's a real, standing admin credential Configure
@@ -269,7 +295,7 @@ func Up(opts UpOptions, st *state.State) error {
 	return nil
 }
 
-// ConfirmVpsDeploy asks for an explicit go-ahead before anything touches
+// ConfirmVpsDeployYes asks for an explicit go-ahead before anything touches
 // a real VPS deployment. action is the already-formatted sentence
 // describing what this particular call is actually about to do --
 // configure/migrate/up are separate commands now (see cmd/configure.go,
@@ -280,15 +306,80 @@ func Up(opts UpOptions, st *state.State) error {
 // the whole chain in one prompt; cmd/migrate.go and cmd/up.go each call
 // it again themselves when run standalone, since nothing then guarantees
 // the same process just showed one moments ago.
-func ConfirmVpsDeploy(action string) error {
+//
+// assumeYes is the command's -y/--yes: the action is still printed (so a
+// script's log says what it agreed to) but nothing is read from stdin.
+func ConfirmVpsDeployYes(assumeYes bool, action string) error {
+	return confirmVpsFrom(os.Stdin, assumeYes, action)
+}
+
+func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	fmt.Printf("\nThis will %s.\n", action)
+	if assumeYes {
+		fmt.Println("Proceeding (--yes).")
+		return nil
+	}
 	fmt.Print("Continue? [y/N]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := ReadLine(in)
+	// Only a clean end of input after the answer counts: a read error after
+	// a partial "y" must not read as consent.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("aborted: %w", err)
+	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
 		return fmt.Errorf("aborted")
 	}
 	return nil
+}
+
+const (
+	maxLineLen = 4096
+	// maxDrain bounds how much of an over-long line is thrown away, so an
+	// endless stream without a newline cannot hold the prompt forever.
+	maxDrain = 1 << 20
+)
+
+// ErrLineTooLong is ReadLine's error for a line longer than maxLineLen.
+var ErrLineTooLong = errors.New("input line too long")
+
+// ReadLine reads one line from r a byte at a time, without a buffer. Every
+// prompt used to wrap stdin in its own bufio.Reader, which pulls up to 4 KB
+// from a pipe and is then thrown away: with `printf 'y\ny\n' | { versola
+// configure ...; versola migrate; }` the first process swallowed both answers
+// and the second saw EOF and said "aborted". Reading no further than the
+// newline leaves the rest of the pipe for whoever reads next, in this process
+// or the next one. Neither the newline nor a "\r" before it is returned; a
+// final line without a newline is.
+//
+// A line longer than maxLineLen is cut there and returned with
+// ErrLineTooLong: the answers asked for are a word, and a stream with no
+// newline must not be read into memory until EOF. The rest of that line (up
+// to maxDrain bytes) is read and discarded, because left in the pipe it would
+// become the next prompt's answer.
+func ReadLine(r io.Reader) (string, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				return strings.TrimSuffix(string(line), "\r"), nil
+			}
+			line = append(line, b[0])
+			if len(line) > maxLineLen {
+				for drained := 0; b[0] != '\n' && drained < maxDrain; drained++ {
+					if n, err := r.Read(b); n == 0 && err != nil {
+						break
+					}
+				}
+				return string(line[:maxLineLen]), ErrLineTooLong
+			}
+		}
+		if err != nil {
+			return strings.TrimSuffix(string(line), "\r"), err
+		}
+	}
 }
 
 // CheckUp is what Up refuses on the record alone (see checkRunnable), for a
@@ -346,6 +437,26 @@ func requireCurrentBundle(st *state.State, bundleDir string) error {
 	return nil
 }
 
+// requireCentralMoved is for what routes a front of central's PORT while
+// central itself is not to run (`replica add|remove`): on vps the bundle has
+// to say central listens behind the proxy (overrides.yml, written by up and
+// configure). A bundle that does not is from before central was fronted --
+// its central still holds 8090, which a generation with the front cannot
+// bind (nginx would reload "fine" and never take the port).
+func requireCentralMoved(st *state.State, bundleDir string) error {
+	if st.Target != "vps" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(bundleDir, state.OverridesFile))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("couldn't read %s: %w", state.OverridesFile, err)
+	}
+	if !bytes.Contains(b, []byte("\n  "+CentralService+":\n")) {
+		return fmt.Errorf("central still listens on its own port 8090, not behind the reverse proxy (this deployment predates that): run `versola up` first -- central restarts once, auth and edge keep serving")
+	}
+	return nil
+}
+
 // markRunning records that the stack now runs from this deployment's
 // bundle, which lets the previous one be removed (see
 // state.MarkRunning). Not fatal: the deployment is up either way, and the
@@ -354,4 +465,38 @@ func markRunning() {
 	if err := state.MarkRunning(openbaoBundles()...); err != nil {
 		fmt.Printf("(couldn't record which deployment is running: %v)\n", err)
 	}
+}
+
+// printExternalPublicNames says what the operator's own web server has to do
+// for the public names of a --proxy external deployment: Versola's proxy
+// listens on 127.0.0.1:2821 only and does not see 443.
+func printExternalPublicNames(w io.Writer, st *state.State) {
+	if st.MTLSDomain != "" || st.CentralMTLSDomain != "" {
+		fmt.Fprintf(w, "%s is not served by Versola's proxy in this mode, and it must not be terminated either: your web server has to pass its TLS on port 443 through by SNI (nginx: a stream block with ssl_preread) -- %s -- so the caller's client certificate reaches the service untouched. Limit the connections per client address there too. See the README.\n",
+			strings.Join(nonEmpty(st.MTLSDomain, st.CentralMTLSDomain), " and "), externalStreamTargets(st))
+	}
+	if st.CentralDomain != "" {
+		fmt.Fprintf(w, "%s is not served by Versola's proxy in this mode: your web server has to terminate TLS for it and forward only POST /edge/enroll to central's enrollment listener, 127.0.0.1:%d, rate limited per client address. See the README.\n", st.CentralDomain, proxy.CentralEnrollPort)
+	}
+}
+
+func externalStreamTargets(st *state.State) string {
+	var parts []string
+	if st.MTLSDomain != "" {
+		parts = append(parts, fmt.Sprintf("%s to 127.0.0.1:%d", st.MTLSDomain, proxy.AuthMutualTLSPort))
+	}
+	if st.CentralMTLSDomain != "" {
+		parts = append(parts, fmt.Sprintf("%s to 127.0.0.1:%d", st.CentralMTLSDomain, proxy.CentralMutualTLSPort))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func nonEmpty(ss ...string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

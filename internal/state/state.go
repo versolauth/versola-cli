@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -137,6 +138,40 @@ type State struct {
 	// versolauth/versola-cli#7).
 	AuthURL string `json:"authUrl,omitempty"`
 
+	// CentralURL is how edge reaches central's mutual-TLS listener
+	// (--central-url, or central.<domain> derived from AuthURL), as it was
+	// given to versola-tools; empty for vps deployments configured before
+	// the flag, and for any that has no https domain to derive it from.
+	CentralURL string `json:"centralUrl,omitempty"`
+
+	// MTLSDomain, CentralMTLSDomain and CentralDomain are the public names
+	// (--mtls-domain, --central-mtls-domain, --central-domain) the proxy
+	// publishes beyond AuthURL's: auth's and central's mutual-TLS listeners
+	// and central's enrollment route. Empty: not published, which is what a
+	// record from before they existed means. Recorded so that rollout, which
+	// configures from the record, keeps them, and so that `certs renew` knows
+	// whether a remote edge may exist.
+	MTLSDomain        string `json:"mtlsDomain,omitempty"`
+	CentralMTLSDomain string `json:"centralMtlsDomain,omitempty"`
+	CentralDomain     string `json:"centralDomain,omitempty"`
+
+	// CertLifetimeDays is --cert-lifetime-days: how long the certificates
+	// `mtls-init` writes live. nil: the default (365). 0: unlimited (a
+	// notAfter 100 years away: nothing renews them, and no timer is installed).
+	CertLifetimeDays *int `json:"certLifetimeDays,omitempty"`
+
+	// EstEnabled is --est: auth serves RFC 7030 EST (/.well-known/est/) for
+	// clients registered with estEnrollment. Recorded so that rollout, which
+	// configures from the record, keeps it.
+	EstEnabled bool `json:"estEnabled,omitempty"`
+
+	// ImageRegistry is --registry: the registry prefix the Versola images were
+	// pulled from, when it is not Versola's own (ghcr.io/versolauth). Empty is
+	// the default, which is what every record from before the flag means, so
+	// the layout did not change. A rolling upgrade, and its abort, pull from
+	// the recorded registry only.
+	ImageRegistry string `json:"imageRegistry,omitempty"`
+
 	// ProxyMode is the reverse proxy's mode this deployment was configured
 	// with (proxy.ModeNginx or proxy.ModeExternal for vps, proxy.ModeLocal
 	// for local) -- what `up` waits on and what it tells the operator to do
@@ -198,7 +233,8 @@ type State struct {
 	MountedBundleDirs []string `json:"mountedBundleDirs,omitempty"`
 
 	// Slots records, per scalable service (compose service name of its
-	// first replica: "auth", "edge"), which replica slots are deployed and
+	// first replica: "auth", "edge", and "central" -- which has one replica
+	// but gets a stand-in during a rolling upgrade), which replica slots are deployed and
 	// at which version -- see package topology for what a slot is. Absent
 	// (nil) means one replica in slot 1 at Version, which is what every
 	// deployment made before replicas existed is; ActiveSlots turns that
@@ -281,7 +317,7 @@ func (s *State) RequireCurrent() error {
 }
 
 // MixedVersions explains why the recorded replicas are not one plain
-// deployment of Version -- a replica of auth or edge recorded at another
+// deployment of Version -- a replica of central, auth or edge recorded at another
 // version, or a stand-in slot (Surge) -- or returns "" when they are. That
 // is the state a rolling upgrade leaves while it is under way (or after it
 // was cut off), and only the rolling upgrade can carry it on: `up` and
@@ -289,7 +325,7 @@ func (s *State) RequireCurrent() error {
 // which way the upgrade was going.
 func (s *State) MixedVersions() string {
 	var why []string
-	for _, svc := range []string{"auth", "edge"} {
+	for _, svc := range []string{"central", "auth", "edge"} {
 		var other []string
 		for _, sl := range s.ActiveSlots(svc) {
 			if sl.Version != s.Version {
@@ -394,6 +430,14 @@ type FinalizeOptions struct {
 	BundleDir string
 	AuthURL   string
 	ProxyMode string
+	// CentralURL is the normalized --central-url, "" for none.
+	CentralURL string
+	// MTLSDomain, CentralMTLSDomain, CentralDomain: the public names, "" for none.
+	MTLSDomain, CentralMTLSDomain, CentralDomain string
+	// CertLifetimeDays: see State.CertLifetimeDays.
+	CertLifetimeDays *int
+	// EstEnabled: see State.EstEnabled.
+	EstEnabled bool
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
@@ -402,6 +446,8 @@ type FinalizeOptions struct {
 	// and record; "" for none (a copy left by an earlier deployment is
 	// removed).
 	PostgresCAFile string
+	// ImageRegistry: see State.ImageRegistry.
+	ImageRegistry string
 	// SecretsRevision is the schema revision secrets were settled against,
 	// 0 when the release has no schema.
 	SecretsRevision int
@@ -473,9 +519,17 @@ func Finalize(o FinalizeOptions) error {
 		ConfiguredAt:  time.Now().UTC(),
 		BundleDir:     filepath.Base(o.BundleDir),
 		AuthURL:       o.AuthURL,
-		ProxyMode:     o.ProxyMode,
-		PostgresHost:  o.PostgresHost,
-		PostgresDB:    o.PostgresDB,
+		CentralURL:    o.CentralURL,
+
+		MTLSDomain:        o.MTLSDomain,
+		CentralMTLSDomain: o.CentralMTLSDomain,
+		CentralDomain:     o.CentralDomain,
+		CertLifetimeDays:  o.CertLifetimeDays,
+		EstEnabled:        o.EstEnabled,
+		ProxyMode:         o.ProxyMode,
+		PostgresHost:      o.PostgresHost,
+		PostgresDB:        o.PostgresDB,
+		ImageRegistry:     o.ImageRegistry,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,
 		MigratedAt:      o.MigratedAt,
@@ -809,7 +863,7 @@ func RestorePrevious(bundle string, migratedAt time.Time, keep ...string) error 
 	}
 	prev := s.PreviousVersion
 	slots := map[string][]Slot{}
-	for _, svc := range []string{"auth", "edge"} {
+	for _, svc := range []string{"central", "auth", "edge"} {
 		for _, sl := range s.ActiveSlots(svc) {
 			slots[svc] = append(slots[svc], Slot{N: sl.N, Version: prev})
 		}
@@ -827,6 +881,60 @@ func RestorePrevious(bundle string, migratedAt time.Time, keep ...string) error 
 		return err
 	}
 	pruneBundles(dir, append([]string{bundle}, keep...)...)
+	return nil
+}
+
+// BeginRollback records the start of an abort that goes back by the engine,
+// without configuring the previous version again: bundle, the earlier
+// bundle (it must still be there), becomes the active one, and the record
+// says the rollout is being undone -- Version is what was PreviousVersion
+// and the other way round, RollingBack is set. The replicas that never left
+// the old version already mount that bundle, so the engine leaves them alone
+// and recreates only the ones that moved.
+//
+// Slots keep the versions they are recorded at (the engine corrects a record
+// from the containers), a recorded stand-in stays (it is retired). The
+// bundle that moved replicas mount is kept until they are replaced.
+// migratedAt is recorded as the time of the last migration: an abort never
+// migrates, and the schema is at least where the old version needs it.
+func BeginRollback(bundle string, migratedAt time.Time, keep ...string) error {
+	s, err := Load()
+	if err != nil {
+		return err
+	}
+	if s.PreviousVersion == "" || s.RollingBack {
+		return fmt.Errorf("no rollout to turn round is recorded")
+	}
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, bundle, "compose.yml")); err != nil {
+		return fmt.Errorf("the previous deployment's files (%s) are not there any more: %w", bundle, err)
+	}
+	slots := map[string][]Slot{}
+	for _, svc := range []string{"central", "auth", "edge"} {
+		slots[svc] = s.ActiveSlots(svc)
+	}
+	mounted := []string{bundle}
+	for _, d := range append(append([]string{}, s.MountedBundleDirs...), s.BundleDir) {
+		if d != "" && !slices.Contains(mounted, d) {
+			mounted = append(mounted, d)
+		}
+	}
+	s.Version, s.PreviousVersion, s.RollingBack = s.PreviousVersion, s.Version, true
+	s.BundleDir = bundle
+	s.MountedBundleDirs = mounted
+	s.MigratedAt = &migratedAt
+	s.ConfiguredAt = time.Now().UTC()
+	s.Slots = nil
+	for svc, ss := range slots {
+		s.SetSlots(svc, ss)
+	}
+	if err := s.Save(); err != nil {
+		return err
+	}
+	pruneBundles(dir, append(append([]string{}, mounted...), keep...)...)
 	return nil
 }
 
@@ -854,4 +962,11 @@ func pruneBundles(dir string, keep ...string) {
 			fmt.Printf("(couldn't remove a previous deployment's files at %s: %v — safe to delete by hand)\n", old, err)
 		}
 	}
+}
+
+// CertsUnlimited reports whether the deployment's mutual-TLS certificates were
+// configured with no expiry (--cert-lifetime-days 0): nothing renews them, so
+// there is no timer to install and nothing to warn about.
+func (s *State) CertsUnlimited() bool {
+	return s != nil && s.CertLifetimeDays != nil && *s.CertLifetimeDays == 0
 }

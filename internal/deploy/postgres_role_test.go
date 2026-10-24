@@ -87,7 +87,7 @@ func TestPostgresRoleSQL(t *testing.T) {
 	if create != `CREATE ROLE "we""ird" WITH LOGIN PASSWORD 'pa''ss';` {
 		t.Errorf("create: %s", create)
 	}
-	if alter != `ALTER ROLE "we""ird" WITH PASSWORD 'pa''ss';` {
+	if alter != `ALTER ROLE "we""ird" WITH LOGIN PASSWORD 'pa''ss';` {
 		t.Errorf("alter: %s", alter)
 	}
 }

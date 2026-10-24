@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -11,15 +12,19 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
+var configureYes bool
 var configureAuthURL string
 var configurePostgresHost string
 var configureSetupOpenBao bool
 var configureProxy string
 var configureACMEStaging bool
+var configureCentralURL string
+var configureNoCertsTimer bool
 var configureGenerateMissing []string
 var configureAllowLegacy bool
 var configurePostgresDB string
 var configurePostgresCA string
+var configureRegistry string
 
 var configureCmd = &cobra.Command{
 	Use:   "configure <target> <version>",
@@ -63,6 +68,13 @@ confirms that the named secrets may be generated anyway;
 --allow-legacy-secrets lets a release that has no secret schema be
 configured by the old rule ("anything missing is generated").
 
+On vps nothing is published beyond --auth-url's name unless asked to:
+--mtls-domain, --central-mtls-domain and --central-domain (all optional,
+all remembered) publish auth's and central's mutual-TLS listeners and
+central's enrollment route, for edges in another network and external
+mutual-TLS clients -- see the README, "Public names". Without them every
+mutual-TLS listener answers on this host's loopback only.
+
 On vps, --postgres-db names the database (default: auth) and
 --postgres-ca points at a PEM file with the CA that signed Postgres'
 server certificate, which the services then trust for sslmode=verify-full.
@@ -70,6 +82,19 @@ Both are remembered (the CA file is copied next to the deployment's
 state), so rollout keeps using them and a later configure without the
 flag keeps the stored value; passing a flag again overrides it. They need a versola-tools release that
 understands POSTGRES_DB / POSTGRES_CA_FILE; an older one ignores them.
+
+--registry PREFIX pulls versola-tools, and through it central, auth and
+edge, from PREFIX instead of Versola's own registry (ghcr.io/versolauth),
+for test images pushed elsewhere:
+
+  versola configure local 0.8.0-test1 --registry cr.yandex/crp1a2b3c
+
+Images are PREFIX/versola-tools:<version>, PREFIX/versola-central:<version>
+and so on, so versola-tools has to be pushed there with the same tag and
+built with that tag as its VERSION. It is not a login: run "docker login"
+for the registry first. It is remembered with the deployment, so "versola
+rollout" keeps pulling from it; a later configure without the flag goes
+back to Versola's own registry.
 
 This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a
@@ -80,11 +105,16 @@ than something that happens silently — e.g. deploying onto a server.`,
 }
 
 func init() {
+	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
 	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
+	configureCmd.Flags().StringVar(&configureRegistry, "registry", "", registryUsage)
 	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
+	addPublicFlags(configureCmd)
+	configureCmd.Flags().BoolVar(&configureNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates; refused unless --cert-lifetime-days is unlimited")
 	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
@@ -110,6 +140,11 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
 	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
+	if err != nil {
+		return err
+	}
+
+	registry, err := deploy.ParseRegistry(configureRegistry)
 	if err != nil {
 		return err
 	}
@@ -161,12 +196,17 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// replaced state, if any, is asked about via case 1's own message
 	// instead -- so this is deliberately if/else-if, not two independent
 	// ifs, to avoid a double prompt when both technically apply.
+	//
+	// The second branch passes false for confirmIfVpsState's assumeYes on
+	// purpose, whatever --yes says: it guards the record being REPLACED, and
+	// answering it for a script would leave status/down/uninstall unable to
+	// find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("make Versola %s the deployment this machine tracks for the VPS, replacing its current record (nothing is started or stopped yet)", version)
-		if err := deploy.ConfirmVpsDeploy(action); err != nil {
+		if err := deploy.ConfirmVpsDeployYes(configureYes, action); err != nil {
 			return err
 		}
-	} else if _, err := confirmIfVpsState(func(prevVersion string) string {
+	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
 		return fmt.Sprintf("replace this machine's record of VPS deployment %s (still running) with a %s deployment -- versola status/down/uninstall won't be able to find or manage the VPS containers until you configure vps again", prevVersion, target)
 	}); err != nil && !errors.Is(err, state.ErrOldInstall) {
 		// The state confirmIfVpsState loaded (if any) describes the record
@@ -179,10 +219,31 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// deployments came later. This run replaces it, which is what that
 	// error asks for, so it is not a reason to stop.)
 
+	public, err := publicDomains(cmd, target)
+	if err != nil {
+		return err
+	}
+	days, err := certDays(cmd, target)
+	if err != nil {
+		return err
+	}
+	est, err := estEnabled(cmd, target)
+	if err != nil {
+		return err
+	}
+	if target == "vps" {
+		if err := refuseNoTimerWhenFinite(configureNoCertsTimer, days); err != nil {
+			return err
+		}
+	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging},
-		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy})
-	return err
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
+		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
+	if err != nil {
+		return err
+	}
+	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer || !deploy.IssuesMutualTLSCertificates(version), days != nil && *days == 0)
+	return nil
 }
 
 // rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps
@@ -192,13 +253,17 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range []string{"proxy", "acme-staging", "postgres-db", "postgres-ca"} {
+	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}
 	}
 	return nil
 }
+
+const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and `versola edge add` for a remote edge's bootstrap bundle"
+
+const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, run docker login first"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

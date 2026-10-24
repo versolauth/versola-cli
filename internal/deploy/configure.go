@@ -54,8 +54,12 @@ import (
 // auto-provisioned regardless (its OpenBao is a throwaway container this
 // same CLI owns outright) -- ignored there, the same way authURL/
 // postgresHost are.
-func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions) (ConfigureResult, error) {
-	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, nil)
+//
+// registry is --registry: the prefix the Versola images are pulled from
+// ("" for the default, DefaultRegistry). It is recorded, so that the
+// rolling upgrades that follow keep pulling from the same place.
+func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string) (ConfigureResult, error) {
+	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, registry, nil)
 }
 
 // stagedConfigure is what a rolling upgrade (`versola rollout`) changes about
@@ -64,8 +68,8 @@ func Configure(target, version, authURL, postgresHost string, pg PostgresOptions
 type stagedConfigure struct {
 	// from is the deployment being upgraded, as recorded before this run.
 	from *state.State
-	// surge: the rollout will start a stand-in replica of auth and of edge
-	// in the lowest free slot, so their ports are checked now as well.
+	// surge: the rollout will start a stand-in replica of central, auth and
+	// edge in the lowest free slot, so their ports are checked now as well.
 	surge bool
 	// abort: this prepares the bundle of the version a rollout goes back to
 	// (`versola rollout --abort`): from.PreviousVersion is configured, the
@@ -95,7 +99,7 @@ type stagedConfigure struct {
 // The secrets plan (0f) is applied here, before any container of the new
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
-func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, staged *stagedConfigure) (ConfigureResult, error) {
+func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, staged *stagedConfigure) (ConfigureResult, error) {
 	if target != "local" && target != "vps" {
 		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
 	}
@@ -111,6 +115,14 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 	pg, err := pg.withStored(target).Validate(target)
 	if err != nil {
+		return ConfigureResult{}, err
+	}
+	// A rolling upgrade (and its abort) stays on the registry the deployment
+	// came from: the version it goes back to was pulled from there, and the
+	// same tag in another registry can be another image.
+	if staged != nil {
+		registry = staged.from.ImageRegistry
+	} else if registry, err = ParseRegistry(registry); err != nil {
 		return ConfigureResult{}, err
 	}
 
@@ -138,6 +150,25 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 			return ConfigureResult{}, fmt.Errorf("--acme-staging only applies when Versola's proxy gets the certificate itself: --proxy nginx with an https --auth-url")
 		}
 		authURL = auth.URL
+	}
+	// vps: where edge reaches central's mutual-TLS listener, validated the
+	// same way. "" when nothing was given: gen-env keeps its own default,
+	// the loopback address (a local edge never uses a public name).
+	var public proxy.PublicNames
+	if target == "vps" {
+		central, _, err := proxy.ParseCentralURL(proxyOpts.CentralURL, auth)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		proxyOpts.CentralURL = central.URL
+		// The public names: opt-in, validated against the auth URL and each
+		// other, normalized (lowercase) before they are recorded and handed
+		// to versola-tools, which puts them into the leaf certificates.
+		public, err = proxy.ParsePublicNames(proxyOpts.Public.MTLS, proxyOpts.Public.CentralMTLS, proxyOpts.Public.Enroll, auth)
+		if err != nil {
+			return ConfigureResult{}, err
+		}
+		proxyOpts.Public = PublicDomains{MTLS: public.MTLS, CentralMTLS: public.CentralMTLS, Enroll: public.Enroll}
 	}
 	// local: its proxy is versola-cli's too (proxy.ModeLocal), at the
 	// address versola-tools builds every local issuer and redirect URI on.
@@ -171,7 +202,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 	}
 	if target == "vps" {
-		if err := checkProxyPorts(auth, proxyOpts.Mode); err != nil {
+		if err := checkProxyPorts(auth, proxyOpts.Mode, public); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -183,13 +214,27 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 
 	fmt.Printf("\nPreparing Versola %s...\n", version)
+	if registry != "" {
+		fmt.Printf("Images come from %s, not Versola's own registry (%s).\n", registry, DefaultRegistry)
+	}
+	// configure does not keep the registry of the deployment it replaces (a
+	// tag in another registry can be another image): say when it changes.
+	if staged == nil {
+		if prev, err := state.Load(); err == nil && prev.ImageRegistry != registry {
+			fmt.Printf("Note: the deployment this replaces came from %s; this one comes from %s.\n", registryOrDefault(prev.ImageRegistry), registryOrDefault(registry))
+		}
+	}
 	dir, err := state.Prepare()
 	if err != nil {
 		return ConfigureResult{}, err
 	}
 
 	fmt.Println("Generating configuration (versola-tools)...")
-	if err := pullAndRunTools(dir, ToolsImage(version), target, authURL, postgresHost, pg); err != nil {
+	toolsImage := ToolsImage(registry, version)
+	if err := pullAndRunTools(dir, toolsImage, target, authURL, postgresHost, pg, toolsExtras{Registry: registry, GenEnvArgs: centralGenEnvArgs(proxyOpts.CentralURL), Public: proxyOpts.Public, CertDays: proxyOpts.CertDays, Est: proxyOpts.Est}); err != nil {
+		if problem := registryProblem(err, toolsImage, registry); problem != nil {
+			return ConfigureResult{}, problem
+		}
 		if isManifestUnknown(err) {
 			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
 
@@ -198,6 +243,9 @@ Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
 Check the available versions at https://github.com/orgs/versolauth/packages`, version)
 		}
 		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)
+	}
+	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), registry, version); err != nil {
+		return ConfigureResult{}, err
 	}
 
 	// The candidates versola-tools just wrote (*.generated-secrets.env)
@@ -348,16 +396,21 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		// Stored but configure failed after that: the next configure
 		// sees the password as already stored and won't mention it, so
-		// this is the one chance to show it.
+		// this is the one chance to hand it over.
 		if newPgPassword != "" {
-			printPostgresRoleSetup(dir, newPgPassword)
+			if _, aerr := announcePostgresRole(os.Stdout, dir, target, newPgPassword); aerr != nil {
+				return ConfigureResult{}, errors.Join(err, aerr)
+			}
 		}
 		return ConfigureResult{}, err
 	}
-	// Printed right away rather than at the end: any later step failing
-	// would otherwise swallow it for good (see above).
+	// Right away rather than at the end: any later step failing would
+	// otherwise swallow it for good (see above).
+	var pgRoleScript string
 	if newPgPassword != "" {
-		printPostgresRoleSetup(dir, newPgPassword)
+		if pgRoleScript, err = announcePostgresRole(os.Stdout, dir, target, newPgPassword); err != nil {
+			return ConfigureResult{}, err
+		}
 	}
 
 	// versola-tools writes the compose file under a "fragment" name and
@@ -387,8 +440,9 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, err
 	}
 	slotOne := []state.Slot{{N: 1, Version: version}}
-	authSlots, edgeSlots := slotOne, slotOne
+	centralSlots, authSlots, edgeSlots := slotOne, slotOne, slotOne
 	if staged != nil {
+		centralSlots = staged.from.ActiveSlots(CentralService)
 		authSlots, edgeSlots = staged.from.ActiveSlots(AuthService), staged.from.ActiveSlots(EdgeService)
 	}
 	authReplicas, err := replicasOf(topo, AuthService, authSlots)
@@ -402,8 +456,12 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	centralReplicas, err := replicasOf(topo, CentralService, slotOne)
+	centralReplicas, err := replicasOf(topo, CentralService, centralSlots)
 	if err != nil {
+		return ConfigureResult{}, err
+	}
+	// vps: central's PORT/DPORT behind the proxy (frontCentral).
+	if centralReplicas, err = frontCentral(centralReplicas, target == "vps"); err != nil {
 		return ConfigureResult{}, err
 	}
 	if staged != nil {
@@ -421,42 +479,48 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 	// A rollout's stand-ins are checked too: a port the new version's compose
 	// file puts a stand-in on is found clashing now, before anything changes.
-	checkAuth, checkEdge := authReplicas, edgeReplicas
+	checkCentral, checkAuth, checkEdge := centralReplicas, authReplicas, edgeReplicas
 	if staged != nil && staged.surge {
 		// A stand-in already recorded (an abort of a rollout that started
 		// one) is replaced by the new one, in the lowest free slot once it is
 		// gone: checked without it.
-		baseAuth, baseEdge := authSlots, edgeSlots
-		if n, ok := staged.from.Surge[AuthService]; ok {
-			baseAuth = withoutSlot(authSlots, n)
+		base := func(svc string, slots []state.Slot) []state.Slot {
+			if n, ok := staged.from.Surge[svc]; ok {
+				return withoutSlot(slots, n)
+			}
+			return slots
 		}
-		if n, ok := staged.from.Surge[EdgeService]; ok {
-			baseEdge = withoutSlot(edgeSlots, n)
+		// central gets a stand-in only behind the proxy's front of its PORT
+		// (see centralStandsIn); otherwise it restarts in place.
+		if centralStandsIn(staged.from, RolloutOptions{}) {
+			if checkCentral, err = withStandIn(topo, CentralService, base(CentralService, centralSlots), version, target == "vps"); err != nil {
+				return ConfigureResult{}, err
+			}
 		}
-		if checkAuth, err = withStandIn(topo, AuthService, baseAuth, version, target == "vps"); err != nil {
+		if checkAuth, err = withStandIn(topo, AuthService, base(AuthService, authSlots), version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
-		if checkEdge, err = withStandIn(topo, EdgeService, baseEdge, version, target == "vps"); err != nil {
+		if checkEdge, err = withStandIn(topo, EdgeService, base(EdgeService, edgeSlots), version, target == "vps"); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
-	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), centralReplicas, checkAuth, checkEdge); err != nil {
+	if _, err := checkTopology(topo, target == "vps", reservationsFor(auth, proxyOpts.Mode), checkCentral, checkAuth, checkEdge); err != nil {
 		return ConfigureResult{}, err
 	}
 	fronts, genDir, err := proxyRouting(topo, target == "vps")
 	if err != nil {
 		return ConfigureResult{}, err
 	}
-	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, authReplicas, edgeReplicas)); err != nil {
+	if err := setUpProxy(dir, auth, proxyOpts, routedConfig(proxyOpts.Mode, fronts, genDir, centralReplicas, authReplicas, edgeReplicas)); err != nil {
 		return ConfigureResult{}, err
 	}
 	if staged != nil {
 		// What `up` writes before it starts anything, written now: the
 		// rollout starts containers from this bundle one at a time.
-		if err := writeReplicasFile(dir, filepath.Base(composePath), authReplicas, edgeReplicas); err != nil {
+		if err := writeReplicasFile(dir, filepath.Base(composePath), centralReplicas, authReplicas, edgeReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
-		if err := writeOverridesFile(dir, authReplicas); err != nil {
+		if err := writeOverridesFile(dir, centralReplicas, authReplicas); err != nil {
 			return ConfigureResult{}, err
 		}
 	}
@@ -469,12 +533,13 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
-		AuthURL: authURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
-		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile,
+		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays, EstEnabled: proxyOpts.Est,
+		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile, ImageRegistry: registry,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
 	}
 	if staged != nil {
-		fin.Slots = map[string][]state.Slot{AuthService: authSlots, EdgeService: edgeSlots}
+		fin.Slots = map[string][]state.Slot{CentralService: centralSlots, AuthService: authSlots, EdgeService: edgeSlots}
 		fin.PreviousVersion = staged.from.Version
 		if staged.abort {
 			fin.RollingBack = true
@@ -490,5 +555,5 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 
-	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != ""}, nil
+	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != "", PostgresRoleScript: pgRoleScript}, nil
 }

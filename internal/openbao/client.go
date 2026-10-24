@@ -72,6 +72,11 @@ func (c *Client) Login(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		// Deliberately not including reqBody in this error — it holds
 		// secretID.
+		if sealedResponse(resp.StatusCode, body) {
+			// Wrapped so callers can tell "sealed" from other failures;
+			// EnsureUnsealed is what normally keeps this from happening.
+			return fmt.Errorf("OpenBao login failed (%s): %s: %w", resp.Status, string(body), ErrSealed)
+		}
 		return fmt.Errorf("OpenBao login failed (%s): %s", resp.Status, string(body))
 	}
 

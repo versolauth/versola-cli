@@ -877,16 +877,27 @@ func fronted(t *testing.T, auth []replica) []replica {
 	return out
 }
 
+// frontedCentral is central's replicas with PORT/DPORT behind the proxy, as
+// up and configure have them on vps.
+func frontedCentral(t *testing.T, central []replica) []replica {
+	t.Helper()
+	out, err := frontCentral(central, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 // What up and configure both ask: ports, then readiness URLs, by service.
 func TestCheckTopology(t *testing.T) {
 	topo := testTopology(t)
 	c, a, e := replicasFor(t, topo)
-	urls, err := checkTopology(topo, true, nil, c, fronted(t, a), e)
+	urls, err := checkTopology(topo, true, nil, frontedCentral(t, c), fronted(t, a), e)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"central": "http://localhost:8091/readiness",
+		"central": "http://localhost:28091/readiness",
 		"auth":    "http://localhost:8081/readiness",
 		"edge":    "http://localhost:8096/readiness",
 	}
@@ -938,7 +949,7 @@ func TestCheckTopologyReservesOtherServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	c, a, e = replicasFor(t, topo3)
-	if _, err := checkTopology(topo3, true, nil, c, fronted(t, a), e); err != nil {
+	if _, err := checkTopology(topo3, true, nil, frontedCentral(t, c), fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 }
@@ -958,7 +969,7 @@ func TestCheckTopologyRefusesHostNetworkOnLocal(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "auth has `network_mode: host`") {
 		t.Errorf("local: got %v", err)
 	}
-	if _, err := checkTopology(topo, true, nil, c, fronted(t, a), e); err != nil {
+	if _, err := checkTopology(topo, true, nil, frontedCentral(t, c), fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 }
@@ -1023,7 +1034,7 @@ func TestCheckTopologyOnRealComposeOutput(t *testing.T) {
 
 	vps := load("compose-vps.json")
 	c, a, e = replicasFor(t, vps)
-	if _, err := checkTopology(vps, true, nil, c, fronted(t, a), e); err != nil {
+	if _, err := checkTopology(vps, true, nil, frontedCentral(t, c), fronted(t, a), e); err != nil {
 		t.Errorf("vps: %v", err)
 	}
 	// The same compose file is no local one: its services are on the host.

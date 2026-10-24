@@ -54,3 +54,16 @@ upstream auth_additional {
     keepalive 32;
 }
 {{- end }}
+{{- if .CentralFronted }}
+
+# vps: central's PORT on every central replica, for the server in central.conf.
+# auth, edge and the admin console's resource reach central at
+# 127.0.0.1:{{ .CentralListen }}, wherever its replicas listen.
+upstream central_backend {
+{{- range .CentralUpstreams }}
+    server {{ . }} max_fails=3 fail_timeout=10s;
+{{- end }}
+    least_conn;
+    keepalive 32;
+}
+{{- end }}

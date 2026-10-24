@@ -75,6 +75,16 @@ jobs:
       - name: Generate checksums
         run: cd dist && sha256sum versola-* > checksums.txt && cat checksums.txt
 
+      # The binaries are published as bare files, not archives, so nothing
+      # carries the license along with them. Apache-2.0 section 4(a) requires
+      # giving recipients a copy of the License, so it goes up as its own
+      # release asset. The checksums above only cover versola-*, so this file
+      # is deliberately not listed in checksums.txt (the install scripts
+      # never download it). cp fails if LICENSE is missing, which stops a
+      # release from being published without it.
+      - name: Include license
+        run: cp LICENSE dist/LICENSE
+
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:

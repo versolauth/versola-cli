@@ -47,10 +47,10 @@ if it isn't, the script prints the exact line to add to your shell
 profile. To pin a specific version instead of the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.2.10
+curl -fsSL https://raw.githubusercontent.com/versolauth/versola-cli/main/install.sh | sh -s 0.3.2
 ```
 ```powershell
-$env:VERSOLA_VERSION = "0.2.10"
+$env:VERSOLA_VERSION = "0.3.2"
 iwr https://raw.githubusercontent.com/versolauth/versola-cli/main/install.ps1 -useb | iex
 ```
 
@@ -184,8 +184,9 @@ downloads anything itself.
 
 (`bootstrap vps <version>` does the same on a server, with the flags of
 `configure vps` below; it asks for confirmation first, and on a first
-install it stops before `migrate` once it has printed the SQL for the
-Postgres role's password.)
+install it stops before `migrate` -- with a non-zero exit code -- once it has
+written the SQL that sets the Postgres role's password (see Secrets below);
+run that SQL, then `versola migrate` and `versola up`.)
 
 Deploys a specific released version of Versola locally: pulls the
 matching `versola-tools` image to generate config, then brings up
@@ -551,9 +552,10 @@ serves the admin console at `/central/admin/`.
   `--postgres-host 127.0.0.1:5432` TLS is not verified, but with any other
   host name -- even one that resolves to this very machine -- the name must be in the certificate's subject alternative names,
   and a self-signed or private CA must be given with `--postgres-ca`.
-  `configure` prints the `CREATE ROLE` / `ALTER ROLE` statements for the
-  role's password on a first install: run `ALTER ROLE` **before** `migrate`,
-  or `migrate` fails with `password authentication failed`.
+  On a first install `configure` writes the SQL that creates Versola's role
+  or sets its password to `~/.versola/openbao/vps-postgres-role.sql` (see
+  Secrets above): run it **before** `migrate`, or `migrate` fails with
+  `password authentication failed`.
 
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but
@@ -822,14 +824,16 @@ versola replica remove edge
   lists them.
 - Each replica is a whole JVM (sized at about 850-880 MiB), with its own
   Postgres connection pool (10 connections; edge one more for LISTEN).
-  `replica add` checks ports, that central runs and the Docker Compose
-  version (2.24 or newer), **not** memory or Postgres connections: with
+  `replica add` checks ports, that central runs, the Docker Compose
+  version (2.24 or newer) and -- on `vps` -- that Postgres can take the new
+  pools (the same check as `rollout`'s, see below), **not** memory: with
   Postgres' default `max_connections = 100`, a handful of extra replicas is
   the limit.
-- Needs a running deployment (`versola up`) and is refused in the middle of
-  a rolling upgrade. While a service has more than one replica, `configure`
-  refuses (remove the extra ones first) -- to move such a deployment to
-  another version, use `rollout`.
+- Needs a running deployment (`versola up`; on `vps` one whose central is
+  already behind the reverse proxy -- an older deployment gets there with one
+  `versola up`) and is refused in the middle of a rolling upgrade. While a
+  service has more than one replica, `configure` refuses (remove the extra
+  ones first) -- to move such a deployment to another version, use `rollout`.
 
 ### `rollout <version>` / `rollout --abort` (vps)
 
@@ -1255,6 +1259,7 @@ internal/proxy/         the reverse proxy's generated nginx config (local, vps n
 internal/topology/      ports and slots read from the compose file (docker compose config)
 internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
 internal/docker/        thin wrappers around the docker CLI
+internal/fsutil/        atomic file writes
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 e2e/rollout/            manual end-to-end run of rollout with stand-in images (not in CI)

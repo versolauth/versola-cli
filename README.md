@@ -502,6 +502,10 @@ stops the container from starting). Nothing in this mode is done by hand:
   earlier deployment and this `configure` generated a new password (a new
   OpenBao), it says so and how to give the role the new one: the database
   keeps the password it was created with.
+- **Where the data is** is in `versola status`: the volume
+  `versola-postgres-data-vps` and where Docker keeps it on the server
+  (`Postgres: in a container of this deployment, ...; data in the Docker volume ...`).
+  For your own Postgres it says whose it is.
 - **Starting.** `up` starts Postgres first and waits for its healthcheck,
   then central, auth and edge. Compose recreates the container when the new
   deployment's files are in another directory, as after every `configure`:

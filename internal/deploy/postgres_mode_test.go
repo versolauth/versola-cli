@@ -182,6 +182,31 @@ func TestRefuseBundledDBChange(t *testing.T) {
 	}
 }
 
+func TestPostgresSummary(t *testing.T) {
+	bundled := &state.State{Target: "vps", PostgresMode: PostgresModeBundled, PostgresHost: BundledPostgresHost}
+	got := PostgresSummary(bundled, "/var/lib/docker/volumes/versola-postgres-data-vps/_data")
+	for _, want := range []string{"in a container", BundledPostgresHost, PostgresVolumeName(), "/var/lib/docker/volumes/versola-postgres-data-vps/_data"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the summary does not say %q: %s", want, got)
+		}
+	}
+	if got := PostgresSummary(bundled, ""); !strings.Contains(got, PostgresVolumeName()) || strings.Contains(got, "on this server") {
+		t.Errorf("without a mountpoint it names the volume only: %s", got)
+	}
+	if got := PostgresSummary(&state.State{Target: "vps", PostgresHost: "db.example.com:5432"}, ""); got != "Postgres: your own, at db.example.com:5432" {
+		t.Errorf("external: %q", got)
+	}
+	if got := PostgresSummary(&state.State{Target: "vps"}, ""); got != "" {
+		t.Errorf("a record without a host says nothing: %q", got)
+	}
+	if got := PostgresSummary(&state.State{Target: "local"}, ""); got != "" {
+		t.Errorf("local says nothing: %q", got)
+	}
+	if got := PostgresSummary(nil, ""); got != "" {
+		t.Errorf("no record says nothing: %q", got)
+	}
+}
+
 func TestForgottenPostgresPasswordNote(t *testing.T) {
 	note := forgottenPostgresPasswordNote("versola_app", "/home/u/.versola/active")
 	for _, want := range []string{PostgresVolumeName(), "versola_app", "versola-postgres-vps", "auth.secrets.env"} {

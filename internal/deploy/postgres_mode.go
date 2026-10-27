@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -168,6 +169,40 @@ func writePostgresSecretsEnv(dir string) error {
 		return fmt.Errorf("auth.secrets.env has no POSTGRES_PASSWORD, which the Postgres container is created with -- this release's secrets schema does not carry one")
 	}
 	return writeDotenv(filepath.Join(dir, postgresSecretsFile), map[string]string{"POSTGRES_PASSWORD": password})
+}
+
+// PostgresSummary is the line `status` prints about the deployment's
+// Postgres, "" when there is nothing to say (local, whose Postgres is a
+// service of its own compose file). For the deployment's own Postgres it says
+// where the data is: in a Docker volume on this server, outside the container,
+// which is what survives `down`, `uninstall` and a redeploy. mountpoint is
+// where Docker keeps that volume on the host ("" when it could not be asked).
+func PostgresSummary(st *state.State, mountpoint string) string {
+	if st == nil || st.Target != "vps" {
+		return ""
+	}
+	if st.PostgresMode != PostgresModeBundled {
+		if st.PostgresHost == "" {
+			return ""
+		}
+		return fmt.Sprintf("Postgres: your own, at %s", st.PostgresHost)
+	}
+	line := fmt.Sprintf("Postgres: in a container of this deployment, on %s; data in the Docker volume %s", BundledPostgresHost, PostgresVolumeName())
+	if mountpoint != "" {
+		line += " (on this server: " + mountpoint + ")"
+	}
+	return line
+}
+
+// PostgresDataMountpoint asks Docker where the bundled Postgres's data volume
+// lives on the host. "" when Docker cannot say (it is not running, the volume
+// does not exist): the summary then names the volume only.
+func PostgresDataMountpoint() string {
+	out, err := docker.Output("volume", "inspect", "--format", "{{.Mountpoint}}", bundledPostgresVolume)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // bundledPostgresRunning reports whether the deployment's own Postgres

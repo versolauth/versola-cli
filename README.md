@@ -231,8 +231,10 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
-  and accepts `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
+  it also needs `--auth-url` (see `bootstrap --help`) and accepts
+  `--postgres-host` (your own Postgres; without it, Postgres runs in a
+  container of the deployment, see "Postgres on vps"),
+  `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
   `--central-mtls-domain` and `--central-domain` (see "Public names").
   `--registry <prefix>` (both targets) pulls the images from another
   registry, see "Images from another registry".
@@ -352,7 +354,9 @@ Secret **values are never printed** by `configure`, `bootstrap`, `rollout`, or
 - OpenBao's own AppRole `role-id`/`secret-id`: `configure` prints the path,
   `~/.versola/openbao/<target>.json` (readable only by you).
 - The Postgres password generated on the first `configure` against a new
-  OpenBao: `configure` writes the SQL that sets it on Versola's role to
+  OpenBao, when the Postgres is your own (with the one in a container there
+  is nothing to run, see "Postgres on vps"): `configure` writes the SQL that
+  sets it on Versola's role to
   `~/.versola/openbao/<target>-postgres-role.sql` (readable only by you; it
   creates the role if it doesn't exist and sets the password and allows login if it does)
   and prints the command to run it:
@@ -451,7 +455,8 @@ one may be lost, not new), so the CLI refuses unless you pass this flag.
 This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
 added the schema revision; layout 3 the Postgres host and the records a
 rolling upgrade needs; layout 4 the Postgres database name and CA, from
-`--postgres-db` and `--postgres-ca`). It reads the layouts older CLIs wrote,
+`--postgres-db` and `--postgres-ca`; a deployment that runs its own Postgres
+also records `postgresMode`, an optional key that changes no layout). It reads the layouts older CLIs wrote,
 but an older CLI cannot read layout 4 and stops with a "newer schema" error: after the
 first command that saves state with this CLI, do not go back to an older one
 on the same machine.
@@ -470,6 +475,60 @@ deployments of the first versola-cli releases) can't be read at all, so
 `status`, `down`, `migrate` and `uninstall` stop the same way; stop their
 containers with `docker compose -f ~/.versola/active/compose.yml down`
 and remove `~/.versola/active` by hand, or configure again.
+
+### Postgres on vps
+
+Without `--postgres-host`, `configure vps` makes Postgres a service of the
+deployment: a `postgres` container (the image `versola-tools` pins) on the
+host network, listening on `127.0.0.1:5432` only, so port 5432 has to be free
+on the server (`configure` checks it; a Postgres already listening there
+stops the container from starting). Nothing in this mode is done by hand:
+
+- **No database step.** The container's first start, with an empty data
+  directory, creates the role (the user in the generated configs), the
+  database (`--postgres-db`, default `auth`) and the schemas `auth`,
+  `central` and `edge`, from the password `configure` stored in OpenBao.
+  `bootstrap vps` therefore does not stop before `migrate`. A later start
+  finds the data directory and initialises nothing.
+- **The password** reaches the container in `postgres.secrets.env` (mode
+  0600, in the deployment's directory), which holds `POSTGRES_PASSWORD` and
+  nothing else of auth's secrets. Docker keeps it in the container's
+  configuration, so `docker inspect` shows it to whoever can use Docker on
+  the server.
+- **The data** is in the Docker volume `versola-postgres-data-vps` on the
+  server, declared `external`, like OpenBao's: `down`, `down --volumes`,
+  `uninstall` and a redeploy leave it alone, and `configure` and `up`
+  create it if it is missing. If the volume already holds a Postgres from an
+  earlier deployment and this `configure` generated a new password (a new
+  OpenBao), it says so and how to give the role the new one: the database
+  keeps the password it was created with.
+- **Starting.** `up` starts Postgres first and waits for its healthcheck,
+  then central, auth and edge. Compose recreates the container when the new
+  deployment's files are in another directory, as after every `configure`:
+  the database restarts for a moment (the data is in the volume, untouched),
+  in the same short stop as the services' own. A rolling upgrade never
+  recreates it. A release that moves the pinned image to another PostgreSQL
+  major version needs a dump and a restore, which nothing here does.
+- **The choice is remembered.** `configure` run again without
+  `--postgres-host` keeps the Postgres it chose the first time: the
+  container, or the external one at its recorded host (never a new empty
+  database over a deployment that used one of its own). Passing
+  `--postgres-host` to a deployment that runs its own is refused: moving the
+  data is a backup and a restore, which `configure` does not do. A rolling
+  upgrade keeps the mode. If the record of the current deployment can't be
+  read, `configure` without `--postgres-host` refuses instead of guessing.
+- **The database name is fixed by the first start.** `--postgres-db` can
+  not be changed afterwards (a dump and a restore, not a configure's job).
+- **Not combined with `--postgres-ca`**: the container speaks no TLS, on
+  loopback only (the services connect with `sslmode=disable`).
+- **It needs a `versola-tools` release that can run it.** An older one
+  ignores the mode and writes a compose file without the service; `configure`
+  then refuses before anything is started and says to use a newer release or
+  `--postgres-host`.
+
+Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats`/`backup`
+for the container, `doctor`'s memory figures with it, and `postgres init`
+for a Postgres of your own.
 
 ### Deploying to a VPS: the reverse proxy
 
@@ -494,8 +553,12 @@ serves the admin console at `/central/admin/`.
   - `--auth-url` exactly `https://<domain>`: no port, path or IP address.
 
   ```
+  versola bootstrap vps 0.6.0 --auth-url https://id.example.com
   versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   ```
+
+  The first runs Postgres in a container of the deployment (see "Postgres on
+  vps"); the second uses a Postgres of your own, here the server's native one.
 
   Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
   picks the database (default `auth`) and `--postgres-ca <file>` is a PEM
@@ -1093,8 +1156,9 @@ its Postgres volume, removes the `versola-*` images that were pulled, and
 clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
 to skip that.
 
-On a `vps` deployment, OpenBao's data volume and the TLS certificate
-volume (`versola-acme-vps`) are left in place; `uninstall` prints the
+On a `vps` deployment, OpenBao's data volume, the TLS certificate
+volume (`versola-acme-vps`) and, when Postgres runs in a container, its data
+volume (`versola-postgres-data-vps`) are left in place; `uninstall` prints the
 `docker volume rm` commands if you really mean to discard them.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's

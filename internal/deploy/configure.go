@@ -110,10 +110,30 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		// remembering to check first.
 		return ConfigureResult{}, fmt.Errorf("authURL is required for vps deployments")
 	}
-	if target == "vps" && postgresHost == "" {
-		return ConfigureResult{}, fmt.Errorf("postgresHost is required for vps deployments")
+	// vps: which Postgres -- one in a container (no --postgres-host, a
+	// deployment that has none yet) or the one --postgres-host names. See
+	// resolvePostgres; postgresHost is the address the services reach it at.
+	var stored *state.State
+	if staged != nil {
+		stored = staged.from
+	} else if target == "vps" {
+		var loadErr error
+		stored, loadErr = storedVps()
+		if loadErr != nil && postgresHost == "" {
+			return ConfigureResult{}, fmt.Errorf("the record of the current deployment can't be read (%v), so configure can't tell whether it runs its own Postgres. Fix it, or give --postgres-host to use a Postgres of your own", loadErr)
+		}
 	}
-	pg, err := pg.withStored(target).Validate(target)
+	pgMode, postgresHost, err := resolvePostgres(target, postgresHost, stored, staged)
+	if err != nil {
+		return ConfigureResult{}, err
+	}
+	if staged == nil {
+		if err := refuseBundledDBChange(stored, pg.DB); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
+	pg.Mode = pgMode
+	pg, err = pg.withStored(target).Validate(target)
 	if err != nil {
 		return ConfigureResult{}, err
 	}
@@ -205,6 +225,16 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		if err := checkProxyPorts(auth, proxyOpts.Mode, public); err != nil {
 			return ConfigureResult{}, err
 		}
+		if pg.Mode == PostgresModeBundled {
+			fmt.Printf("Postgres: runs in a container of this deployment, on %s (data in the Docker volume %s)\n", BundledPostgresHost, PostgresVolumeName())
+			r := checkBundledPostgresPort()
+			fmt.Println(r.String())
+			if !r.OK {
+				return ConfigureResult{}, fmt.Errorf("prerequisite check failed -- run `versola doctor` for details")
+			}
+		} else {
+			fmt.Printf("Postgres: yours, at %s\n", postgresHost)
+		}
 	}
 
 	// A state.json from a newer versola is found before anything is pulled
@@ -247,6 +277,11 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), registry, version); err != nil {
 		return ConfigureResult{}, err
 	}
+	if pg.Mode == PostgresModeBundled {
+		if err := requireBundledPostgres(filepath.Join(dir, "compose.fragment.yml"), version, staged != nil); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
 
 	// The candidates versola-tools just wrote (*.generated-secrets.env)
 	// can become real, live secret values the first time resolveSecrets
@@ -279,6 +314,16 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	fragmentPath := filepath.Join(dir, "compose.fragment.yml")
 	if err := docker.Run("volume", "create", OpenbaoVolumeName(target)); err != nil {
 		return ConfigureResult{}, fmt.Errorf("couldn't create the openbao-file volume: %w", err)
+	}
+	// The bundled Postgres's data volume is external too, for the same reason:
+	// it must outlive this bundle directory and `down --volumes`. Whether it
+	// was there before is asked now, for the note after resolveSecrets; it is
+	// created after that, so that a configure which fails before the secrets
+	// are stored does not leave an empty volume behind that the next run would
+	// take for the data of an earlier Postgres.
+	pgDataExisted := false
+	if pg.Mode == PostgresModeBundled {
+		pgDataExisted = bundledPostgresDataExists()
 	}
 
 	// A previous configure's compose project can still have openbao
@@ -397,17 +442,39 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		// Stored but configure failed after that: the next configure
 		// sees the password as already stored and won't mention it, so
 		// this is the one chance to hand it over.
-		if newPgPassword != "" {
+		if newPgPassword != "" && pg.Mode != PostgresModeBundled {
 			if _, aerr := announcePostgresRole(os.Stdout, dir, target, newPgPassword); aerr != nil {
 				return ConfigureResult{}, errors.Join(err, aerr)
 			}
+		}
+		// The password is stored by now: the next configure sees it as already
+		// there and says nothing, so this is the one time to say it.
+		if pg.Mode == PostgresModeBundled && pgDataExisted && newPgPassword != "" {
+			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir), dir))
 		}
 		return ConfigureResult{}, err
 	}
 	// Right away rather than at the end: any later step failing would
 	// otherwise swallow it for good (see above).
+	// A Postgres in a container needs no SQL from the operator: it creates the
+	// role with this password the first time it starts (postgres.secrets.env).
 	var pgRoleScript string
-	if newPgPassword != "" {
+	// The data of an earlier Postgres is in the volume and has the old password:
+	// like a role still to be set up, nothing can connect until the operator
+	// acts, so bootstrap stops before migrate (with no script to point at).
+	pgPasswordMismatch := false
+	if pg.Mode == PostgresModeBundled {
+		if err := writePostgresSecretsEnv(dir); err != nil {
+			return ConfigureResult{}, err
+		}
+		if err := ensureBundledPostgresVolume(); err != nil {
+			return ConfigureResult{}, err
+		}
+		if pgDataExisted && newPgPassword != "" {
+			pgPasswordMismatch = true
+			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir), dir))
+		}
+	} else if newPgPassword != "" {
 		if pgRoleScript, err = announcePostgresRole(os.Stdout, dir, target, newPgPassword); err != nil {
 			return ConfigureResult{}, err
 		}
@@ -533,7 +600,7 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 	fin := state.FinalizeOptions{
 		Target: target, Version: version, BundleDir: dir,
-		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres,
+		AuthURL: authURL, CentralURL: proxyOpts.CentralURL, ProxyMode: proxyOpts.Mode, PostgresHost: recordedPostgres, PostgresMode: pg.Mode,
 		MTLSDomain: proxyOpts.Public.MTLS, CentralMTLSDomain: proxyOpts.Public.CentralMTLS, CentralDomain: proxyOpts.Public.Enroll, CertLifetimeDays: proxyOpts.CertDays, EstEnabled: proxyOpts.Est,
 		PostgresDB: pg.DB, PostgresCAFile: pg.CAFile, ImageRegistry: registry,
 		SecretsRevision: secretsOut.Revision, Keep: openbaoBundles(),
@@ -555,5 +622,5 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 		return ConfigureResult{}, fmt.Errorf("couldn't record this deployment: %w", err)
 	}
 
-	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: newPgPassword != "", PostgresRoleScript: pgRoleScript}, nil
+	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: (newPgPassword != "" && pg.Mode != PostgresModeBundled) || pgPasswordMismatch, PostgresRoleScript: pgRoleScript}, nil
 }

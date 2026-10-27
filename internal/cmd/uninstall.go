@@ -68,9 +68,13 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	// same way ComposeFile already treats them internally: no state means
 	// nothing to know a target for, not a reason to fail uninstall itself.
 	var target, registry string
+	// Postgres runs in a container of the deployment (vps): its data volume is
+	// external, so the `down --volumes` below leaves it, and this says so.
+	pgInContainer := false
 	if st, loadErr := state.Load(); loadErr == nil {
 		target = st.Target
 		registry = st.ImageRegistry
+		pgInContainer = st.PostgresMode == deploy.PostgresModeBundled
 	}
 
 	// If the daemon isn't reachable at all, there's nothing "docker compose
@@ -208,6 +212,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 			volumeName := deploy.OpenbaoVolumeName(target)
 			fmt.Printf("Leaving OpenBao's data volume in place (vps target — remove it yourself with `docker volume rm %s` if you really mean to discard it).\n", volumeName)
 			fmt.Printf("Leaving the TLS certificate volume in place too, if there is one (reusing it avoids Let's Encrypt's rate limits on a redeploy — `docker volume rm %s` to discard it).\n", proxy.ACMEVolume)
+			if pgInContainer {
+				fmt.Printf("Leaving Postgres' data volume in place too: it is the database (`docker volume rm %s` discards it for good, so take a backup first if you may need it).\n", deploy.PostgresVolumeName())
+			}
 		}
 	} else if deployed {
 		fmt.Println("Docker isn't reachable — skipping docker compose down, and leaving ~/.versola in place so it can still be stopped properly once Docker's reachable again.")

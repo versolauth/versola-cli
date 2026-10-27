@@ -23,13 +23,18 @@ type PostgresOptions struct {
 	// CAFile is --postgres-ca: a PEM file with the CA certificate(s)
 	// that signed Postgres' server certificate. "" means none.
 	CAFile string
+	// Mode is PostgresModeBundled when the deployment runs its own Postgres
+	// in a container, "" for an external one. Not a flag: it is decided from
+	// --postgres-host and the recorded deployment (resolvePostgres), and
+	// recorded, so that a rolling upgrade generates the same bundle again.
+	Mode string
 }
 
 var postgresDBPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // postgresOptionsOf returns the options recorded in a deployment's state.
 func postgresOptionsOf(st *state.State) PostgresOptions {
-	return PostgresOptions{DB: st.PostgresDB, CAFile: st.PostgresCAPath()}
+	return PostgresOptions{DB: st.PostgresDB, CAFile: st.PostgresCAPath(), Mode: st.PostgresMode}
 }
 
 // withStored fills what the flags left empty from the recorded vps
@@ -51,6 +56,9 @@ func (o PostgresOptions) withStored(target string) PostgresOptions {
 	if o.CAFile == "" {
 		o.CAFile = stored.CAFile
 	}
+	if o.Mode == "" {
+		o.Mode = stored.Mode
+	}
 	return o
 }
 
@@ -60,6 +68,12 @@ func (o PostgresOptions) withStored(target string) PostgresOptions {
 func (o PostgresOptions) Validate(target string) (PostgresOptions, error) {
 	if o == (PostgresOptions{}) {
 		return o, nil
+	}
+	if o.Mode != "" && o.Mode != PostgresModeBundled {
+		return o, fmt.Errorf("unknown Postgres mode %q", o.Mode)
+	}
+	if o.Mode == PostgresModeBundled && o.CAFile != "" {
+		return o, fmt.Errorf("--postgres-ca cannot be combined with the Postgres that runs in a container: it speaks no TLS, on loopback only")
 	}
 	if target != "vps" {
 		if o.DB != "" {
@@ -101,6 +115,9 @@ func (o PostgresOptions) Validate(target string) (PostgresOptions, error) {
 // for the CA file. Nothing for unset options.
 func (o PostgresOptions) toolsArgs() []string {
 	var args []string
+	if o.Mode == PostgresModeBundled {
+		args = append(args, "-e", "POSTGRES_MODE="+PostgresModeBundled)
+	}
 	if o.DB != "" {
 		args = append(args, "-e", "POSTGRES_DB="+o.DB)
 	}

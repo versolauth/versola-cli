@@ -57,7 +57,8 @@ type MigrateOptions struct {
 	// noDeps runs the migrate container with --no-deps: a rollout's dry run
 	// runs it from a temporary directory under the live project's name, where
 	// starting a dependency would recreate a live container from files that
-	// are about to be deleted.
+	// are about to be deleted. Migrate sets it too for a running Postgres of
+	// the deployment's own, see there.
 	noDeps bool
 }
 
@@ -80,6 +81,16 @@ func Migrate(st *state.State, opts MigrateOptions) error {
 	}
 
 	if hasMigrate {
+		// A Postgres of the deployment's own that is already running is left
+		// alone: as a dependency of `migrate`, Compose would recreate it when
+		// its configuration differs in the new bundle (the path of its
+		// first-start script always does), which restarts the database under
+		// the services that are still serving -- a rolling upgrade's
+		// migration step. Not running (a first bootstrap, after `down`), it is
+		// started and waited for through that dependency, as before.
+		if st.PostgresMode == PostgresModeBundled && !opts.noDeps && bundledPostgresRunning() {
+			opts.noDeps = true
+		}
 		if err := migrateViaService(composePath, opts); err != nil {
 			return err
 		}

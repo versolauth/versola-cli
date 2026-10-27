@@ -170,6 +170,13 @@ func writePostgresSecretsEnv(dir string) error {
 	return writeDotenv(filepath.Join(dir, postgresSecretsFile), map[string]string{"POSTGRES_PASSWORD": password})
 }
 
+// bundledPostgresRunning reports whether the deployment's own Postgres
+// container is running. An answer Docker cannot give counts as no.
+func bundledPostgresRunning() bool {
+	running, err := docker.IsRunning(bundledPostgresContainer)
+	return err == nil && running
+}
+
 // bundledPostgresDataExists reports whether the data volume is already there:
 // then a Postgres initialised earlier may be in it, with the password it was
 // created with.
@@ -193,7 +200,7 @@ func ensureBundledPostgresVolume() error {
 // listening there stops it from starting, and Docker would then restart it
 // in a loop. The deployment's own container holding the port is not a conflict.
 func checkBundledPostgresPort() checks.Result {
-	if running, err := docker.IsRunning(bundledPostgresContainer); err == nil && running {
+	if bundledPostgresRunning() {
 		return checks.Result{Name: fmt.Sprintf("Port %d free", bundledPostgresPort), OK: true, Detail: "held by this deployment's own Postgres"}
 	}
 	r := checks.PortFree(bundledPostgresPort, bundledPostgresContainer)

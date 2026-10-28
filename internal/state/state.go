@@ -192,6 +192,14 @@ type State struct {
 	// records written before layout 4.
 	PostgresDB string `json:"postgresDb,omitempty"`
 
+	// PostgresMode is "bundled" when the deployment runs its own Postgres as a
+	// container of the compose file (vps only), "" for an external one (the
+	// server's own, a managed one) and for local. PostgresHost is then
+	// 127.0.0.1:5432, so everything that reads it keeps working. Not a layout
+	// bump: an older CLI ignores the field and sees an external Postgres on
+	// loopback, which is what it reaches the container as.
+	PostgresMode string `json:"postgresMode,omitempty"`
+
 	// PostgresCA is the name, inside Dir(), of the copy of --postgres-ca's
 	// file (PostgresCAFileName), or empty when there is none. See
 	// PostgresCAPath.
@@ -442,6 +450,8 @@ type FinalizeOptions struct {
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
 	PostgresDB string
+	// PostgresMode: see State.PostgresMode.
+	PostgresMode string
 	// PostgresCAFile is a PEM file to copy into Dir() as PostgresCAFileName
 	// and record; "" for none (a copy left by an earlier deployment is
 	// removed).
@@ -529,6 +539,7 @@ func Finalize(o FinalizeOptions) error {
 		ProxyMode:         o.ProxyMode,
 		PostgresHost:      o.PostgresHost,
 		PostgresDB:        o.PostgresDB,
+		PostgresMode:      o.PostgresMode,
 		ImageRegistry:     o.ImageRegistry,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,

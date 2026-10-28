@@ -26,7 +26,7 @@ picks up the same data. Pass --volumes to delete it instead.`,
 }
 
 func init() {
-	downCmd.Flags().BoolVar(&removeVolumes, "volumes", false, "also remove the Postgres data volume")
+	downCmd.Flags().BoolVar(&removeVolumes, "volumes", false, "also remove the Postgres data volume (local only: on vps the volume of the deployment's own Postgres is external and is kept)")
 	downCmd.Flags().BoolVar(&downForce, "force", false, "stop the stack even while a rolling upgrade is under way")
 }
 

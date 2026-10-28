@@ -172,7 +172,9 @@ func announcePostgresRole(out io.Writer, dir, target, password string) (string, 
 	fmt.Fprintf(out, "managed or remote Postgres: psql \"host=<host> user=<admin> dbname=postgres\" < %s\n\n", shellQuote(path))
 	fmt.Fprintf(out, "Use `<`, not `psql -f`: the postgres user can't open your file, your shell can. The\n")
 	fmt.Fprintf(out, "password is not printed; you don't need to know it (it is also kept in %s).\n", secretsEnv)
-	fmt.Fprintf(out, "If the database and its schemas don't exist yet either, create them as deploy.md describes\n")
+	fmt.Fprintf(out, "If the database and its schemas don't exist yet either, `versola postgres init` creates them\n")
+	fmt.Fprintf(out, "(and the role, with this password, if it is still missing) instead of this file:\n")
+	fmt.Fprintf(out, "--sudo-postgres on this server, --admin-url for another one. By hand, deploy.md describes it\n")
 	fmt.Fprintf(out, "(\"Database role and schemas\"). Later configures reuse this password.\n")
 	return path, nil
 }

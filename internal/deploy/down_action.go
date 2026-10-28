@@ -16,17 +16,24 @@ import (
 // versola-tools' compose file, not to this CLI.
 func DownAction(st *state.State, removeVolumes bool) string {
 	services := "central, auth, edge, the reverse proxy and OpenBao"
-	kept := "the OpenBao and TLS certificate volumes are kept"
+	kept := "The OpenBao and TLS certificate volumes are kept"
 	if st.PostgresMode == PostgresModeBundled {
 		services = "central, auth, edge, Postgres, the reverse proxy and OpenBao"
-		kept = "the Postgres, OpenBao and TLS certificate volumes are kept"
+		kept = "The Postgres, OpenBao and TLS certificate volumes are kept"
 	}
-	what := fmt.Sprintf("stop Versola %s on the VPS -- %s", st.Version, services)
-	if st.AuthURL != "" {
-		what += fmt.Sprintf(": %s stops answering until `versola up`", st.AuthURL)
+	var what string
+	if st.RolloutUnderway() {
+		// Version is where the upgrade is going, not what runs (see
+		// State.Version), and only `rollout` starts the stack again.
+		what = fmt.Sprintf("stop Versola on the VPS in the middle of a rolling upgrade (%s -> %s) -- %s. Afterwards only `versola rollout` (or `rollout --abort`) starts it again, not `versola up`", st.PreviousVersion, st.Version, services)
+	} else {
+		what = fmt.Sprintf("stop Versola %s on the VPS -- %s", st.Version, services)
+		if st.AuthURL != "" {
+			what += fmt.Sprintf(". %s stops answering until `versola up`", st.AuthURL)
+		}
 	}
 	if removeVolumes {
-		what += ", and delete the stack's own volumes: the mutual-TLS CA and certificates, and the diagnostics volumes (heap dumps, GC logs)"
+		what += ". It also deletes the stack's own volumes: the mutual-TLS CA and certificates, and the diagnostics volumes (heap dumps, GC logs)"
 	}
-	return what + "; " + kept
+	return what + ". " + kept
 }

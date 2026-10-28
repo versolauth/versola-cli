@@ -9,10 +9,14 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// downEnv records a deployment of the given target under a temporary home,
-// feeds answer to stdin and stands in for Docker; it returns the compose
-// arguments `down` ran with (nil if it never got that far).
+// runDownWith records a deployment of the given target under a temporary home,
+// feeds answer to stdin, stands in for Docker and runs `down`; it returns the
+// compose arguments it ran with (nil if it never got that far) and its error.
 func runDownWith(t *testing.T, target, answer string, yes, volumes bool) (ran []string, err error) {
+	return runDownState(t, &state.State{Target: target, Version: "0.7.2", BundleDir: "bundle-1", AuthURL: "https://id.example.com", ProxyMode: "nginx"}, answer, yes, volumes, false, true)
+}
+
+func runDownState(t *testing.T, st *state.State, answer string, yes, volumes, force, compose bool) (ran []string, err error) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -21,10 +25,11 @@ func runDownWith(t *testing.T, target, answer string, yes, volumes bool) (ran []
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if compose {
+		if err := os.WriteFile(filepath.Join(dir, "compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	st := &state.State{Target: target, Version: "0.7.2", BundleDir: "bundle-1", AuthURL: "https://id.example.com", ProxyMode: "nginx"}
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +43,7 @@ func runDownWith(t *testing.T, target, answer string, yes, volumes bool) (ran []
 	oldIn, oldCompose, oldYes, oldVol, oldForce := os.Stdin, downCompose, downYes, removeVolumes, downForce
 	os.Stdin = r
 	downCompose = func(args []string) error { ran = args; return nil }
-	downYes, removeVolumes, downForce = yes, volumes, false
+	downYes, removeVolumes, downForce = yes, volumes, force
 	t.Cleanup(func() {
 		os.Stdin, downCompose, downYes, removeVolumes, downForce = oldIn, oldCompose, oldYes, oldVol, oldForce
 		r.Close()
@@ -72,5 +77,25 @@ func TestDownOnLocalNeverAsks(t *testing.T) {
 	ran, err := runDownWith(t, "local", "n\n", false, false)
 	if err != nil || ran == nil {
 		t.Errorf("local: ran %v, err %v; want it to stop without a question", ran, err)
+	}
+}
+
+func TestDownDuringRolloutNeedsForceThenStillAsks(t *testing.T) {
+	st := &state.State{Target: "vps", Version: "0.7.2", PreviousVersion: "0.7.1", BundleDir: "bundle-1", AuthURL: "https://id.example.com", ProxyMode: "nginx"}
+	if ran, err := runDownState(t, st, "y\n", false, false, false, true); err == nil || !strings.Contains(err.Error(), "rolling upgrade") || ran != nil {
+		t.Errorf("no --force: ran %v, err %v; want the rollout refusal before any question", ran, err)
+	}
+	if ran, err := runDownState(t, st, "n\n", false, false, true, true); err == nil || !strings.Contains(err.Error(), "aborted") || ran != nil {
+		t.Errorf("--force still asks on vps: ran %v, err %v", ran, err)
+	}
+	if ran, err := runDownState(t, st, "y\n", false, false, true, true); err != nil || ran == nil {
+		t.Errorf("--force and y: ran %v, err %v", ran, err)
+	}
+}
+
+func TestDownWithoutComposeFileDoesNotAsk(t *testing.T) {
+	st := &state.State{Target: "vps", Version: "0.7.2", BundleDir: "bundle-1", ProxyMode: "nginx"}
+	if ran, err := runDownState(t, st, "n\n", false, false, false, false); err != nil || ran != nil {
+		t.Errorf("nothing to stop: ran %v, err %v; want no question and no docker call", ran, err)
 	}
 }

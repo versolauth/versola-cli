@@ -61,15 +61,6 @@ func runDown(cmd *cobra.Command, args []string) error {
 	}
 	defer unlock()
 
-	// While a rolling upgrade is under way, stopping everything is rarely
-	// what is meant (it takes a vps deployment down mid-upgrade), and `up`
-	// can't start it again afterwards -- only `rollout` can.
-	if st, err := state.Load(); err == nil {
-		if err := deploy.DownBlocked(st, downForce); err != nil {
-			return err
-		}
-	}
-
 	st, err := state.Load()
 	if err != nil {
 		if errors.Is(err, state.ErrNotConfigured) {
@@ -78,6 +69,14 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
+
+	// While a rolling upgrade is under way, stopping everything is rarely
+	// what is meant (it takes a vps deployment down mid-upgrade), and `up`
+	// can't start it again afterwards -- only `rollout` can.
+	if err := deploy.DownBlocked(st, downForce); err != nil {
+		return err
+	}
+
 	composePath, exists, err := st.ComposeFilePath()
 	if err != nil {
 		return err

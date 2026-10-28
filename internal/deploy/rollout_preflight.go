@@ -301,21 +301,7 @@ func pgHeadroomArgs(t pgTarget, secretsFile string) []string {
 	args := []string{"run", "--rm", "--pull", "missing", "--network", "host", "--env-file", secretsFile,
 		"-e", "PGHOST=" + t.host, "-e", "PGPORT=" + t.port, "-e", "PGDATABASE=" + t.db, "-e", "PGUSER=" + t.user,
 		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-rollout-preflight"}
-	mode := t.sslmode
-	if mode == "" {
-		mode = "verify-full"
-	}
-	args = append(args, "-e", "PGSSLMODE="+mode)
-	switch {
-	case !pgVerifies(mode):
-	case t.caFile != "":
-		in := pgCAContainerDir + "/ca.crt"
-		args = append(args, "-v", t.caFile+":"+in+":ro", "-e", "PGSSLROOTCERT="+in)
-	case mode == "verify-full":
-		// libpq accepts "system" only with verify-full; verify-ca
-		// without a CA file of its own fails the check, which then warns.
-		args = append(args, "-e", "PGSSLROOTCERT=system")
-	}
+	args = append(args, pgTLSArgs(t.sslmode, t.caFile)...)
 	return append(args, pgCheckImage, "sh", "-c", `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAtq -v ON_ERROR_STOP=1 -c "$0"`, pgHeadroomQuery)
 }
 

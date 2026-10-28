@@ -238,6 +238,10 @@ versola up
   `--central-mtls-domain` and `--central-domain` (see "Public names").
   `--registry <prefix>` (both targets) pulls the images from another
   registry, see "Images from another registry".
+- **`postgres init`** — for a vps deployment pointed at a Postgres of your
+  own (`--postgres-host`): creates the role, the database and the schemas
+  `auth`, `central` and `edge` the generated configs name, by the rights it
+  finds. See "Your own Postgres: `postgres init`".
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -531,8 +535,76 @@ stops the container from starting). Nothing in this mode is done by hand:
   `--postgres-host`.
 
 Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats`/`backup`
-for the container, `doctor`'s memory figures with it, and `postgres init`
-for a Postgres of your own.
+for the container, and `doctor`'s memory figures with it.
+
+### Your own Postgres: `postgres init`
+
+With `--postgres-host`, the Postgres is yours, and the role, the database and
+the schemas have to exist before `migrate`. `versola postgres init` makes them,
+for the vps deployment `configure` last prepared (the role, the database and
+the address are those of its `auth.conf`, the password the one in OpenBao):
+
+```
+versola postgres init --sudo-postgres
+versola postgres init --admin-url 'postgres://admin@db.example.com:5432/postgres?sslmode=verify-full'
+```
+
+What it does depends on the rights it finds:
+
+| What you give | What it does |
+|---|---|
+| An admin (`--admin-url`, or `--sudo-postgres` for the Postgres of this server) that can create roles and databases | creates the role (with the deployment's password) if it is missing, the database owned by it if it is missing, then, logged in **as that role**, the schemas. An admin that is not a superuser makes itself a member of the role it has just created, so that it can own the database; that membership stays |
+| No admin, but a role that already owns the database | only the schemas that are missing, as that role |
+| Not enough rights | runs nothing; says which rights are missing and writes the SQL for an admin to `~/.versola/openbao/vps-postgres-init.sql` (0600), safe to run again (not in a `--dry-run`, which only prints) |
+| A database that belongs to someone else, or one to be made for a role that exists by an admin that is not a superuser | runs nothing and writes no SQL: it says what to do (let the role own it, or point the deployment at another database) |
+
+- **It only creates what is missing.** No `DROP`, no `ALTER` of a role, a
+  database or a schema that exists; the password of a role that exists is not
+  set (a role it created gets the deployment's `POSTGRES_PASSWORD`). A database
+  that exists and belongs to another role is never taken over: the command
+  stops and says what to do.
+- **The SQL is printed before it runs**, with the password hidden (the role is
+  created with the password's SCRAM verifier, not the password; one that is not
+  ASCII, which the generated ones never are, goes in as itself, and then can
+  show up in the server's log), and a
+  `Continue? [y/N]` follows; `--yes` skips it, `--dry-run` only prints (it still
+  asks Postgres what exists: read-only).
+- **The admin's password** is read from `--admin-password-file` (readable by you
+  only, mode 600 or stricter, checked where the system has modes; first line), else `PGPASSWORD`, else asked for with no echo. It is never taken from
+  `--admin-url` (a URL with a password is refused) and never on a command line:
+  `psql` runs in a throwaway `postgres:18-alpine` container on the host network,
+  with the password in its environment, the SQL on its standard input. The SQL
+  shown for the database of a non-superuser admin includes psql's own
+  conditionals (`\if`, `\gset`) that choose the form of `GRANT` for the server's
+  version.
+  `--sudo-postgres` needs `psql` and `sudo` on this server and no password; it
+  acts on the cluster at the deployment's port, and is refused when the
+  deployment's Postgres is at another host (it would act on this server's
+  Postgres), and then `--admin-url` is the way.
+- **A role that exists** has to log in with the deployment's password before a
+  database is made for it; otherwise nothing is changed and it says so. The
+  login is tried on the `postgres` database: a server that does not let a role
+  connect there stops the run with that reason.
+- **Without an admin** nothing tells in advance whose the database is: a
+  `--dry-run` prints the schemas it would create, and a run that finds the
+  database is someone else's fails at that step ("permission denied"), changing
+  nothing.
+- **TLS** is as the services' own URL has it (`sslmode` of the deployment, its
+  `--postgres-ca`), unless `--admin-url` says another `sslmode`. A mode that
+  does not verify the server (the deployment's `disable` for the loopback, say)
+  is carried over only when both are on the loopback: for any server across the
+  network, even the very host the deployment uses, it is `verify-full` unless
+  the URL says otherwise, so the admin's password does not cross the network in
+  the clear.
+- **Names** of the role and the database are taken from `auth.conf` and must be
+  plain (1-63 letters, digits, `_` or `-`); anything else is refused, create it
+  by hand.
+- **Declining** the question, or having no terminal without `--yes`, ends with
+  an error and a non-zero exit, so `postgres init && migrate` does not go on.
+- **Run again**, it re-checks: a deployment that is ready says "Nothing to do".
+  Cut off half way, it continues with what is missing.
+- Not for a deployment that runs its own Postgres in a container: that one
+  creates all of this by itself.
 
 ### Deploying to a VPS: the reverse proxy
 

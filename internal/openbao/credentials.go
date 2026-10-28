@@ -85,6 +85,20 @@ func PostgresRoleScriptPath(target string) (string, error) {
 	return filepath.Join(dir, target+"-postgres-role.sql"), nil
 }
 
+// PostgresInitScriptPath is where `versola postgres init` writes the SQL an
+// admin runs when the connection it was given could not do it itself
+// (<target>-postgres-init.sql, 0600 like the role script next to it).
+func PostgresInitScriptPath(target string) (string, error) {
+	if !validTargets[target] {
+		return "", fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported`, target)
+	}
+	dir, err := ensureCredentialsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, target+"-postgres-init.sql"), nil
+}
+
 // ensureCredentialsDir creates credentialsDir if needed and makes sure it's
 // 0o700, even on a machine that ran an older CLI version which created it
 // at 0o755 -- os.MkdirAll is a documented no-op, including on mode, when

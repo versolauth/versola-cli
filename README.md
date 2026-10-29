@@ -253,7 +253,8 @@ versola up
   one rather than quietly migrating it themselves.
 
 Run against a `vps` deployment, each of the three asks for confirmation
-first, describing what that particular step is about to do. Migrations
+first, describing what that particular step is about to do. So does `down`,
+which stops the whole stack. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
@@ -263,9 +264,9 @@ newline, so a script can feed several answers to consecutive commands
 Pasting several commands into an interactive terminal is different: the shell
 has already taken the next line as typed-ahead input, and the prompt reads it
 as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
-`migrate`, `up`, `bootstrap` and `replica add|remove`; `rollout`, `upgrade` and
-`uninstall` accept it too. With `--yes`, `configure`, `migrate`, `up`,
-`bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
+`migrate`, `up`, `down`, `bootstrap` and `replica add|remove`; `rollout`,
+`upgrade` and `uninstall` accept it too. With `--yes`, `configure`, `migrate`,
+`up`, `down`, `bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
 script's log shows what it agreed to) and then go on without asking.
 `local` never asks about its own deployment, so `--yes` changes nothing there.
 The one exception it does not cover: `configure local` / `bootstrap local` on a
@@ -1220,10 +1221,23 @@ marking those due for renewal (see `certs renew`).
 
 ### `down`
 
-Stops the locally deployed stack. Pass `--volumes` to also delete the
-Postgres data volume (kept by default, so a later `bootstrap` picks up
-the same data). While a rolling upgrade is under way it refuses (see
-`rollout`); `--force` stops the stack anyway.
+Stops the deployment this machine tracks, local or vps. Nothing is deleted
+by default, so a later `bootstrap` or `up` picks up the same data.
+
+On `vps` it asks first, naming the version, the auth URL and the services it
+stops (the container's Postgres among them, when there is one), and that the
+domain stops answering until `versola up`; `-y`/`--yes` prints the same line
+and skips the question. `local` never asks.
+
+`--volumes` also deletes the stack's own volumes. On `local` that is the
+Postgres data volume. On `vps` it is the mutual-TLS CA and certificate
+volumes and the diagnostics volumes (heap dumps, GC logs); the next `up` creates
+a new CA and issues every certificate again. The Postgres,
+OpenBao and TLS certificate volumes are `external` and are never removed by
+`down`, and the question says so.
+
+While a rolling upgrade is under way it refuses (see `rollout`); `--force`
+stops the stack anyway.
 
 ### `uninstall`
 

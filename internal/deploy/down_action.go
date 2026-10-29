@@ -33,7 +33,7 @@ func DownAction(st *state.State, removeVolumes bool) string {
 		}
 	}
 	if removeVolumes {
-		what += ". It also deletes the stack's own volumes: the mutual-TLS CA and certificates, and the diagnostics volumes (heap dumps, GC logs)"
+		what += ". It also deletes the stack's own volumes: the mutual-TLS CA and certificates, and the diagnostics volumes (heap dumps, GC logs); the next `versola up` creates a new CA and issues the certificates again"
 	}
 	return what + ". " + kept
 }

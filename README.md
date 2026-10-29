@@ -1231,7 +1231,8 @@ and skips the question. `local` never asks.
 
 `--volumes` also deletes the stack's own volumes. On `local` that is the
 Postgres data volume. On `vps` it is the mutual-TLS CA and certificate
-volumes and the diagnostics volumes (heap dumps, GC logs); the Postgres,
+volumes and the diagnostics volumes (heap dumps, GC logs); the next `up` creates
+a new CA and issues every certificate again. The Postgres,
 OpenBao and TLS certificate volumes are `external` and are never removed by
 `down`, and the question says so.
 

@@ -1012,7 +1012,7 @@ neither):
   would have to try again. Not measured with the real edge yet; in a local
   run of the e2e client (`e2e/rollout`, three reloads) it saw one per reload
   on a request kept always in flight and none on short ones. The listener
-  is on by default; nothing on id.versola.kz uses it today.
+  is on by default; nothing on id.versola.io uses it today.
 - every edge replica the rollout starts (the stand-in, each recreated
   slot, again on an abort) gets its own client certificate through
   central.

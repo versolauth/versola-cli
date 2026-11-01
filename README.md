@@ -1422,6 +1422,7 @@ install.sh              one-line installer for macOS/Linux
 install.ps1             one-line installer for Windows
 LICENSE                 Apache License 2.0 (also published as a release asset)
 .github/workflows/      ci.yml (vet/build/test on every push+PR), release.yml (builds binaries + checksums on tag push)
+.claude/                Claude Code setup for contributors: hooks (hooks/claudehook), /check and /release-prep skills, the versola-cli-reviewer agent
 ```
 
 ## License

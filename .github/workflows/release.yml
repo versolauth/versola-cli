@@ -27,6 +27,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
     steps:
       # Third-party actions are pinned to commit SHAs, not floating tags.
       # A tag like @v4 is mutable -- whoever controls that repo can retarget
@@ -35,9 +37,21 @@ jobs:
       # A SHA can't be retargeted. Bump these deliberately; the trailing
       # comment records which release each SHA corresponds to.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # The Go the binaries are built with is the Go whose standard library
+      # ships inside them (net/http, crypto/tls, crypto/x509 ...), so it must
+      # be a supported release with its latest security patches: the newest
+      # 1.26.x, fetched fresh (check-latest) rather than whatever the runner
+      # image has cached. go.mod's `go` line is only the minimum language
+      # version and is deliberately not used here -- it named 1.25.0, an
+      # unsupported release that 0.3.x was in fact built with (an older
+      # setup-go version plus GOTOOLCHAIN=auto downloaded exactly 1.25.0).
+      # GOTOOLCHAIN=local stops go.mod from switching toolchains behind
+      # this step's back. Same setting as ci.yml; bump both together when
+      # 1.26 leaves support (govulncheck in ci.yml goes red then).
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.x"
+          check-latest: true
 
       # The tag is the single source of truth for the version, so the
       # binary can't disagree with the release it's attached to.

@@ -21,6 +21,8 @@ const (
 	centralDomainUsage     = "vps only: serve central's enrollment route at this name, e.g. central.example.com: TLS terminated by Versola's proxy (Let's Encrypt), only POST /edge/enroll, rate limited. It is where `versola edge bootstrap` gets an edge its first certificate. Remembered; --central-domain= (empty) stops publishing it"
 )
 
+const estUsage = "vps only: serve RFC 7030 EST on auth (/.well-known/est/): a client registered with estEnrollment enrols for a mutual-TLS certificate with a one-time token and renews it by itself. The CA it is told about is the client CA alone (client-ca.crt of the mutual-TLS volume). Needs a versola-tools that knows EST_ENABLED (0.8.0 or later; an older one ignores it). Remembered; --est=false turns it off"
+
 const certLifetimeUsage = "vps only: how many days the mutual-TLS certificates that versola-tools writes live (auth's and central's listeners, and the identity of the edge on this host): default 365, renewed at a third of the life left by `versola certs renew`, whose daily timer is then installed and required. `unlimited` (or 0) gives them a notAfter 100 years away: they never need renewing, no timer is installed and nothing warns about expiry -- and a leaked key then never expires. Remembered. The edges central issues renew themselves and are not affected"
 
 // publicFlagNames are the flags addPublicFlags registers.
@@ -30,6 +32,7 @@ var publicFlagNames = []string{"mtls-domain", "central-mtls-domain", "central-do
 // --central-domain on configure and bootstrap.
 func addPublicFlags(c *cobra.Command) {
 	c.Flags().String("cert-lifetime-days", "", certLifetimeUsage)
+	c.Flags().Bool("est", false, estUsage)
 	c.Flags().String("mtls-domain", "", mtlsDomainUsage)
 	c.Flags().String("central-mtls-domain", "", centralMTLSDomainUsage)
 	c.Flags().String("central-domain", "", centralDomainUsage)
@@ -74,6 +77,18 @@ func certDays(cmd *cobra.Command, target string) (*int, error) {
 		return nil, err
 	}
 	return parseCertDays(raw)
+}
+
+// estEnabled resolves --est for target: what was recorded for the vps
+// deployment, overridden by the flag.
+func estEnabled(cmd *cobra.Command, target string) (bool, error) {
+	if target != "vps" {
+		return false, nil
+	}
+	if !cmd.Flags().Changed("est") {
+		return deploy.StoredEst(), nil
+	}
+	return cmd.Flags().GetBool("est")
 }
 
 // parseCertDays reads "unlimited", "0" or a number of days up to a hundred years.

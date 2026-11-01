@@ -464,7 +464,7 @@ func prepareStaged(st *state.State, version string, o RolloutOptions, staged *st
 	if st.CentralURL != "" && st.CentralMTLSDomain == "" && st.CentralDomain == "" {
 		fmt.Printf("Warning: this deployment records --central-url %s from an earlier version, which derived it as central.<domain> and routed it. The proxy no longer routes it: a local edge reaches central on the loopback, an edge elsewhere needs --central-mtls-domain (README, \"Public names\"). Re-run `versola configure` with the flag.\n", st.CentralURL)
 	}
-	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL, Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays}
+	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL, Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Est: st.EstEnabled}
 	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, st.ImageRegistry, staged); err != nil {
 		return nil, err
 	}
@@ -913,7 +913,7 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	if err != nil {
 		return err
 	}
-	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Delivery: delivery}); err != nil {
+	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Est: st.EstEnabled, Delivery: delivery}); err != nil {
 		if problem := registryProblem(err, toolsImage, st.ImageRegistry); problem != nil {
 			return problem
 		}
@@ -939,6 +939,13 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	for _, service := range secretServices {
 		final, _ := mergeSecretsShared(withoutKeys(set.existing[service], set.replace[service]), set.candidates[service], set.shared[service])
 		if err := writeDotenv(filepath.Join(dir, service+".secrets.env"), final); err != nil {
+			return err
+		}
+	}
+	// Compose reads every service's env_file when it loads the project, the
+	// postgres service's too.
+	if st.PostgresMode == PostgresModeBundled {
+		if err := writePostgresSecretsEnv(dir); err != nil {
 			return err
 		}
 	}

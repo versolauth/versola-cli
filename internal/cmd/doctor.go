@@ -122,7 +122,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// suggestion regardless, telling someone who just checked a server
 		// to go run a local deployment instead (flagged in review).
 		if doctorTarget == "vps" {
-			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ... --postgres-host ...`.")
+			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ...`.")
 		} else {
 			fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
 		}

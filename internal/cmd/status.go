@@ -65,6 +65,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			fmt.Println("Migrations applied: never (run `versola migrate`)")
 		}
 		fmt.Println(deploy.ReplicaSummary(st))
+		// Where the data of the database is, for the deployment's own Postgres
+		// (the volume and its place on this server) or whose it is otherwise.
+		mountpoint := ""
+		if st.PostgresMode == deploy.PostgresModeBundled {
+			mountpoint = deploy.PostgresDataMountpoint()
+		}
+		if line := deploy.PostgresSummary(st, mountpoint); line != "" {
+			fmt.Println(line)
+		}
 		fmt.Println()
 		// On a deployment of this machine's own (not a record of one that is
 		// gone: its volume could not be asked): when each certificate runs out.

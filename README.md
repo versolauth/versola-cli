@@ -231,11 +231,17 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` and `--postgres-host` (see `bootstrap --help`),
-  and accepts `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
+  it also needs `--auth-url` (see `bootstrap --help`) and accepts
+  `--postgres-host` (your own Postgres; without it, Postgres runs in a
+  container of the deployment, see "Postgres on vps"),
+  `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
   `--central-mtls-domain` and `--central-domain` (see "Public names").
   `--registry <prefix>` (both targets) pulls the images from another
   registry, see "Images from another registry".
+- **`postgres init`** — for a vps deployment pointed at a Postgres of your
+  own (`--postgres-host`): creates the role, the database and the schemas
+  `auth`, `central` and `edge` the generated configs name, by the rights it
+  finds. See "Your own Postgres: `postgres init`".
 - **`migrate`** — applies each service's own migrations (central, auth
   and edge each own their schema) against whatever `configure` last
   prepared, using one throwaway container that ships all three services'
@@ -247,7 +253,8 @@ versola up
   one rather than quietly migrating it themselves.
 
 Run against a `vps` deployment, each of the three asks for confirmation
-first, describing what that particular step is about to do. Migrations
+first, describing what that particular step is about to do. So does `down`,
+which stops the whole stack. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
@@ -257,9 +264,9 @@ newline, so a script can feed several answers to consecutive commands
 Pasting several commands into an interactive terminal is different: the shell
 has already taken the next line as typed-ahead input, and the prompt reads it
 as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
-`migrate`, `up`, `bootstrap` and `replica add|remove`; `rollout`, `upgrade` and
-`uninstall` accept it too. With `--yes`, `configure`, `migrate`, `up`,
-`bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
+`migrate`, `up`, `down`, `bootstrap` and `replica add|remove`; `rollout`,
+`upgrade` and `uninstall` accept it too. With `--yes`, `configure`, `migrate`,
+`up`, `down`, `bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
 script's log shows what it agreed to) and then go on without asking.
 `local` never asks about its own deployment, so `--yes` changes nothing there.
 The one exception it does not cover: `configure local` / `bootstrap local` on a
@@ -408,7 +415,9 @@ Secret **values are never printed** by `configure`, `bootstrap`, `rollout`, or
 - OpenBao's own AppRole `role-id`/`secret-id`: `configure` prints the path,
   `~/.versola/openbao/<target>.json` (readable only by you).
 - The Postgres password generated on the first `configure` against a new
-  OpenBao: `configure` writes the SQL that sets it on Versola's role to
+  OpenBao, when the Postgres is your own (with the one in a container there
+  is nothing to run, see "Postgres on vps"): `configure` writes the SQL that
+  sets it on Versola's role to
   `~/.versola/openbao/<target>-postgres-role.sql` (readable only by you; it
   creates the role if it doesn't exist and sets the password and allows login if it does)
   and prints the command to run it:
@@ -507,7 +516,8 @@ one may be lost, not new), so the CLI refuses unless you pass this flag.
 This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
 added the schema revision; layout 3 the Postgres host and the records a
 rolling upgrade needs; layout 4 the Postgres database name and CA, from
-`--postgres-db` and `--postgres-ca`). It reads the layouts older CLIs wrote,
+`--postgres-db` and `--postgres-ca`; a deployment that runs its own Postgres
+also records `postgresMode`, an optional key that changes no layout). It reads the layouts older CLIs wrote,
 but an older CLI cannot read layout 4 and stops with a "newer schema" error: after the
 first command that saves state with this CLI, do not go back to an older one
 on the same machine.
@@ -526,6 +536,132 @@ deployments of the first versola-cli releases) can't be read at all, so
 `status`, `down`, `migrate` and `uninstall` stop the same way; stop their
 containers with `docker compose -f ~/.versola/active/compose.yml down`
 and remove `~/.versola/active` by hand, or configure again.
+
+### Postgres on vps
+
+Without `--postgres-host`, `configure vps` makes Postgres a service of the
+deployment: a `postgres` container (the image `versola-tools` pins) on the
+host network, listening on `127.0.0.1:5432` only, so port 5432 has to be free
+on the server (`configure` checks it; a Postgres already listening there
+stops the container from starting). Nothing in this mode is done by hand:
+
+- **No database step.** The container's first start, with an empty data
+  directory, creates the role (the user in the generated configs), the
+  database (`--postgres-db`, default `auth`) and the schemas `auth`,
+  `central` and `edge`, from the password `configure` stored in OpenBao.
+  `bootstrap vps` therefore does not stop before `migrate`. A later start
+  finds the data directory and initialises nothing.
+- **The password** reaches the container in `postgres.secrets.env` (mode
+  0600, in the deployment's directory), which holds `POSTGRES_PASSWORD` and
+  nothing else of auth's secrets. Docker keeps it in the container's
+  configuration, so `docker inspect` shows it to whoever can use Docker on
+  the server.
+- **The data** is in the Docker volume `versola-postgres-data-vps` on the
+  server, declared `external`, like OpenBao's: `down`, `down --volumes`,
+  `uninstall` and a redeploy leave it alone, and `configure` and `up`
+  create it if it is missing. If the volume already holds a Postgres from an
+  earlier deployment and this `configure` generated a new password (a new
+  OpenBao), it says so and how to give the role the new one: the database
+  keeps the password it was created with.
+- **Where the data is** is in `versola status`: the volume
+  `versola-postgres-data-vps` and where Docker keeps it on the server
+  (`Postgres: in a container of this deployment, ...; data in the Docker volume ...`).
+  For your own Postgres it says whose it is.
+- **Starting.** `up` starts Postgres first and waits for its healthcheck,
+  then central, auth and edge. Compose recreates the container when the new
+  deployment's files are in another directory, as after every `configure`:
+  the database restarts for a moment (the data is in the volume, untouched),
+  in the same short stop as the services' own. A rolling upgrade never
+  recreates it. A release that moves the pinned image to another PostgreSQL
+  major version needs a dump and a restore, which nothing here does.
+- **The choice is remembered.** `configure` run again without
+  `--postgres-host` keeps the Postgres it chose the first time: the
+  container, or the external one at its recorded host (never a new empty
+  database over a deployment that used one of its own). Passing
+  `--postgres-host` to a deployment that runs its own is refused: moving the
+  data is a backup and a restore, which `configure` does not do. A rolling
+  upgrade keeps the mode. If the record of the current deployment can't be
+  read, `configure` without `--postgres-host` refuses instead of guessing.
+- **The database name is fixed by the first start.** `--postgres-db` can
+  not be changed afterwards (a dump and a restore, not a configure's job).
+- **Not combined with `--postgres-ca`**: the container speaks no TLS, on
+  loopback only (the services connect with `sslmode=disable`).
+- **It needs a `versola-tools` release that can run it.** An older one
+  ignores the mode and writes a compose file without the service; `configure`
+  then refuses before anything is started and says to use a newer release or
+  `--postgres-host`.
+
+Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats`/`backup`
+for the container, and `doctor`'s memory figures with it.
+
+### Your own Postgres: `postgres init`
+
+With `--postgres-host`, the Postgres is yours, and the role, the database and
+the schemas have to exist before `migrate`. `versola postgres init` makes them,
+for the vps deployment `configure` last prepared (the role, the database and
+the address are those of its `auth.conf`, the password the one in OpenBao):
+
+```
+versola postgres init --sudo-postgres
+versola postgres init --admin-url 'postgres://admin@db.example.com:5432/postgres?sslmode=verify-full'
+```
+
+What it does depends on the rights it finds:
+
+| What you give | What it does |
+|---|---|
+| An admin (`--admin-url`, or `--sudo-postgres` for the Postgres of this server) that can create roles and databases | creates the role (with the deployment's password) if it is missing, the database owned by it if it is missing, then, logged in **as that role**, the schemas. An admin that is not a superuser makes itself a member of the role it has just created, so that it can own the database; that membership stays |
+| No admin, but a role that already owns the database | only the schemas that are missing, as that role |
+| Not enough rights | runs nothing; says which rights are missing and writes the SQL for an admin to `~/.versola/openbao/vps-postgres-init.sql` (0600), safe to run again (not in a `--dry-run`, which only prints) |
+| A database that belongs to someone else, or one to be made for a role that exists by an admin that is not a superuser | runs nothing and writes no SQL: it says what to do (let the role own it, or point the deployment at another database) |
+
+- **It only creates what is missing.** No `DROP`, no `ALTER` of a role, a
+  database or a schema that exists; the password of a role that exists is not
+  set (a role it created gets the deployment's `POSTGRES_PASSWORD`). A database
+  that exists and belongs to another role is never taken over: the command
+  stops and says what to do.
+- **The SQL is printed before it runs**, with the password hidden (the role is
+  created with the password's SCRAM verifier, not the password; one that is not
+  ASCII, which the generated ones never are, goes in as itself, and then can
+  show up in the server's log), and a
+  `Continue? [y/N]` follows; `--yes` skips it, `--dry-run` only prints (it still
+  asks Postgres what exists: read-only).
+- **The admin's password** is read from `--admin-password-file` (readable by you
+  only, mode 600 or stricter, checked where the system has modes; first line), else `PGPASSWORD`, else asked for with no echo. It is never taken from
+  `--admin-url` (a URL with a password is refused) and never on a command line:
+  `psql` runs in a throwaway `postgres:18-alpine` container on the host network,
+  with the password in its environment, the SQL on its standard input. The SQL
+  shown for the database of a non-superuser admin includes psql's own
+  conditionals (`\if`, `\gset`) that choose the form of `GRANT` for the server's
+  version.
+  `--sudo-postgres` needs `psql` and `sudo` on this server and no password; it
+  acts on the cluster at the deployment's port, and is refused when the
+  deployment's Postgres is at another host (it would act on this server's
+  Postgres), and then `--admin-url` is the way.
+- **A role that exists** has to log in with the deployment's password before a
+  database is made for it; otherwise nothing is changed and it says so. The
+  login is tried on the `postgres` database: a server that does not let a role
+  connect there stops the run with that reason.
+- **Without an admin** nothing tells in advance whose the database is: a
+  `--dry-run` prints the schemas it would create, and a run that finds the
+  database is someone else's fails at that step ("permission denied"), changing
+  nothing.
+- **TLS** is as the services' own URL has it (`sslmode` of the deployment, its
+  `--postgres-ca`), unless `--admin-url` says another `sslmode`. A mode that
+  does not verify the server (the deployment's `disable` for the loopback, say)
+  is carried over only when both are on the loopback: for any server across the
+  network, even the very host the deployment uses, it is `verify-full` unless
+  the URL says otherwise, so the admin's password does not cross the network in
+  the clear.
+- **Names** of the role and the database are taken from `auth.conf` and must be
+  plain (1-63 letters, digits, `_` or `-`); anything else is refused, create it
+  by hand.
+- **Declining** the question, or having no terminal without `--yes`, ends with
+  an error and a non-zero exit, so `postgres init && migrate` does not go on.
+- **Run again**, it re-checks: a deployment that is ready says "Nothing to do".
+  Cut off half way, it continues with what is missing.
+- Not for a deployment that runs its own Postgres in a container: that one
+  creates all of this by itself.
 
 ### Deploying to a VPS: the reverse proxy
 
@@ -550,8 +686,12 @@ serves the admin console at `/central/admin/`.
   - `--auth-url` exactly `https://<domain>`: no port, path or IP address.
 
   ```
+  versola bootstrap vps 0.6.0 --auth-url https://id.example.com
   versola bootstrap vps 0.6.0 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   ```
+
+  The first runs Postgres in a container of the deployment (see "Postgres on
+  vps"); the second uses a Postgres of your own, here the server's native one.
 
   Postgres can also be a remote, TLS-only server: `--postgres-db <name>`
   picks the database (default `auth`) and `--postgres-ca <file>` is a PEM
@@ -929,7 +1069,7 @@ neither):
   would have to try again. Not measured with the real edge yet; in a local
   run of the e2e client (`e2e/rollout`, three reloads) it saw one per reload
   on a request kept always in flight and none on short ones. The listener
-  is on by default; nothing on id.versola.kz uses it today.
+  is on by default; nothing on id.versola.io uses it today.
 - every edge replica the rollout starts (the stand-in, each recreated
   slot, again on an abort) gets its own client certificate through
   central.
@@ -1137,10 +1277,23 @@ marking those due for renewal (see `certs renew`).
 
 ### `down`
 
-Stops the locally deployed stack. Pass `--volumes` to also delete the
-Postgres data volume (kept by default, so a later `bootstrap` picks up
-the same data). While a rolling upgrade is under way it refuses (see
-`rollout`); `--force` stops the stack anyway.
+Stops the deployment this machine tracks, local or vps. Nothing is deleted
+by default, so a later `bootstrap` or `up` picks up the same data.
+
+On `vps` it asks first, naming the version, the auth URL and the services it
+stops (the container's Postgres among them, when there is one), and that the
+domain stops answering until `versola up`; `-y`/`--yes` prints the same line
+and skips the question. `local` never asks.
+
+`--volumes` also deletes the stack's own volumes. On `local` that is the
+Postgres data volume. On `vps` it is the mutual-TLS CA and certificate
+volumes and the diagnostics volumes (heap dumps, GC logs); the next `up` creates
+a new CA and issues every certificate again. The Postgres,
+OpenBao and TLS certificate volumes are `external` and are never removed by
+`down`, and the question says so.
+
+While a rolling upgrade is under way it refuses (see `rollout`); `--force`
+stops the stack anyway.
 
 ### `uninstall`
 
@@ -1149,8 +1302,9 @@ its Postgres volume, removes the `versola-*` images that were pulled, and
 clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
 to skip that.
 
-On a `vps` deployment, OpenBao's data volume and the TLS certificate
-volume (`versola-acme-vps`) are left in place; `uninstall` prints the
+On a `vps` deployment, OpenBao's data volume, the TLS certificate
+volume (`versola-acme-vps`) and, when Postgres runs in a container, its data
+volume (`versola-postgres-data-vps`) are left in place; `uninstall` prints the
 `docker volume rm` commands if you really mean to discard them.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's

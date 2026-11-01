@@ -89,7 +89,8 @@ const openbaoConfigSourceFormat = `{{range .Mounts}}{{if eq .Destination "` + op
 
 // openbaoBundles names the bundle directories pruning must leave alone
 // because of OpenBao: the ones its containers (either target's -- both can
-// exist on one machine) currently mount openbao.hcl from. OpenBao isn't
+// exist on one machine) currently mount openbao.hcl from -- and, the same
+// way, the one the bundled Postgres's container mounts its script from. OpenBao isn't
 // recreated on every configure, so it can keep mounting an older bundle's
 // file long after `up` moved everything else to a newer one, and deleting
 // that file makes the container fail to start again after a restart or
@@ -124,6 +125,19 @@ func mountedOpenbaoBundles() ([]string, error) {
 		if !found {
 			continue
 		}
+		if b := bundleOf(source); b != "" {
+			out = append(out, b)
+		}
+	}
+	// The bundled Postgres is not recreated by a rolling upgrade either (it
+	// would restart the database), and it bind-mounts its first-start script
+	// from the bundle it was created from, with a restart policy: pruning that
+	// bundle would keep it from starting again after a reboot.
+	source, found, err := docker.Inspect(bundledPostgresContainer, bundledPostgresInitSourceFormat)
+	if err != nil {
+		return nil, err
+	}
+	if found {
 		if b := bundleOf(source); b != "" {
 			out = append(out, b)
 		}

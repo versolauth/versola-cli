@@ -160,6 +160,11 @@ type State struct {
 	// notAfter 100 years away: nothing renews them, and no timer is installed).
 	CertLifetimeDays *int `json:"certLifetimeDays,omitempty"`
 
+	// EstEnabled is --est: auth serves RFC 7030 EST (/.well-known/est/) for
+	// clients registered with estEnrollment. Recorded so that rollout, which
+	// configures from the record, keeps it.
+	EstEnabled bool `json:"estEnabled,omitempty"`
+
 	// ImageRegistry is --registry: the registry prefix the Versola images were
 	// pulled from, when it is not Versola's own (ghcr.io/versolauth). Empty is
 	// the default, which is what every record from before the flag means, so
@@ -186,6 +191,14 @@ type State struct {
 	// own default. Recorded for the same reason as PostgresHost. Empty in
 	// records written before layout 4.
 	PostgresDB string `json:"postgresDb,omitempty"`
+
+	// PostgresMode is "bundled" when the deployment runs its own Postgres as a
+	// container of the compose file (vps only), "" for an external one (the
+	// server's own, a managed one) and for local. PostgresHost is then
+	// 127.0.0.1:5432, so everything that reads it keeps working. Not a layout
+	// bump: an older CLI ignores the field and sees an external Postgres on
+	// loopback, which is what it reaches the container as.
+	PostgresMode string `json:"postgresMode,omitempty"`
 
 	// PostgresCA is the name, inside Dir(), of the copy of --postgres-ca's
 	// file (PostgresCAFileName), or empty when there is none. See
@@ -431,10 +444,14 @@ type FinalizeOptions struct {
 	MTLSDomain, CentralMTLSDomain, CentralDomain string
 	// CertLifetimeDays: see State.CertLifetimeDays.
 	CertLifetimeDays *int
+	// EstEnabled: see State.EstEnabled.
+	EstEnabled bool
 	// PostgresHost is --postgres-host (vps), "" for local.
 	PostgresHost string
 	// PostgresDB is --postgres-db, "" for none.
 	PostgresDB string
+	// PostgresMode: see State.PostgresMode.
+	PostgresMode string
 	// PostgresCAFile is a PEM file to copy into Dir() as PostgresCAFileName
 	// and record; "" for none (a copy left by an earlier deployment is
 	// removed).
@@ -518,9 +535,11 @@ func Finalize(o FinalizeOptions) error {
 		CentralMTLSDomain: o.CentralMTLSDomain,
 		CentralDomain:     o.CentralDomain,
 		CertLifetimeDays:  o.CertLifetimeDays,
+		EstEnabled:        o.EstEnabled,
 		ProxyMode:         o.ProxyMode,
 		PostgresHost:      o.PostgresHost,
 		PostgresDB:        o.PostgresDB,
+		PostgresMode:      o.PostgresMode,
 		ImageRegistry:     o.ImageRegistry,
 		// Set only by a rolling upgrade's preparation (see FinalizeOptions).
 		PreviousVersion: o.PreviousVersion,

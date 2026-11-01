@@ -36,6 +36,7 @@ services and doesn't touch the database — see "versola migrate" and
 "versola up" for the steps after this one.
 
   versola configure local 0.1.1
+  versola configure vps 0.1.1 --auth-url https://id.example.com
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
@@ -51,8 +52,18 @@ vps's OpenBao is provisioned automatically by default (init, unseal,
 kv-v2, AppRole, policy, role — same as local always has) — pass
 --setup-openbao if you've already set OpenBao up yourself and just want
 to hand this CLI a role-id/secret-id via "versola secrets login vps"
-instead. --auth-url and --postgres-host are both required for vps — see
-"versola bootstrap --help" for why.
+instead. --auth-url is required for vps — see "versola bootstrap --help"
+for why.
+
+On vps Postgres runs in a container of the deployment by default: no
+--postgres-host, no database step. The first start creates the role, the
+database and the schemas auth, central and edge, from the password stored
+in OpenBao; the data is in the Docker volume versola-postgres-data-vps,
+which "down" and "uninstall" leave alone. It listens on 127.0.0.1:5432
+only, so that port has to be free on the server. --postgres-host selects
+your own Postgres instead (its host:port), and configure run again without
+it keeps the one already chosen. This needs a versola-tools release that
+can run it; an older one is refused before anything is started.
 
 Against a vps deployment this asks for confirmation first: it doesn't
 start or stop any of Versola's own services, but it does replace this
@@ -107,7 +118,7 @@ than something that happens silently — e.g. deploying onto a server.`,
 func init() {
 	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
-	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port of your own Postgres (vps; without it Postgres runs in a container of this deployment)")
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureRegistry, "registry", "", registryUsage)
@@ -130,9 +141,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// error than letting it fail deep inside a container run.
 	if target == "vps" && configureAuthURL == "" {
 		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
-	}
-	if target == "vps" && configurePostgresHost == "" {
-		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
@@ -227,13 +235,17 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	est, err := estEnabled(cmd, target)
+	if err != nil {
+		return err
+	}
 	if target == "vps" {
 		if err := refuseNoTimerWhenFinite(configureNoCertsTimer, days); err != nil {
 			return err
 		}
 	}
 	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days},
+		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
 	if err != nil {
 		return err
@@ -249,7 +261,7 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca"}, publicFlagNames...) {
+	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
 			return fmt.Errorf("--%s only applies to vps deployments", name)
 		}

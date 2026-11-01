@@ -76,8 +76,6 @@ type world struct {
 	crashed      bool
 	failOnce     map[string]error // a call that fails once, without a crash
 	violations   []string
-	startedFrom  bool
-	ranFromNew   bool
 	proxyRunning bool
 	// targetV and targetDir are what `compose up` creates containers of
 	// and from: the new version and bundle, or an abort's way back.

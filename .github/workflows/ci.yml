@@ -10,6 +10,13 @@ on:
       - main
   pull_request:
 
+# CI only reads the repository: least privilege for GITHUB_TOKEN, written
+# down so it holds even if the repository or organization default is
+# read-write (CodeQL actions/missing-workflow-permissions). release.yml
+# sets its own contents: write.
+permissions:
+  contents: read
+
 # Same Go as release.yml, see the comment there: the newest 1.26.x with its
 # security patches, and no toolchain switching from go.mod.
 env:

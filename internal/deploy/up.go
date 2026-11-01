@@ -146,6 +146,13 @@ func Up(opts UpOptions, st *state.State) error {
 	if err := docker.Run("volume", "create", OpenbaoVolumeName(st.Target)); err != nil {
 		return fmt.Errorf("couldn't create the openbao-file volume: %w", err)
 	}
+	// The same for the bundled Postgres's data volume (configure created it,
+	// but a volume removed by hand since would otherwise fail the start).
+	if st.PostgresMode == PostgresModeBundled {
+		if err := ensureBundledPostgresVolume(); err != nil {
+			return err
+		}
+	}
 
 	// From here on containers may be (re)started from this bundle -- keep
 	// it from being deleted by a later configure even if this `up` fails
@@ -159,11 +166,22 @@ func Up(opts UpOptions, st *state.State) error {
 	// by hand that Docker's restart policy does NOT recover from that
 	// failure mode (the process hangs rather than exiting). See the
 	// comment on auth's depends_on in
-	// versola-tools/compose.fragment.yml.template. vps has no postgres
-	// service at all — its Postgres is native on the host (see
+	// versola-tools/compose.fragment.yml.template. vps has a postgres
+	// service only when the deployment runs its own (PostgresMode); otherwise
+	// its Postgres is native on the host or a remote one (see
 	// compose.fragment.vps.yml.template's comment), not something this
 	// compose file starts.
 	if isVps {
+		// vps with its own Postgres: that goes first and is waited for (its
+		// healthcheck), the same order local has. central depends on it in the
+		// compose file as well, so this only says what is happening and where
+		// a failure of the database itself is reported.
+		if st.PostgresMode == PostgresModeBundled {
+			fmt.Println("\nStarting Postgres...")
+			if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "--wait", "postgres")...); err != nil {
+				return fmt.Errorf("couldn't start Postgres (is port %d free? `docker logs %s` says what it failed on): %w", bundledPostgresPort, bundledPostgresContainer, err)
+			}
+		}
 		fmt.Println("\nStarting central...")
 		if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "central")...); err != nil {
 			return fmt.Errorf("couldn't start central: %w", err)

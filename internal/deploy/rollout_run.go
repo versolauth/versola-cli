@@ -935,6 +935,13 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 			return err
 		}
 	}
+	// Compose reads every service's env_file when it loads the project, the
+	// postgres service's too.
+	if st.PostgresMode == PostgresModeBundled {
+		if err := writePostgresSecretsEnv(dir); err != nil {
+			return err
+		}
+	}
 	composePath := filepath.Join(dir, "compose.yml")
 	if err := os.Rename(filepath.Join(dir, "compose.fragment.yml"), composePath); err != nil {
 		return fmt.Errorf("couldn't finalize the temporary compose file: %w", err)

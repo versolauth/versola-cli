@@ -36,6 +36,7 @@ var bootstrapCmd = &cobra.Command{
 Currently supported:
 
   versola bootstrap local 0.1.1
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
@@ -58,13 +59,20 @@ up yourself and just want to hand this CLI a role-id/secret-id via
 "versola secrets login vps" instead. Either way this asks for
 confirmation before it touches the live database.
 
---auth-url and --postgres-host are both required for vps: the public
-domain this deployment will actually be reachable at, and the host:port
-its Postgres is reachable on. Both are specific to whoever's deploying
-(a different server, possibly a different Postgres setup entirely) —
-there's no sensible shared default across different servers/clients.
-local doesn't need either (docker-local's own defaults are fine for a
-throwaway dev stack).
+--auth-url is required for vps: the public domain this deployment will
+actually be reachable at. It is specific to whoever's deploying, so there's
+no sensible shared default. local doesn't need it (docker-local's own
+defaults are fine for a throwaway dev stack).
+
+On vps Postgres runs in a container of the deployment by default: no
+--postgres-host, no database step. The first start creates the role, the
+database and the schemas auth, central and edge, from the password stored
+in OpenBao; the data is in the Docker volume versola-postgres-data-vps,
+which "down" and "uninstall" leave alone. It listens on 127.0.0.1:5432
+only, so that port has to be free on the server. --postgres-host selects
+your own Postgres instead (its host:port), and configure run again without
+it keeps the one already chosen. This needs a versola-tools release that
+can run it; an older one is refused before anything is started.
 
 This CLI doesn't know Versola's own topology (ports, service names,
 config schema) — that lives entirely in the versioned "versola-tools"
@@ -94,7 +102,7 @@ func init() {
 	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
-	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port Postgres is reachable on (required for vps, e.g. 127.0.0.1:5432)")
+	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port of your own Postgres (vps; without it Postgres runs in a container of this deployment)")
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapRegistry, "registry", "", registryUsage)
@@ -126,9 +134,6 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// inside a container run.
 	if target == "vps" && authURL == "" {
 		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
-	}
-	if target == "vps" && postgresHost == "" {
-		return fmt.Errorf("--postgres-host is required for vps deployments (e.g. --postgres-host 127.0.0.1:5432)")
 	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
@@ -226,9 +231,9 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		// An error, not nil: the deployment isn't up yet, and a script
 		// running bootstrap must be able to tell that from its exit code.
 		if res.PostgresRoleScript == "" {
-			return fmt.Errorf("stopped before migrate: set the Postgres role's password as said above, then run `versola migrate` and `versola up`")
+			return fmt.Errorf("stopped before migrate: set the Postgres role's password as said above (or let `versola postgres init` create the role, the database and the schemas), then run `versola migrate` and `versola up`")
 		}
-		return fmt.Errorf("stopped before migrate: set the Postgres role's password by feeding %s to psql as the Postgres superuser (see above), then run `versola migrate` and `versola up`", res.PostgresRoleScript)
+		return fmt.Errorf("stopped before migrate: set the Postgres role's password by feeding %s to psql as the Postgres superuser (see above), or let `versola postgres init` create the role, the database and the schemas, then run `versola migrate` and `versola up`", res.PostgresRoleScript)
 	}
 
 	// Loaded once here and passed to both Migrate and Up, rather than

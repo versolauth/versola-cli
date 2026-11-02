@@ -362,7 +362,7 @@ func routeVia(ops replicaOps, mode string, c proxy.Config) error {
 	// is what shows the reload took.
 	if c.Fronts != (proxy.Fronts{}) {
 		if err := ops.waitFronts(c.Fronts); err != nil {
-			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(mode))
+			return fmt.Errorf("the proxy reloaded, but isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `versola logs proxy`)", err)
 		}
 	}
 	return nil

@@ -247,7 +247,7 @@ func startProxyForCentral(composePath string, st *state.State, routed proxy.Conf
 	}
 	fmt.Println("Waiting for it to serve central...")
 	if err := proxyOps.waitCentral(routed.Fronts.Central); err != nil {
-		return fmt.Errorf("the reverse proxy isn't serving its front of central's PORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+		return fmt.Errorf("the reverse proxy isn't serving its front of central's PORT: %w (see `versola logs proxy`)", err)
 	}
 	return nil
 }
@@ -309,13 +309,13 @@ func waitProxy(st *state.State, routed proxy.Config) error {
 	fmt.Println("Waiting for it to serve Versola...")
 	err = proxyOps.waitReady(st.ProxyMode, auth)
 	if errors.Is(err, proxy.ErrTLSPending) {
-		fmt.Printf("\nWarning: %v.\nThat's usually the certificate still being issued -- nginx keeps retrying on its own. Check that %s's DNS points at this server and that ports 80/443 are reachable from the internet; see `docker logs %s` for the ACME module's progress.\n", err, auth.Host, proxy.ContainerFor(st.ProxyMode))
+		fmt.Printf("\nWarning: %v.\nThat's usually the certificate still being issued -- nginx keeps retrying on its own. Check that %s's DNS points at this server and that ports 80/443 are reachable from the internet; see `versola logs proxy` for the ACME module's progress.\n", err, auth.Host)
 	} else if err != nil {
-		return fmt.Errorf("the reverse proxy isn't serving Versola: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+		return fmt.Errorf("the reverse proxy isn't serving Versola: %w (see `versola logs proxy`)", err)
 	}
 	if routed.Fronts != (proxy.Fronts{}) {
 		if err := proxyOps.waitFronts(routed.Fronts); err != nil {
-			return fmt.Errorf("the reverse proxy isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `docker logs %s`)", err, proxy.ContainerFor(st.ProxyMode))
+			return fmt.Errorf("the reverse proxy isn't serving its fronts of central's PORT and auth's APORT/MPORT: %w (see `versola logs proxy`)", err)
 		}
 	}
 	return nil

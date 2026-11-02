@@ -179,7 +179,7 @@ func Up(opts UpOptions, st *state.State) error {
 		if st.PostgresMode == PostgresModeBundled {
 			fmt.Println("\nStarting Postgres...")
 			if err := docker.Run(state.ComposeArgs(composePath, "up", "-d", "--wait", "postgres")...); err != nil {
-				return fmt.Errorf("couldn't start Postgres (is port %d free? `docker logs %s` says what it failed on): %w", bundledPostgresPort, bundledPostgresContainer, err)
+				return fmt.Errorf("couldn't start Postgres (is port %d free? `versola logs postgres` says what it failed on): %w", bundledPostgresPort, err)
 			}
 		}
 		fmt.Println("\nStarting central...")
@@ -199,7 +199,7 @@ func Up(opts UpOptions, st *state.State) error {
 	// (design doc §3.5). The service names are what is still assumed.
 	fmt.Println("Waiting for central to be ready...")
 	if err := wait.ForReady(readyURLs[centralReplicas[0].Service], readyTimeout); err != nil {
-		return fmt.Errorf("central never became ready: %w", err)
+		return fmt.Errorf("central never became ready: %w -- %s", err, LogsHint(centralReplicas[0].Service))
 	}
 
 	// vps: auth, edge and the admin console's resource reach central through
@@ -237,7 +237,7 @@ func Up(opts UpOptions, st *state.State) error {
 		}
 		for _, svc := range step.Ready {
 			if err := wait.ForReady(readyURLs[svc], readyTimeout); err != nil {
-				return fmt.Errorf("%s never became ready: %w", svc, err)
+				return fmt.Errorf("%s never became ready: %w -- %s", svc, err, LogsHint(svc))
 			}
 		}
 	}

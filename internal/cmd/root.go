@@ -48,6 +48,7 @@ func init() {
 	rootCmd.AddCommand(certsCmd)
 	rootCmd.AddCommand(edgeCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(versionsCmd)
 
 	// Make "versola --version" print exactly what "versola version"
 	// prints. Without this, cobra uses its own default template ("versola

@@ -3,7 +3,6 @@ package cmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/versolauth/versola-cli/internal/release"
 )
 
 // upgradeRepo is versola-cli's own repository -- not to be confused with
@@ -79,7 +80,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	downloadClient := &http.Client{}
 
-	latestTag, err := latestReleaseTag(client, upgradeRepo)
+	latestTag, err := (&release.Client{HTTP: client, BaseURL: release.GitHubAPI, UserAgent: userAgent()}).Latest(upgradeRepo)
 	if err != nil {
 		return fmt.Errorf("couldn't check the latest release: %w", err)
 	}
@@ -171,10 +172,6 @@ func releaseAssetName() (string, error) {
 	return "", fmt.Errorf("no published release binary for %s/%s", runtime.GOOS, runtime.GOARCH)
 }
 
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-}
-
 // httpGet is a GET request with an explicit User-Agent -- Go's own default
 // ("Go-http-client/1.1") already satisfies GitHub's bare requirement that
 // some User-Agent be present, but a client-identifying one is more useful
@@ -185,28 +182,14 @@ func httpGet(client *http.Client, url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "versola-cli/"+version)
+	req.Header.Set("User-Agent", userAgent())
 	return client.Do(req)
 }
 
-func latestReleaseTag(client *http.Client, repo string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
-	resp, err := httpGet(client, url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned %s", resp.Status)
-	}
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("couldn't parse GitHub's response: %w", err)
-	}
-	if release.TagName == "" {
-		return "", fmt.Errorf("GitHub's response didn't include a release tag")
-	}
-	return release.TagName, nil
+// userAgent is what every GitHub request of this CLI identifies itself as
+// (downloads here, and the release lookups of internal/release).
+func userAgent() string {
+	return "versola-cli/" + version
 }
 
 // downloadToFile streams url into path and also returns the full body, so

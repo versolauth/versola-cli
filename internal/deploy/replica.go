@@ -462,7 +462,7 @@ func (o dockerReplicaOps) writeReplicas(central, auth, edge []replica) error {
 // confirm something that was never going to run.
 func CheckReplicaRequest(st *state.State, service string, count int, adding bool) error {
 	if st == nil {
-		return fmt.Errorf("nothing has been configured yet -- run `versola bootstrap local <version>` first")
+		return fmt.Errorf("nothing has been configured yet -- run `versola bootstrap local` first")
 	}
 	if !Scalable(service) {
 		return fmt.Errorf("%q can't have replicas: only %s and %s can", service, AuthService, EdgeService)

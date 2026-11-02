@@ -29,17 +29,24 @@ var bootstrapYes bool
 var bootstrapNoCertsTimer bool
 
 var bootstrapCmd = &cobra.Command{
-	Use:   "bootstrap <target> <version>",
-	Short: "Deploy a specific version of Versola",
-	Long: `bootstrap deploys a specific released version of Versola.
+	Use:   "bootstrap <target> [<version>]",
+	Short: "Deploy a version of Versola",
+	Long: `bootstrap deploys a released version of Versola.
 
 Currently supported:
 
+  versola bootstrap local
   versola bootstrap local 0.1.1
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
+
+On local the version can be left out: bootstrap then keeps the version
+already deployed on this machine, or, on a first deployment, deploys the
+latest Versola release (never a pre-release); the first line it prints
+says which. On vps it is required -- a server runs only a version you
+name. "versola versions" lists the releases.
 
 On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
 certificate -- see "versola configure --help" for --proxy.
@@ -95,7 +102,11 @@ for confirmation only once up front on vps rather than once per step.
 Run those separately instead of bootstrap when a deployment (e.g. onto
 a server) needs to stop between them — to review the plan before it
 touches a live database, or to run migrate on its own schedule.`,
-	Args: cobra.ExactArgs(2),
+	// One argument is "local" without a version (the latest release, or the
+	// version already deployed -- see target_version.go); vps without one is
+	// refused there, with an example, rather than by cobra's "accepts
+	// between 1 and 2 arg(s)".
+	Args: cobra.RangeArgs(1, 2),
 	RunE: runBootstrap,
 }
 
@@ -128,7 +139,7 @@ func init() {
 // three times here for what's really one decision. This asks once, up
 // front, before Configure runs at all.
 func runBootstrap(cmd *cobra.Command, args []string) error {
-	target, version := args[0], args[1]
+	target := args[0]
 
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
@@ -158,6 +169,16 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer unlock()
+
+	// Under the lock, first: the version decides what everything below is
+	// about, and "Deploying Versola 0.7.5 (the latest release ...)" has to
+	// be the first thing said. Also refuses vps without a version, before
+	// --auth-url is asked for.
+	choice, err := chooseVersion(os.Stdout, "bootstrap", args)
+	if err != nil {
+		return err
+	}
+	version := choice.Version
 
 	// Under the lock, as in cmd/configure.go: the flags left out come from
 	// the record this run replaces. Also where a missing --auth-url is
@@ -225,7 +246,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		deploy.ProxyOptions{Mode: vf.Proxy, ACMEStaging: vf.ACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
 	if err != nil {
-		return err
+		return explainMissingImage(err, choice, "bootstrap")
 	}
 	// Migrate would only fail to log in to Postgres: the role doesn't
 	// have the password Configure just generated until someone runs the

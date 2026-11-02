@@ -124,7 +124,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		if doctorTarget == "vps" {
 			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ...`.")
 		} else {
-			fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+			fmt.Println("All checks passed — ready for `versola bootstrap local` (the latest Versola release).")
 		}
 		return nil
 	}

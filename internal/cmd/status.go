@@ -33,7 +33,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if !exists {
-		fmt.Println("Nothing deployed yet — run `versola bootstrap local <version>` first.")
+		fmt.Println("Nothing deployed yet — run `versola bootstrap local` first.")
 		return nil
 	}
 

@@ -27,7 +27,7 @@ var configurePostgresCA string
 var configureRegistry string
 
 var configureCmd = &cobra.Command{
-	Use:   "configure <target> <version>",
+	Use:   "configure <target> [<version>]",
 	Short: "Prepare a deployment without starting it",
 	Long: `configure checks the machine, generates this release's configs, and
 resolves its secrets against OpenBao (starting OpenBao itself first if
@@ -35,11 +35,17 @@ it isn't already running). It doesn't start any of Versola's own
 services and doesn't touch the database — see "versola migrate" and
 "versola up" for the steps after this one.
 
+  versola configure local
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
+
+On local the version can be left out: the version already deployed on
+this machine is kept, otherwise the latest Versola release (never a
+pre-release) is used; the first line it prints says which. On vps it is
+required. "versola versions" lists the releases.
 
 On vps, Versola is exposed through its own reverse proxy (the official
 nginx image, configured by this CLI): by default it serves ports 80/443
@@ -121,7 +127,11 @@ This is the first of three steps "versola bootstrap" runs together in
 one go, in order: configure, migrate, up. Use these separately when a
 database migration needs to be its own explicit, reviewable step rather
 than something that happens silently — e.g. deploying onto a server.`,
-	Args: cobra.ExactArgs(2),
+	// One argument is "local" without a version (the latest release, or the
+	// version already deployed -- see target_version.go); vps without one is
+	// refused there, with an example, rather than by cobra's "accepts
+	// between 1 and 2 arg(s)".
+	Args: cobra.RangeArgs(1, 2),
 	RunE: runConfigure,
 }
 
@@ -143,7 +153,7 @@ func init() {
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
-	target, version := args[0], args[1]
+	target := args[0]
 
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
@@ -171,6 +181,16 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer unlock()
+
+	// Under the lock, first: the version decides what everything below is
+	// about, and "Deploying Versola 0.7.5 (the latest release ...)" has to
+	// be the first thing said. Also refuses vps without a version, before
+	// --auth-url is asked for.
+	choice, err := chooseVersion(os.Stdout, "configure", args)
+	if err != nil {
+		return err
+	}
+	version := choice.Version
 
 	// Under the lock: the flags left out are taken from the record this run
 	// replaces (see vpsFlags), which a concurrent configure could otherwise
@@ -259,7 +279,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		deploy.ProxyOptions{Mode: vf.Proxy, ACMEStaging: vf.ACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
 	if err != nil {
-		return err
+		return explainMissingImage(err, choice, "configure")
 	}
 	scheduleCertsRenewal(os.Stdout, target, configureNoCertsTimer || !deploy.IssuesMutualTLSCertificates(version), days != nil && *days == 0)
 	return nil

@@ -18,8 +18,9 @@ var (
 )
 
 var backupCmd = &cobra.Command{
-	Use:   "backup",
-	Short: "Back the deployment up into one archive, and list the archives",
+	Use:     "backup",
+	GroupID: groupOperate,
+	Short:   "Back the deployment up into one archive, and list the archives",
 }
 
 var backupCreateCmd = &cobra.Command{

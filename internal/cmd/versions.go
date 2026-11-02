@@ -21,8 +21,9 @@ var versionsLimit int
 // TODO(#72): once command groups land in root.go, put this next to
 // "version" in its group.
 var versionsCmd = &cobra.Command{
-	Use:   "versions",
-	Short: "List the Versola releases you can deploy",
+	Use:     "versions",
+	GroupID: groupGetStarted,
+	Short:   "List the Versola releases you can deploy",
 	Long: `versions lists Versola's releases, newest first, one per line, with
 three tab-separated columns: the version (what "bootstrap", "configure"
 and "rollout" take), its release date, and markers -- "latest" for the

@@ -130,9 +130,41 @@ its own — if Docker isn't found at all, the most it does is offer to open
 an install page in your browser, and only after you confirm:
 - Docker daemon reachable (not just `docker` on PATH)
 - Docker Compose v2 plugin present
-- Port 2821 free on localhost (`local` only — for `vps`, `configure`
-  itself checks the ports its reverse proxy needs, which depend on
-  `--proxy` and `--auth-url`: see "Deploying to a VPS" below)
+- Port 2821 free on localhost (`local` only)
+- With `--target vps`, the checks of what `configure vps` will be given.
+  Pass the same flags you will pass it (`--auth-url`, `--proxy`,
+  `--postgres-host`, `--registry`); on a server that already has a vps
+  deployment, the ones `configure` remembers are taken from it when left
+  out, as `configure` takes them: `--auth-url`, `--proxy` and the public
+  names, listed first, and the Postgres, shown on its own line. A value `configure` would
+  refuse is refused here, before any check runs, and these flags are
+  refused with `--target local`:
+  - with `--auth-url`: its name resolves, to this server. A name that
+    doesn't resolve fails; one that resolves to an address none of this
+    server's interfaces has is a warning (right behind NAT or a load
+    balancer, wrong otherwise -- with `--proxy nginx` and an https URL,
+    Let's Encrypt then issues no certificate), and so is one that resolves
+    here and elsewhere too (a stale A or AAAA record)
+  - with `--auth-url`: the ports Versola's proxy binds are free, the same
+    check as `configure`'s, with the same exception for this deployment's
+    own proxy: 80 and 443 with `--proxy nginx` (80 alone for an http URL),
+    `127.0.0.1:2821` with `--proxy external` (the default is `nginx`)
+  - the Postgres, decided as `configure` decides it (see "Postgres on vps"):
+    for the container (no `--postgres-host`, and no deployment here with a
+    Postgres of its own), port 5432 is free; for your own, which one it is
+    (`postgres init` checks and prepares it after `configure`)
+  - the image registry (`ghcr.io`, or the host of `--registry`) answers over
+    HTTPS: any HTTP answer will do, no answer fails. Docker pulling through
+    a proxy set for its daemon is not seen by this check
+  - lingering of your user (`loginctl`), when it can be told: off is a
+    warning with `sudo loginctl enable-linger $USER`, since the
+    certificate-renewal timer `up` installs stops with your last session
+    otherwise
+
+  When nothing fails, the last line is the `configure vps` command with the
+  flags given (remembered ones are left to `configure`), ready to copy (`--auth-url https://<your domain>` when there
+  is none, neither given nor remembered). Without `--auth-url` the name and
+  port checks are skipped, and `doctor` says to pass it. Warnings don't fail `doctor`; their number is printed above it.
 - With `--target vps` and `--auth-url`, and any of `--mtls-domain`,
   `--central-mtls-domain`, `--central-domain` (the names you will deploy
   with, see "Public names" below): each name resolves, to this server, and
@@ -155,22 +187,25 @@ different memory checks, not just a different number:
   — three JVMs plus local's own containerized Postgres. On Docker
   Desktop (macOS/Windows) this is the VM's allocation, a budget nothing
   else competes with; on native Linux it's the host's own physical RAM.
-- `vps` checks `/proc/meminfo`'s MemAvailable instead — vps's Postgres is
-  a native, non-Docker install, so total physical RAM isn't the right
-  number there (native Postgres and the rest of the host OS already
-  compete for it). The minimum is ~1 GiB if `versola-central`/`auth`/
+- `vps` checks `/proc/meminfo`'s MemAvailable instead — on a server the
+  services share the host's RAM with everything else on it (the Postgres
+  container, or a native Postgres, and the OS), so total physical RAM isn't
+  the right number there. The minimum is ~1 GiB if `versola-central`/`auth`/
   `edge` are already running (an in-place redeploy roughly nets out) or
-  ~3 GiB if none of them are yet (starting three JVMs from cold, closer
-  to local's own estimate minus the containerized Postgres vps doesn't
-  have), plus a bit more if OpenBao also isn't running yet. This check
+  ~3 GiB if none of them are yet (starting three JVMs from cold), plus a
+  bit more if OpenBao also isn't running yet. These figures do not count
+  the Postgres container yet: they are to come from the release
+  (versolauth/versola#825), not from new constants here. This check
   only works run directly on the VPS itself over SSH — it fails outright
   (not a silent skip) if the Docker CLI is pointed at a remote host
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
   rather than quietly checking the wrong machine's memory.
 
-Exits non-zero if any check fails. `bootstrap`/`configure` run the same
-checks themselves before doing anything, so running `doctor` first is
-optional but gives you the same picture ahead of time.
+Exits non-zero if any check fails. `bootstrap`/`configure` run the
+machine checks themselves before doing anything (Docker, memory, disk,
+the proxy's ports, port 5432 for the Postgres container); the name of
+`--auth-url`, the registry and lingering are only checked here, so on a
+server run `doctor --target vps` with your flags first.
 
 If Docker isn't reachable, `doctor` tells the two possible reasons apart
 and reacts differently: already installed but not running just gets a

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -239,7 +240,13 @@ func ensureBundledPostgresVolume() error {
 // listening there stops it from starting, and Docker would then restart it
 // in a loop. The deployment's own container holding the port is not a conflict.
 func checkBundledPostgresPort() checks.Result {
-	if bundledPostgresRunning() {
+	return checkBundledPostgresPortWith(bundledPostgresRunning())
+}
+
+// checkBundledPostgresPortWith is checkBundledPostgresPort, told whether the
+// deployment's own container runs.
+func checkBundledPostgresPortWith(ownRunning bool) checks.Result {
+	if ownRunning {
 		return checks.Result{Name: fmt.Sprintf("Port %d free", bundledPostgresPort), OK: true, Detail: "held by this deployment's own Postgres"}
 	}
 	r := checks.PortFree(bundledPostgresPort, bundledPostgresContainer)
@@ -247,6 +254,45 @@ func checkBundledPostgresPort() checks.Result {
 		r.Detail += fmt.Sprintf(" -- the Postgres of this deployment listens on 127.0.0.1:%d: stop the one already there, or give --postgres-host to use it instead", bundledPostgresPort)
 	}
 	return r
+}
+
+// PostgresCheck is what `doctor --target vps` says about the Postgres a
+// `configure vps` given postgresHost ("" when the flag is left out) would use,
+// decided as configure decides it (resolvePostgres, with the record of the
+// deployment on this machine): for the container, the check of port 5432 that
+// configure runs; for one of the customer's own, which one it is. A choice
+// configure would refuse (--postgres-host over a deployment that runs its own
+// Postgres) fails here with configure's words.
+func PostgresCheck(postgresHost string) checks.Result {
+	// As configure: an unreadable record only matters when --postgres-host
+	// is left out.
+	stored, err := storedVps()
+	if err != nil && postgresHost == "" {
+		return checks.Result{Name: "Postgres", Detail: fmt.Sprintf("the record of the current deployment can't be read (%v), so configure can't tell whether it runs its own Postgres. Fix it, or give --postgres-host to use a Postgres of your own", err)}
+	}
+	mode, host, err := resolvePostgres("vps", postgresHost, stored, nil)
+	// doctor goes on after a failed Docker check: a Docker that doesn't
+	// answer must not hang it here (configure asks only once Docker answered).
+	bounded := func() checks.Result {
+		running, err := docker.IsRunningWithin(bundledPostgresContainer, 5*time.Second)
+		return checkBundledPostgresPortWith(err == nil && running)
+	}
+	return postgresCheckOf(mode, host, err, bounded)
+}
+
+func postgresCheckOf(mode, host string, err error, bundledPort func() checks.Result) checks.Result {
+	if err != nil {
+		return checks.Result{Name: "Postgres", Detail: err.Error()}
+	}
+	if mode == PostgresModeBundled {
+		r := bundledPort()
+		r.Name = fmt.Sprintf("Postgres port %d", bundledPostgresPort)
+		if r.OK && r.Detail == "" {
+			r.Detail = fmt.Sprintf("free: the Postgres container of this deployment listens on 127.0.0.1:%d (pass --postgres-host to use a Postgres of your own instead)", bundledPostgresPort)
+		}
+		return r
+	}
+	return checks.Result{Name: "Postgres", OK: true, Detail: fmt.Sprintf("yours, at %s -- after configure, `versola postgres init` prepares it (role, database, schemas)", host)}
 }
 
 // forgottenPostgresPasswordNote is printed when this configure generated a new

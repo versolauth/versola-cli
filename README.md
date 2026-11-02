@@ -578,8 +578,12 @@ stops the container from starting). Nothing in this mode is done by hand:
   then refuses before anything is started and says to use a newer release or
   `--postgres-host`.
 
-Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats`/`backup`
-for the container, and `doctor`'s memory figures with it.
+**Back it up.** The volume is the database, on one server: `versola backup
+create` (see [`backup create`](#backup-create--backup-list)) dumps it through
+the container, together with what the dump needs to be readable.
+
+Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats` for the
+container, and `doctor`'s memory figures with it.
 
 ### Your own Postgres: `postgres init`
 
@@ -1121,8 +1125,10 @@ the renewal.
 1. Read the release notes of the new version: additive migrations, the
    running version working on the new schema. If not, this is a
    `configure` / `migrate` / `up` deployment instead.
-2. Back the database up (`pg_dump` of each schema) -- migrations can't be
-   rolled back -- and copy `~/.versola/active/state.json`.
+2. `versola backup create` -- migrations can't be rolled back -- and copy
+   the archive off the server. Without the CLI: a `pg_dump -Fc` of the
+   database and a copy of `~/.versola/active/state.json` (and OpenBao's data
+   and `~/.versola/openbao/`, without which the dump can't be read).
 3. `versola rollout <version> --dry-run`: the plan, the checks, the
    secrets plan, the migrations it would apply. Nothing changes.
 4. `versola rollout <version> --assume-compatible`. Cut off, run the same
@@ -1301,6 +1307,55 @@ the files and stops. A partner's edge does not use any of this: it has no
 connection to central. (Central's own `edge-identity` setting only matters for
 partners' edges; an operator's own, first-party, edges are always extended by central.)
 
+### `backup create` / `backup list`
+
+```bash
+versola backup create [--out <dir>] [--skip-database]
+versola backup list [--out <dir>]
+```
+
+`backup create` writes one archive of the deployment this machine tracks
+(vps or local), `versola-backup-<target>-<version>-<UTC time>.tar.gz`, mode
+0600, into `--out` (default `~/versola-backups`, outside `~/.versola` so
+`uninstall` never touches it). It holds what `configure` cannot make again:
+
+| Member | What |
+|---|---|
+| `manifest.json` | CLI and Versola versions, target, Postgres mode (`bundled`: the deployment's own container, and local; `external`: yours), database and role, the vps proxy's configuration generation, and the size and SHA-256 of every other member; what was left out and why |
+| `database.dump` | `pg_dump -Fc` of the database. The deployment's own Postgres is dumped inside its container (`docker exec`, the server's own `pg_dump`); yours from a throw-away `postgres:18-alpine` container on the host network, connecting and verifying TLS as the services do, with the password read by Docker from `auth.secrets.env`, never put on a command line |
+| `openbao-volume.tar` | OpenBao's data volume. OpenBao's file storage has no online snapshot, so OpenBao is stopped for the copy (seconds; the services keep running, they read their secrets from their own files), then started and unsealed with the saved key (also when the copy failed). A Ctrl-C, a dropped SSH session or a kill meanwhile waits until it runs again (it says so at once). The image the copy runs in (`postgres:18-alpine`) is pulled before the stop, never while OpenBao is down. It is stopped only when it is sure to come back, so no question is asked: its configuration file still exists, and this machine has an unseal key and a root token the running OpenBao accepts. Otherwise (OpenBao set up by hand, a stale key file) it is not stopped and the copy is left out, with the reason; the archive is still written, but the command fails (exit code 1), since a dump without OpenBao's data can't be read after a restore. A stopped OpenBao is copied as it is |
+| `openbao/` | `<target>.json`, `<target>-admin.json` (the root token and unseal key), `<target>-postgres-role.sql`, the ones present |
+| `state/` | `state.json`, and the copy of `--postgres-ca`'s file if there is one |
+
+Not in it: the generated deployment files (`configure` writes them again),
+the ACME certificate volume (a redeploy requests a new certificate) and the
+mutual-TLS volume (`versola up` reissues the certificates). The command
+prints what the archive holds, file names and sizes only, and what it does
+not.
+
+**Whoever has the archive has every secret of the deployment**: OpenBao's
+data and the key that unseals it are in the same file, as they have to be
+for the dump to be readable after a restore. Keep it like a password, and
+copy it off the server: a backup that lives only on the server is lost with
+it.
+
+`--skip-database` leaves the dump out, for a managed database with
+snapshots of its own (it warns when the database is the deployment's own
+container: nothing else backs that one up). The database is dumped first, so
+a database that refuses the login fails the command before OpenBao is
+stopped. Any failure leaves no archive: it is packed under a temp name and
+renamed at the end; the staging copies are removed, and those of a run that
+was killed outright are removed by the next `backup create` into the same
+directory. During an
+unfinished rolling upgrade the archive is made, and the manifest
+(`unfinishedRollout`) and the output say so: the dump may already have the
+new version's schema. While it runs the
+deployment is locked like for `configure`, and the dump is staged on disk
+before packing, so `--out` needs about twice the dump's size free.
+
+`backup list` shows the archives in `--out`, newest first, with the summary
+from each manifest. `backup restore` does not exist yet.
+
 ### `status`
 
 Shows the deployed version and target (and the registry, when it is not
@@ -1405,7 +1460,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)

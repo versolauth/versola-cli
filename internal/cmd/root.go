@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(secretsCmd)
 	rootCmd.AddCommand(postgresCmd)
+	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(certsCmd)
 	rootCmd.AddCommand(edgeCmd)
 	rootCmd.AddCommand(versionCmd)

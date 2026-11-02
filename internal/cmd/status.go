@@ -52,6 +52,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Printf("Deployed version: %s (target: %s)\n", st.Version, st.Target)
 		}
+		// The settings a configure vps without flags keeps (see vpsFlags):
+		// shown here so that they can be checked without opening state.json.
+		for _, line := range deploy.VpsSettingsLines(st) {
+			fmt.Println(line)
+		}
 		if st.ImageRegistry != "" {
 			fmt.Printf("Images from: %s (not Versola's own registry)\n", st.ImageRegistry)
 		}

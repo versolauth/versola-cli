@@ -59,10 +59,12 @@ up yourself and just want to hand this CLI a role-id/secret-id via
 "versola secrets login vps" instead. Either way this asks for
 confirmation before it touches the live database.
 
---auth-url is required for vps: the public domain this deployment will
-actually be reachable at. It is specific to whoever's deploying, so there's
-no sensible shared default. local doesn't need it (docker-local's own
-defaults are fine for a throwaway dev stack).
+--auth-url is required on the first vps deployment: the public domain this
+deployment will actually be reachable at. It is specific to whoever's
+deploying, so there's no sensible shared default. local doesn't need it
+(docker-local's own defaults are fine for a throwaway dev stack). Later
+runs on the same server remember it, with --proxy, --acme-staging,
+--setup-openbao and the Postgres -- see "versola configure --help".
 
 On vps Postgres runs in a container of the deployment by default: no
 --postgres-host, no database step. The first start creates the role, the
@@ -101,18 +103,18 @@ func init() {
 	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
 	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
-	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
-	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", "host:port of your own Postgres (vps; without it Postgres runs in a container of this deployment)")
+	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", authURLUsage)
+	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", postgresHostUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresDB, "postgres-db", "", postgresDBUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapPostgresCA, "postgres-ca", "", postgresCAUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapRegistry, "registry", "", registryUsage)
-	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	bootstrapCmd.Flags().StringVar(&bootstrapProxy, "proxy", proxy.ModeNginx, proxyUsage)
 	bootstrapCmd.Flags().StringVar(&bootstrapCentralURL, "central-url", "", centralURLUsage)
 	addPublicFlags(bootstrapCmd)
-	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
+	bootstrapCmd.Flags().BoolVar(&bootstrapACMEStaging, "acme-staging", false, acmeStagingUsage)
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
-	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
+	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, setupOpenBaoUsage)
 }
 
 // runBootstrap deploys in one go, which is all this command has ever
@@ -128,13 +130,6 @@ func init() {
 func runBootstrap(cmd *cobra.Command, args []string) error {
 	target, version := args[0], args[1]
 
-	// Checked here, not left to versola-tools' own entrypoint.sh check --
-	// failing before Configure even starts pulling/running the tools
-	// image gives a faster, clearer error than letting it fail deep
-	// inside a container run.
-	if target == "vps" && authURL == "" {
-		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
-	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
 	}
@@ -164,6 +159,14 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	defer unlock()
 
+	// Under the lock, as in cmd/configure.go: the flags left out come from
+	// the record this run replaces. Also where a missing --auth-url is
+	// refused, before anything is pulled or started.
+	vf, err := resolveVpsFlags(cmd, target)
+	if err != nil {
+		return err
+	}
+
 	// Before Configure, not between it and Up -- Configure's own Finalize
 	// commits to this being "the" deployment (overwrites state.json,
 	// deletes the previous bundle) before Up would otherwise ask this,
@@ -185,7 +188,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	// leave status/down/uninstall unable to find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("deploy Versola %s to the VPS, including running database migrations against the live database", version)
-		if err := deploy.ConfirmVpsDeployYes(bootstrapYes, action); err != nil {
+		if err := confirmVpsRun(os.Stdout, vf, bootstrapYes, action); err != nil {
 			return err
 		}
 	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
@@ -218,8 +221,8 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	res, err := deploy.Configure(target, version, authURL, postgresHost, pg, setupOpenBao,
-		deploy.ProxyOptions{Mode: bootstrapProxy, ACMEStaging: bootstrapACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
+	res, err := deploy.Configure(target, version, vf.AuthURL, vf.PostgresHost, pg, vf.SetupOpenBao,
+		deploy.ProxyOptions{Mode: vf.Proxy, ACMEStaging: vf.ACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
 	if err != nil {
 		return err

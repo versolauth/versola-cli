@@ -52,8 +52,18 @@ vps's OpenBao is provisioned automatically by default (init, unseal,
 kv-v2, AppRole, policy, role — same as local always has) — pass
 --setup-openbao if you've already set OpenBao up yourself and just want
 to hand this CLI a role-id/secret-id via "versola secrets login vps"
-instead. --auth-url is required for vps — see "versola bootstrap --help"
-for why.
+instead. --auth-url is required on the first configure vps — see
+"versola bootstrap --help" for why.
+
+configure vps run again remembers the deployment it replaces: --auth-url,
+--proxy, --acme-staging, --setup-openbao and the Postgres it uses are
+taken from it unless a flag is given, so a redeploy or a move to another
+version is just
+
+  versola configure vps 0.1.2
+
+The settings it reused are printed before it asks to continue; a flag
+given on the command line wins over the recorded value.
 
 On vps Postgres runs in a container of the deployment by default: no
 --postgres-host, no database step. The first start creates the role, the
@@ -117,31 +127,24 @@ than something that happens silently — e.g. deploying onto a server.`,
 
 func init() {
 	configureCmd.Flags().BoolVarP(&configureYes, "yes", "y", false, "don't ask for confirmation (vps)")
-	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", "public URL auth will be reachable at (required for vps, e.g. https://id.example.com)")
-	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", "host:port of your own Postgres (vps; without it Postgres runs in a container of this deployment)")
+	configureCmd.Flags().StringVar(&configureAuthURL, "auth-url", "", authURLUsage)
+	configureCmd.Flags().StringVar(&configurePostgresHost, "postgres-host", "", postgresHostUsage)
 	configureCmd.Flags().StringVar(&configurePostgresDB, "postgres-db", "", postgresDBUsage)
 	configureCmd.Flags().StringVar(&configurePostgresCA, "postgres-ca", "", postgresCAUsage)
 	configureCmd.Flags().StringVar(&configureRegistry, "registry", "", registryUsage)
-	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, "vps only: how Versola is exposed -- \"nginx\" (default: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it)")
+	configureCmd.Flags().StringVar(&configureProxy, "proxy", proxy.ModeNginx, proxyUsage)
 	configureCmd.Flags().StringVar(&configureCentralURL, "central-url", "", centralURLUsage)
 	addPublicFlags(configureCmd)
 	configureCmd.Flags().BoolVar(&configureNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates; refused unless --cert-lifetime-days is unlimited")
-	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments")
+	configureCmd.Flags().BoolVar(&configureACMEStaging, "acme-staging", false, acmeStagingUsage)
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
-	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\"")
+	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, setupOpenBaoUsage)
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
 	target, version := args[0], args[1]
 
-	// Checked here too, not just inside deploy.Configure — see
-	// bootstrap.go's identical check for why: failing before Configure
-	// even starts pulling/running the tools image gives a faster, clearer
-	// error than letting it fail deep inside a container run.
-	if target == "vps" && configureAuthURL == "" {
-		return fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
-	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
 	}
@@ -168,6 +171,14 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer unlock()
+
+	// Under the lock: the flags left out are taken from the record this run
+	// replaces (see vpsFlags), which a concurrent configure could otherwise
+	// change in between. Also where a missing --auth-url is refused.
+	vf, err := resolveVpsFlags(cmd, target)
+	if err != nil {
+		return err
+	}
 
 	// Configure looks like the harmless step of the three -- it starts
 	// nothing and touches no database -- but its own Finalize is
@@ -211,7 +222,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	// find the vps containers.
 	if target == "vps" {
 		action := fmt.Sprintf("make Versola %s the deployment this machine tracks for the VPS, replacing its current record (nothing is started or stopped yet)", version)
-		if err := deploy.ConfirmVpsDeployYes(configureYes, action); err != nil {
+		if err := confirmVpsRun(os.Stdout, vf, configureYes, action); err != nil {
 			return err
 		}
 	} else if _, err := confirmIfVpsState(false, func(prevVersion string) string {
@@ -244,8 +255,8 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	_, err = deploy.Configure(target, version, configureAuthURL, configurePostgresHost, pg, configureSetupOpenBao,
-		deploy.ProxyOptions{Mode: configureProxy, ACMEStaging: configureACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
+	_, err = deploy.Configure(target, version, vf.AuthURL, vf.PostgresHost, pg, vf.SetupOpenBao,
+		deploy.ProxyOptions{Mode: vf.Proxy, ACMEStaging: vf.ACMEStaging, CentralURL: configureCentralURL, Public: public, CertDays: days, Est: est},
 		deploy.SecretOptions{GenerateMissing: configureGenerateMissing, AllowLegacy: configureAllowLegacy}, registry)
 	if err != nil {
 		return err

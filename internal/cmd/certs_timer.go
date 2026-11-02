@@ -81,10 +81,16 @@ func certsTimerWarning() string {
 // printCertsWarnings prints the timer warning for a vps deployment (local has
 // no timer to speak of: its certificates are renewed by hand).
 func printCertsWarnings(w io.Writer, st *state.State) {
-	if st.Target != "vps" || st.CertsUnlimited() || !deploy.IssuesMutualTLSCertificates(st.Version) {
-		return
-	}
-	if msg := certsTimerWarning(); msg != "" {
+	if msg := certsWarning(st); msg != "" {
 		fmt.Fprintf(w, "WARNING: %s\n", msg)
 	}
+}
+
+// certsWarning is printCertsWarnings' message, or "": also one of
+// `status --json`'s warnings.
+func certsWarning(st *state.State) string {
+	if st.Target != "vps" || st.CertsUnlimited() || !deploy.IssuesMutualTLSCertificates(st.Version) {
+		return ""
+	}
+	return certsTimerWarning()
 }

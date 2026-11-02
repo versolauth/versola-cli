@@ -28,100 +28,30 @@ var configurePostgresCA string
 var configureRegistry string
 
 var configureCmd = &cobra.Command{
-	Use:   "configure <target> <version>",
-	Short: "Prepare a deployment without starting it",
-	Long: `configure checks the machine, generates this release's configs, and
-resolves its secrets against OpenBao (starting OpenBao itself first if
-it isn't already running). It doesn't start any of Versola's own
-services and doesn't touch the database — see "versola migrate" and
-"versola up" for the steps after this one.
+	Use:     "configure <target> <version>",
+	GroupID: groupDeploy,
+	Short:   "Prepare a deployment without starting it",
+	Long: `configure prepares a deployment without starting it: it checks the machine,
+generates this release's configs and stores its secrets in OpenBao.
 
   versola configure local 0.1.1
   versola configure vps 0.1.1 --auth-url https://id.example.com
   versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
-  versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
-  versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
+  versola configure vps 0.1.1 --auth-url https://id.example.com --proxy external
+  versola configure vps 0.1.2      # later: the flags given before are remembered
 
-On vps, Versola is exposed through its own reverse proxy (the official
-nginx image, configured by this CLI): by default it serves ports 80/443
-itself and gets a Let's Encrypt certificate for an https --auth-url
-(the domain's DNS has to point at this server). If this server already
-runs a web server on 80/443, pass --proxy external: Versola's proxy then
-listens on 127.0.0.1:2821 and your web server forwards to it.
+It starts none of Versola's services and touches no database: "versola
+migrate" and "versola up" come next ("versola bootstrap" runs all three). On
+vps, Postgres runs in a container of the deployment unless --postgres-host
+names your own, and Versola's nginx serves ports 80/443 with a Let's Encrypt
+certificate (the domain's DNS has to point at this server) unless --proxy
+external puts it behind your web server. On vps it asks before it replaces
+this machine's record of the current deployment, and it writes no secret
+while one looks lost (see "versola secrets plan").
 
-vps's OpenBao is provisioned automatically by default (init, unseal,
-kv-v2, AppRole, policy, role — same as local always has) — pass
---setup-openbao if you've already set OpenBao up yourself and just want
-to hand this CLI a role-id/secret-id via "versola secrets login vps"
-instead. --auth-url is required on the first configure vps — see
-"versola bootstrap --help" for why.
-
-configure vps run again remembers the deployment it replaces: --auth-url,
---proxy, --acme-staging, --setup-openbao and the Postgres it uses are
-taken from it unless a flag is given, so a redeploy or a move to another
-version is just
-
-  versola configure vps 0.1.2
-
-The settings it reused are printed before it asks to continue; a flag
-given on the command line wins over the recorded value.
-
-On vps Postgres runs in a container of the deployment by default: no
---postgres-host, no database step. The first start creates the role, the
-database and the schemas auth, central and edge, from the password stored
-in OpenBao; the data is in the Docker volume versola-postgres-data-vps,
-which "down" and "uninstall" leave alone. It listens on 127.0.0.1:5432
-only, so that port has to be free on the server. --postgres-host selects
-your own Postgres instead (its host:port), and configure run again without
-it keeps the one already chosen. This needs a versola-tools release that
-can run it; an older one is refused before anything is started.
-
-Against a vps deployment this asks for confirmation first: it doesn't
-start or stop any of Versola's own services, but it does replace this
-machine's record of which deployment is the current one, which is what
-"versola status", "down" and "uninstall" all act on.
-
-Before it writes any secret, configure works out what it may do about
-each one (the same plan "versola secrets plan" prints) and stops, with
-nothing written, if a secret looks lost, a key pair is only half stored,
-or this is an install of unknown origin -- generating a new value there
-would make stored data unreadable. --generate-missing NAME[,NAME...]
-confirms that the named secrets may be generated anyway;
---allow-legacy-secrets lets a release that has no secret schema be
-configured by the old rule ("anything missing is generated").
-
-On vps nothing is published beyond --auth-url's name unless asked to:
---mtls-domain, --central-mtls-domain and --central-domain (all optional,
-all remembered) publish auth's and central's mutual-TLS listeners and
-central's enrollment route, for edges in another network and external
-mutual-TLS clients -- see the README, "Public names". Without them every
-mutual-TLS listener answers on this host's loopback only.
-
-On vps, --postgres-db names the database (default: auth) and
---postgres-ca points at a PEM file with the CA that signed Postgres'
-server certificate, which the services then trust for sslmode=verify-full.
-Both are remembered (the CA file is copied next to the deployment's
-state), so rollout keeps using them and a later configure without the
-flag keeps the stored value; passing a flag again overrides it. They need a versola-tools release that
-understands POSTGRES_DB / POSTGRES_CA_FILE; an older one ignores them.
-
---registry PREFIX pulls versola-tools, and through it central, auth and
-edge, from PREFIX instead of Versola's own registry (ghcr.io/versolauth),
-for test images pushed elsewhere:
-
-  versola configure local 0.8.0-test1 --registry cr.yandex/crp1a2b3c
-
-Images are PREFIX/versola-tools:<version>, PREFIX/versola-central:<version>
-and so on, so versola-tools has to be pushed there with the same tag and
-built with that tag as its VERSION. It is not a login: run "docker login"
-for the registry first. It is remembered with the deployment, so "versola
-rollout" keeps pulling from it; a later configure without the flag goes
-back to Versola's own registry.
-
-This is the first of three steps "versola bootstrap" runs together in
-one go, in order: configure, migrate, up. Use these separately when a
-database migration needs to be its own explicit, reviewable step rather
-than something that happens silently — e.g. deploying onto a server.`,
+More: README "configure <target> <version> / migrate / up", "Redeploying on
+the same server", "Postgres on vps", "Deploying to a VPS: the reverse proxy",
+"Secrets", "Public names". Every flag: versola configure --help-all`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigure,
 }
@@ -141,6 +71,9 @@ func init() {
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, setupOpenBaoUsage)
+	// --help shows what a first deployment on one server needs; the rest is
+	// under --help-all (see help.go).
+	hideFlags(configureCmd, advancedDeployFlags...)
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
@@ -308,7 +241,7 @@ var localFixed = []struct{ name, instead string }{
 	{"no-certs-timer", "local installs no renewal timer"},
 }
 
-const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and `versola edge add` for a remote edge's bootstrap bundle"
+const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and 'versola edge add' for a remote edge's bootstrap bundle"
 
 const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, run docker login first"
 

@@ -27,29 +27,35 @@ var doctorTarget, doctorAuthURL, doctorCentralURL string
 var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check that this machine has everything Versola needs",
-	Long: `doctor checks this machine for the dependencies Versola needs to run
-locally: a reachable Docker daemon, the Docker Compose plugin, and a
-free port for its reverse proxy. It never installs anything on its own -- if
-Docker isn't found at all, the most it does is offer to open an install
-page in your browser, and only after you confirm.
+	Use:     "doctor",
+	GroupID: groupGetStarted,
+	Short:   "Check that this machine has everything Versola needs",
+	Long: `doctor checks a machine for what Versola needs, your computer (the default)
+or a server (--target vps): a reachable Docker daemon, the Docker Compose
+plugin, enough memory and disk, and on local a free port for its reverse
+proxy. It never installs anything on its own -- if Docker isn't found at
+all, the most it does is offer to open an install page in your browser,
+and only after you confirm.
 
-Run this before "versola bootstrap local <version>" to see ahead of
-time what's missing. Pass --target vps when checking a real server --
-some checks differ (see --target's own help): running it with no flag
-against a vps machine can fail a check that "configure vps" itself
-would actually pass, or pass one it would actually fail.`,
+Run this before "versola bootstrap" to see ahead of time what's missing.
+Pass --target vps when checking a real server -- some checks differ:
+running it with no flag against a vps machine can fail a check that
+"configure vps" itself would actually pass, or pass one it would actually
+fail. The checks of the public names a deployment will have are under
+"versola doctor --help-all" (README, "doctor").`,
 	RunE: runDoctor,
 }
 
 func init() {
-	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- needed for the public name checks below")
+	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with (the public names in --help-all are checked against it)")
 	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
 	doctorCmd.Flags().StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
 	doctorCmd.Flags().StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
 	doctorCmd.Flags().StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
-	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
+	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
+	// The other public names are for remote edges and FAPI clients: under
+	// --help-all (see help.go).
+	hideFlags(doctorCmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain")
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {

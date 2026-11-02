@@ -23,8 +23,9 @@ import (
 // prints its own help (the subcommand list) when invoked with no
 // subcommand, which is what we want here.
 var secretsCmd = &cobra.Command{
-	Use:   "secrets",
-	Short: "Manage this machine's access to OpenBao",
+	Use:     "secrets",
+	GroupID: groupAdvanced,
+	Short:   "Manage this machine's access to OpenBao",
 }
 
 var secretsLoginCmd = &cobra.Command{

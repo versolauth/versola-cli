@@ -167,7 +167,7 @@ func initTargetOf(st *state.State, dir string) (initTarget, error) {
 	// names are accepted, as configure accepts for --postgres-db.
 	for what, name := range map[string]string{"user": t.user, "database": t.db} {
 		if !initNameRe.MatchString(name) {
-			return initTarget{}, fmt.Errorf("the Postgres %s %q of auth.conf is not a plain name (1-63 letters, digits, '_' or '-'): create it by hand as deploy.md describes", what, name)
+			return initTarget{}, fmt.Errorf("the Postgres %s %q of auth.conf is not a plain name (1-63 letters, digits, '_' or '-'): create it by hand as the VPS deployment guide describes (%q, %s)", what, name, vpsGuidePostgresSection, vpsGuidePostgresURL)
 		}
 	}
 	values, err := readDotenv(filepath.Join(dir, "auth.secrets.env"))

@@ -13,8 +13,9 @@ import (
 )
 
 var replicaCmd = &cobra.Command{
-	Use:   "replica",
-	Short: "Add or remove replicas of auth or edge",
+	Use:     "replica",
+	GroupID: groupUpgrade,
+	Short:   "Add or remove replicas of auth or edge",
 	Long: `replica runs more than one copy of auth or edge behind the reverse
 proxy, which balances requests between them. central is not replicated.
 

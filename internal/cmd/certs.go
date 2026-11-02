@@ -22,8 +22,9 @@ var (
 )
 
 var certsCmd = &cobra.Command{
-	Use:   "certs",
-	Short: "Manage the mutual-TLS certificates of the deployment",
+	Use:     "certs",
+	GroupID: groupAdvanced,
+	Short:   "Manage the mutual-TLS certificates of the deployment",
 }
 
 var certsRenewCmd = &cobra.Command{

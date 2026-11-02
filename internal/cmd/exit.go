@@ -33,6 +33,7 @@ import (
 //     since it is the way out.
 func Run(args []string, stderr io.Writer) int {
 	prepareExit()
+	args = rewriteHelpAll(args)
 	rootCmd.SetArgs(args)
 	called, err := rootCmd.ExecuteC()
 	if err == nil {

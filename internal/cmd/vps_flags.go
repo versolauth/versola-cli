@@ -179,11 +179,17 @@ func confirmVpsRun(w io.Writer, v vpsFlags, yes bool, action string) error {
 	return deploy.ConfirmVpsDeployYes(yes, action)
 }
 
-const authURLUsage = "public URL auth will be reachable at (vps, e.g. https://id.example.com): required on the first configure vps, then remembered from the last one"
+// The three visible vps flags of configure and bootstrap keep a one-line
+// description, so that `--help` fits a screen; what they leave out (the
+// remembered values, switching Postgres, the ports each proxy mode needs) is
+// in the README, "Redeploying on the same server", "Postgres on vps" and
+// "Deploying to a VPS: the reverse proxy".
 
-const postgresHostUsage = "host:port of your own Postgres (vps; without it Postgres runs in a container of this deployment). Remembered from the last configure vps, and so is the container: switching between the two is refused"
+const authURLUsage = "vps: public URL of auth, e.g. https://id.example.com (needed the first time, then remembered)"
 
-const proxyUsage = "vps only: how Versola is exposed -- \"nginx\" (default on a first deployment: Versola's own nginx serves ports 80/443, with a Let's Encrypt certificate for an https --auth-url) or \"external\" (this server already runs a web server on 80/443; Versola's nginx listens on 127.0.0.1:2821 behind it). Remembered from the last configure vps"
+const postgresHostUsage = "vps: host:port of your own Postgres (default: bundled; remembered)"
+
+const proxyUsage = "vps: \"nginx\" (Versola's nginx serves 80/443) or \"external\" (behind your web server, on 127.0.0.1:2821); remembered"
 
 const acmeStagingUsage = "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments. Remembered from the last configure vps (left out when --proxy or --auth-url no longer let Versola's proxy get the certificate); --acme-staging=false goes back to a trusted certificate"
 

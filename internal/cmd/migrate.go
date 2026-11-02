@@ -15,8 +15,9 @@ var migrateDryRun bool
 var migrateService string
 
 var migrateCmd = &cobra.Command{
-	Use:   "migrate",
-	Short: "Run database migrations for the configured deployment",
+	Use:     "migrate",
+	GroupID: groupDeploy,
+	Short:   "Run database migrations for the configured deployment",
 	Long: `migrate runs each service's own database migrations against whatever
 "versola configure" most recently prepared. It doesn't start any server.
 

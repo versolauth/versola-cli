@@ -278,7 +278,9 @@ as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
 `up`, `down`, `bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
 script's log shows what it agreed to) and then go on without asking.
 `local` never asks about its own deployment, so `--yes` changes nothing there.
-The one exception it does not cover: `configure local` / `bootstrap local` on a
+`uninstall --purge` is not covered either: it asks you to type `vps`, with or
+without `--yes` (see `uninstall`).
+The other exception it does not cover: `configure local` / `bootstrap local` on a
 machine whose record still points at a running VPS deployment ask before
 replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
@@ -515,7 +517,7 @@ Typical problems:
 | `lost` | a first-install-only secret is missing though the deployment exists | restore it from a backup; a new one would make existing data unreadable |
 | `group-partial` | part of a key group (e.g. a JWT key pair) is present | restore the missing half, or use `--generate-missing` if the data is expendable |
 | `vault-empty-with-state` | this machine has a record, OpenBao is empty | check that you point at the right OpenBao; restore it |
-| `unknown-state` | OpenBao has secrets, this machine has no record | `secrets plan` to inspect; then seed by hand or `--generate-missing` |
+| `unknown-state` | OpenBao has secrets, this machine has no record | starting over after a failed attempt (usually a plain `uninstall` kept OpenBao's volume): `versola uninstall --purge`, then configure again. A server that ran Versola and lost `~/.versola`: do **not** purge, the keys protect live data; restore the missing secrets, or `--generate-missing` if they are gone for good. The plan prints both, once |
 | `external-missing` | a secret you must supply is absent | write it to OpenBao yourself |
 
 #### `--generate-missing NAME[,NAME...]`
@@ -628,8 +630,11 @@ stops the container from starting). Nothing in this mode is done by hand:
 create` (see [`backup create`](#backup-create--backup-list)) dumps it through
 the container, together with what the dump needs to be readable.
 
-Not done yet: `uninstall --purge-data`, `status`/`logs`/`stats` for the
-container, and `doctor`'s memory figures with it.
+`uninstall` keeps the data volume; `uninstall --purge` destroys it together
+with OpenBao's (see `uninstall`).
+
+Not done yet: `status`/`logs`/`stats` for the container, and `doctor`'s memory
+figures with it.
 
 ### Your own Postgres: `postgres init`
 
@@ -1442,10 +1447,57 @@ its Postgres volume, removes the `versola-*` images that were pulled, and
 clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
 to skip that.
 
-On a `vps` deployment, OpenBao's data volume, the TLS certificate
-volume (`versola-acme-vps`) and, when Postgres runs in a container, its data
-volume (`versola-postgres-data-vps`) are left in place; `uninstall` prints the
-`docker volume rm` commands if you really mean to discard them.
+On `vps`, OpenBao's data volume (`versola-openbao-file-vps`: every secret
+and signing key), the Postgres data volume (`versola-postgres-data-vps`, when
+Postgres runs in a container) and the TLS certificate volume
+(`versola-acme-vps`) are kept: they are a live server's data. `uninstall`
+names the ones it kept and ends with `To start over from scratch: versola
+uninstall --purge`, also when there is no deployment record any more.
+
+#### `uninstall --purge`
+
+Starting over from scratch, typically after a failed first attempt on a VPS:
+
+```
+versola uninstall --purge
+versola bootstrap vps <version> --auth-url ...
+```
+
+On top of the above it destroys, after listing them by name:
+
+- OpenBao's vps volume: every secret and signing key, so whatever was
+  encrypted with them can never be read again;
+- the bundled Postgres volume: the database (users, clients, sessions);
+- this machine's OpenBao files for vps in `~/.versola/openbao`: `vps.json`
+  (AppRole), `vps-admin.json` (root token and unseal key),
+  `vps-postgres-role.sql`, `vps-postgres-init.sql`. Other targets' files stay.
+
+The list also names Versola's vps OpenBao and Postgres containers, which are
+removed first, running or stopped (a stopped one still holds its volume). If
+one is running and this machine has no deployment record, it warns before
+the question: that is also what a live server whose `~/.versola` was lost
+looks like. If Docker cannot say whether a volume exists, nothing is removed.
+
+Only what exists is listed and removed. It asks you to **type `vps`**; any other
+answer aborts with an error and removes nothing, and `--yes` does not answer
+it (a script feeds `vps` on stdin). It works without a deployment record (after
+a plain `uninstall`), needs Docker running, and is refused when the record on
+this machine is `local` (a plain `uninstall` already removes local's data).
+
+Kept either way: the TLS certificate volume (reusing it avoids Let's
+Encrypt's rate limits; `docker volume rm versola-acme-vps` if you really
+want it gone) and a Postgres of your own (`--postgres-host`), which is never
+touched: drop and recreate its schemas yourself, since what Versola stored in
+it was encrypted with the destroyed keys.
+
+The order never leaves OpenBao's secrets without the files that open them:
+stack, then Versola's vps OpenBao and Postgres containers (running or
+stopped, a stopped one still holds its volume), then OpenBao's volume, then the
+files, then the Postgres volume. If a step fails it stops there and says so;
+running `versola uninstall --purge` again continues with what is left.
+
+Never run it on a server whose `~/.versola` was lost while Versola ran there:
+the configure error for that case (`unknown-state`) says so too.
 
 If a deployment was recorded but Docker isn't reachable to confirm it's
 actually stopped, `~/.versola` is deliberately left in place rather than

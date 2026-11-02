@@ -46,6 +46,10 @@ const bundledPostgresInitSourceFormat = `{{range .Mounts}}{{if eq .Destination "
 // where it was left.
 func PostgresVolumeName() string { return bundledPostgresVolume }
 
+// PostgresContainerName is the bundled Postgres's container_name: `uninstall
+// --purge` removes it, stopped or not, before the volume it holds.
+func PostgresContainerName() string { return bundledPostgresContainer }
+
 // resolvePostgres decides which Postgres a vps deployment uses, from
 // --postgres-host and from what was recorded before, and returns the mode
 // (PostgresModeBundled or "") and the host:port the services reach it at.

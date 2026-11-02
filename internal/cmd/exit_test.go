@@ -38,7 +38,11 @@ func TestRunUsageErrorsExit2(t *testing.T) {
 		{"unknown command", []string{"no-such-command"}, `unknown command "no-such-command" for "versola"`},
 		{"unknown flag", []string{"status", "--no-such-flag"}, "unknown flag: --no-such-flag"},
 		{"bad flag value", []string{"configure", "local", "0.1.0", "--yes=maybe"}, `invalid argument "maybe" for "-y, --yes" flag`},
-		{"too few arguments", []string{"configure", "local"}, "accepts 2 arg(s), received 1"},
+		// `configure local` alone is a valid command since the version became optional on
+		// local, and this test would run it for real: the cases here must be refused
+		// before anything starts.
+		{"too few arguments", []string{"configure"}, "accepts between 1 and 2 arg(s), received 0"},
+		{"too many arguments for configure", []string{"configure", "local", "0.1.0", "extra"}, "accepts between 1 and 2 arg(s), received 3"},
 		{"too many arguments", []string{"migrate", "extra"}, `unknown command "extra" for "versola migrate"`},
 		// Checked first, before the lock and any question (deploy.CheckTarget).
 		{"unknown target", []string{"configure", "staging", "0.1.0"}, `unsupported target "staging"`},

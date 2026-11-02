@@ -279,11 +279,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 			return ConfigureResult{}, problem
 		}
 		if isManifestUnknown(err) {
-			return ConfigureResult{}, fmt.Errorf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
-
-Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
-"v0.1.2").
-Check the available versions at https://github.com/orgs/versolauth/packages`, version)
+			return ConfigureResult{}, &ToolsImageMissingError{Version: version}
 		}
 		return ConfigureResult{}, fmt.Errorf("versola-tools failed: %w", err)
 	}
@@ -636,4 +632,22 @@ Check the available versions at https://github.com/orgs/versolauth/packages`, ve
 	}
 
 	return ConfigureResult{Dir: dir, PostgresRoleSetupNeeded: (newPgPassword != "" && pg.Mode != PostgresModeBundled) || pgPasswordMismatch, PostgresRoleScript: pgRoleScript}, nil
+}
+
+// ToolsImageMissingError is configure's error when Versola's own registry has
+// no versola-tools image for the version: almost always a typo, or a tag
+// written with a leading "v". A type rather than a plain message so the
+// commands can tell it apart: when the CLI chose the version itself (the
+// latest release, "bootstrap local" without one) the image is only not built
+// yet, and the command says that instead (see cmd/target_version.go).
+type ToolsImageMissingError struct {
+	Version string
+}
+
+func (e *ToolsImageMissingError) Error() string {
+	return fmt.Sprintf(`version %q of Versola doesn't exist (no "versola-tools" image published for it).
+
+Versola releases are tagged WITHOUT a leading "v" (e.g. "0.1.2", not
+"v0.1.2").
+Run "versola versions" to list the available versions.`, e.Version)
 }

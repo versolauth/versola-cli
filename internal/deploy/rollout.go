@@ -545,7 +545,7 @@ func (e *rolloutEngine) central() error {
 		if e.st.RollingBack {
 			hint = "run `versola rollout --abort` again: it only waits for central again and carries on"
 		}
-		return fmt.Errorf("central never became ready on %s (waited %s): %w -- auth and edge still run from their caches. Look at the logs of central (`docker logs`); once it is up, or if it was only slow, %s",
+		return fmt.Errorf("central never became ready on %s (waited %s): %w -- auth and edge still run from their caches. Look at the logs of central (`versola logs central --tail 100`); once it is up, or if it was only slow, %s",
 			e.st.Version, centralReadyTimeout, err, hint)
 	}
 	if restarted {
@@ -815,9 +815,9 @@ func (e *rolloutEngine) replace(svc string, n int) error {
 	}
 	if err := e.waitReady(svc, url); err != nil {
 		if others == 0 {
-			return fmt.Errorf("%s never became ready on %s: %w -- %s is unreachable; see its `docker logs`", r.Service, target, err, svc)
+			return fmt.Errorf("%s never became ready on %s: %w -- %s is unreachable; %s", r.Service, target, err, svc, LogsHint(r.Service))
 		}
-		return fmt.Errorf("%s never became ready on %s: %w -- it is out of the proxy and the other replicas serve; see its `docker logs`, then run the same `versola rollout` again", r.Service, target, err)
+		return fmt.Errorf("%s never became ready on %s: %w -- it is out of the proxy and the other replicas serve; %s, then run the same `versola rollout` again", r.Service, target, err, LogsHint(r.Service))
 	}
 	if err := e.ops.warm(r); err != nil {
 		return fmt.Errorf("%s is ready but doesn't answer requests yet: %w -- it is out of the proxy; run the same `versola rollout` again to retry", r.Service, err)

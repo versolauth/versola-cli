@@ -25,14 +25,27 @@ topology either.
 
 It also lists every mutual-TLS certificate with its notAfter (auth's and
 central's listeners, the edge's identity, and the public names' own),
-marking the ones a renewal is due for -- see "versola certs renew".`,
+marking the ones a renewal is due for -- see "versola certs renew".
+
+With --json it prints one JSON object on stdout instead, for scripts and
+health checks (fields are documented in the README and only ever added).`,
 	RunE: runStatus,
+}
+
+var statusJSON bool
+
+func init() {
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "print one JSON object (no secret values) instead of the text")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	composePath, exists, err := state.ComposeFile()
 	if err != nil {
 		return err
+	}
+	// Before the text form's hint: stdout is the JSON object alone.
+	if statusJSON {
+		return writeStatusJSON(os.Stdout, composePath, exists)
 	}
 	if !exists {
 		fmt.Println("Nothing deployed yet — " + deploy.NothingDeployedHint + ".")

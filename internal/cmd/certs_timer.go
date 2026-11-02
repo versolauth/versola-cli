@@ -50,12 +50,23 @@ func scheduleCertsRenewal(w io.Writer, target string, skip, unlimited bool) {
 
 // lingerOff: systemd says this user's services do not outlive its sessions.
 // Unknown (no loginctl, odd output) is not "off": nothing is claimed then.
-func lingerOff() bool {
+func lingerOff() bool { return lingerState() == "no" }
+
+// lingerState is systemd's Linger of this user: "yes", "no", or "" when it
+// can't be told (no loginctl, an error, odd output).
+func lingerState() string {
 	if _, err := exec.LookPath("loginctl"); err != nil {
-		return false
+		return ""
 	}
 	out, err := runOutput("loginctl", "show-user", currentUser(), "-p", "Linger", "--value")
-	return err == nil && strings.TrimSpace(out) == "no"
+	if err != nil {
+		return ""
+	}
+	switch v := strings.TrimSpace(out); v {
+	case "yes", "no":
+		return v
+	}
+	return ""
 }
 
 // certsTimerWarning is "" when something renews the certificates -- the
@@ -81,10 +92,16 @@ func certsTimerWarning() string {
 // printCertsWarnings prints the timer warning for a vps deployment (local has
 // no timer to speak of: its certificates are renewed by hand).
 func printCertsWarnings(w io.Writer, st *state.State) {
-	if st.Target != "vps" || st.CertsUnlimited() || !deploy.IssuesMutualTLSCertificates(st.Version) {
-		return
-	}
-	if msg := certsTimerWarning(); msg != "" {
+	if msg := certsWarning(st); msg != "" {
 		fmt.Fprintf(w, "WARNING: %s\n", msg)
 	}
+}
+
+// certsWarning is printCertsWarnings' message, or "": also one of
+// `status --json`'s warnings.
+func certsWarning(st *state.State) string {
+	if st.Target != "vps" || st.CertsUnlimited() || !deploy.IssuesMutualTLSCertificates(st.Version) {
+		return ""
+	}
+	return certsTimerWarning()
 }

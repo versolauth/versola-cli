@@ -66,6 +66,7 @@ func init() {
 
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.AddCommand(versionsCmd)
 
 	rootCmd.AddCommand(configureCmd)
 	rootCmd.AddCommand(postgresCmd)
@@ -73,6 +74,8 @@ func init() {
 	rootCmd.AddCommand(upCmd)
 
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)

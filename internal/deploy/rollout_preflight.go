@@ -3,6 +3,7 @@ package deploy
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -72,6 +73,18 @@ func standInNeed(p memoryProbe, st *state.State, svc string) (need int64, measur
 	return need, measured, nil
 }
 
+// standInThreshold is the free memory (MemAvailable) a stand-in of svc
+// needs before it may start: standInNeed plus memoryReserve. It is the one
+// place that number is made -- the rollout's pre-flight (checkStandInMemory)
+// and `versola stats`' verdict both ask it, so the two can never disagree.
+func standInThreshold(p memoryProbe, st *state.State, svc string) (need, threshold int64, measured bool, err error) {
+	need, measured, err = standInNeed(p, st, svc)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return need, need + memoryReserve, measured, nil
+}
+
 // checkStandInMemory refuses when the host can't hold a stand-in of any of
 // services next to what runs. It warns (through warn) rather than refuses
 // when the host's free memory can't be read at all.
@@ -88,11 +101,11 @@ func checkStandInMemory(p memoryProbe, st *state.State, services []string, warn 
 		return nil
 	}
 	for _, svc := range services {
-		need, measured, err := standInNeed(p, st, svc)
+		need, threshold, measured, err := standInThreshold(p, st, svc)
 		if err != nil {
 			return err
 		}
-		if avail >= need+memoryReserve {
+		if avail >= threshold {
 			continue
 		}
 		basis := "what a running " + svc + " replica uses now"
@@ -298,7 +311,14 @@ func pgVerifies(sslmode string) bool {
 // modes that do not verify: libpq, unlike the services' JDBC driver, would
 // turn require into verify-ca once it has one.
 func pgHeadroomArgs(t pgTarget, secretsFile string) []string {
-	args := []string{"run", "--rm", "--pull", "missing", "--network", "host", "--env-file", secretsFile,
+	return pgHeadroomArgsPull(t, secretsFile, "missing")
+}
+
+// pgHeadroomArgsPull is pgHeadroomArgs with docker run's --pull policy:
+// "missing" for the rollout (it pulls the image the first time), "never"
+// for `versola stats`, which only looks and must not start a download.
+func pgHeadroomArgsPull(t pgTarget, secretsFile, pull string) []string {
+	args := []string{"run", "--rm", "--pull", pull, "--network", "host", "--env-file", secretsFile,
 		"-e", "PGHOST=" + t.host, "-e", "PGPORT=" + t.port, "-e", "PGDATABASE=" + t.db, "-e", "PGUSER=" + t.user,
 		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-rollout-preflight"}
 	args = append(args, pgTLSArgs(t.sslmode, t.caFile)...)
@@ -306,7 +326,10 @@ func pgHeadroomArgs(t pgTarget, secretsFile string) []string {
 }
 
 func runPgHeadroom(t pgTarget, secretsFile string, timeout time.Duration) (int, error) {
-	args := pgHeadroomArgs(t, secretsFile)
+	return runPgHeadroomArgs(pgHeadroomArgs(t, secretsFile), timeout)
+}
+
+func runPgHeadroomArgs(args []string, timeout time.Duration) (int, error) {
 	out, stderr, err := docker.OutputWithin(timeout, args...)
 	if err != nil {
 		var exit *exec.ExitError
@@ -359,7 +382,7 @@ var (
 // image out of reach, a server it can't log in to: the rollout's own
 // readiness checks still stop a stand-in that can't connect.
 func checkPgConnections(bundleDir string, services []string, run pgRunner, warn func(string, ...any)) error {
-	headroom, need, needFor, ok := pgHeadroomFor(bundleDir, services, 1, standInAsker, run, warn)
+	headroom, need, needFor, ok := pgHeadroomFor(os.Stdout, bundleDir, services, 1, standInAsker, run, warn)
 	if !ok || headroom >= need+pgMargin {
 		return nil
 	}
@@ -372,7 +395,7 @@ func checkPgConnections(bundleDir string, services []string, run pgRunner, warn 
 // all of them, not the largest one as for a stand-in that goes again. Like
 // checkPgConnections it only warns when it can't ask.
 func checkPgForReplicas(bundleDir, service string, count int, run pgRunner, warn func(string, ...any)) error {
-	headroom, need, _, ok := pgHeadroomFor(bundleDir, []string{service}, count, newReplicaAsker, run, warn)
+	headroom, need, _, ok := pgHeadroomFor(os.Stdout, bundleDir, []string{service}, count, newReplicaAsker, run, warn)
 	if !ok || headroom >= need+pgMargin {
 		return nil
 	}
@@ -383,8 +406,10 @@ func checkPgForReplicas(bundleDir, service string, count int, run pgRunner, warn
 // pgHeadroomFor asks Postgres how many connections are free and what
 // replicas of the services need: the largest of them, times replicas. ok is
 // false when the check could not be made (a warning was given), or there is
-// nothing to check.
-func pgHeadroomFor(bundleDir string, services []string, replicas int, who pgAsker, run pgRunner, warn func(string, ...any)) (headroom, need int, needFor string, ok bool) {
+// nothing to check. progress gets the "Checking..." line: stdout for the
+// rollout and `replica add`, stderr for `versola stats --json`, whose stdout
+// is the JSON alone.
+func pgHeadroomFor(progress io.Writer, bundleDir string, services []string, replicas int, who pgAsker, run pgRunner, warn func(string, ...any)) (headroom, need int, needFor string, ok bool) {
 	if len(services) == 0 {
 		return 0, 0, "", false
 	}
@@ -415,7 +440,7 @@ func pgHeadroomFor(bundleDir string, services []string, replicas int, who pgAske
 		}
 		target.caFile = ca
 	}
-	fmt.Printf("Checking that Postgres has the connections for %s...\n", who.announce)
+	fmt.Fprintf(progress, "Checking that Postgres has the connections for %s...\n", who.announce)
 	headroom, err := run(target, secrets)
 	if err != nil {
 		warn("Warning: couldn't ask Postgres how many connections are free (%v) -- not checked. "+who.opens+"\n", err, need)

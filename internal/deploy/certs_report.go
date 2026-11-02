@@ -49,7 +49,9 @@ func (c CertInfo) Due(now time.Time) bool {
 	if c.NotBefore.IsZero() || !c.NotAfter.After(c.NotBefore) {
 		return left < 30*24*time.Hour
 	}
-	return left*3 <= c.NotAfter.Sub(c.NotBefore)
+	// Divide the lifetime rather than multiply the remaining time: a fresh
+	// 100-year certificate (the unlimited setting) overflows Duration * 3.
+	return left <= c.NotAfter.Sub(c.NotBefore)/3
 }
 
 // parseCertReport reads mtls-init's report lines. Anything else is ignored,

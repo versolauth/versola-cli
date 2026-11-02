@@ -107,7 +107,8 @@ If you installed via the Install section above, `versola` is on your PATH
 case, add the printed line to your shell profile first):
 ```bash
 versola doctor
-versola bootstrap local <version>
+versola bootstrap local            # the latest Versola release
+versola bootstrap local 0.7.5      # or a version you pick (versola versions lists them)
 versola status
 versola down
 versola uninstall
@@ -232,7 +233,12 @@ Colima on macOS, Docker Desktop on Windows, the Docker Engine install
 docs on Linux. It only ever opens a browser tab — never installs or
 downloads anything itself.
 
-### `bootstrap local <version>`
+### `bootstrap local [<version>]`
+
+```
+versola bootstrap local
+versola bootstrap local 0.7.5
+```
 
 (`bootstrap vps <version>` does the same on a server, with the flags of
 `configure vps` below; it asks for confirmation first, and on a first
@@ -256,14 +262,32 @@ by an older versola-cli still runs its own gateway (`versola-nginx`) on
 that port, `configure` reports the port as taken: remove that container
 first (`docker rm -f versola-nginx`).
 
+Without `<version>`, the first line says which version it deploys:
+
+- nothing deployed on this machine yet (or a record of a VPS deployment, or
+  one too old to read): the latest Versola release, as GitHub defines it --
+  never a pre-release: `Deploying Versola 0.7.5 (the latest release; pass a
+  version to pick another).` If GitHub can't be reached (offline, rate
+  limit), it stops with nothing done and asks for a version instead of
+  guessing one.
+- a local deployment already recorded: its version is kept, so running
+  `bootstrap local` again (after `down`, or to change a flag) never turns
+  into an upgrade on its own: `Keeping Versola 0.7.2 (deployed; 0.7.5 is the
+  latest, pass it to move).` The latest is looked up best-effort; offline the
+  line just says to pass a version to move.
+
+The version chosen this way is used and recorded exactly as a typed one.
+`vps` always needs the version: a server runs only a version someone named.
+
 `<version>` is a Versola release, which is tagged **without** a leading
 `v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (versola-cli's own
 releases use the same format since 0.2.6; older ones were `v0.2.5` and
-earlier.) Passing a version
+earlier.) `versola versions` lists them. Passing a version
 that was never published fails with a clear error explaining that,
-instead of Docker's raw `manifest unknown`; the available versions are
-the tags published for the `versola-tools` package under the
-organization's GitHub packages.
+instead of Docker's raw `manifest unknown`. A release's images are
+built after the release is published, so for a short while the newest
+release has none yet: when `bootstrap local` picked that release itself, it
+says so -- retry in a few minutes, or pass the release before it.
 
 Once auth and edge are ready, this opens the admin console in your
 default browser automatically. Pass `--no-browser` to skip that (e.g.
@@ -276,7 +300,7 @@ than once per step, and at the end installs the daily timer that renews the
 mutual-TLS certificates (on a host without systemd it prints the crontab
 line to add instead; see `certs renew`).
 
-### `configure <target> <version>` / `migrate` / `up`
+### `configure <target> [<version>]` / `migrate` / `up`
 
 The same three steps `bootstrap` runs together, available individually
 for when a deployment needs to stop between them — which on a server it
@@ -289,15 +313,17 @@ versola migrate
 versola up
 ```
 
-- **`configure <target> <version>`** — checks the machine, generates this
+- **`configure <target> [<version>]`** — checks the machine, generates this
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
-  Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` on the first run: the public URL the deployment
-  will be reachable at (e.g. `https://id.example.com`). It is specific to
-  whoever deploys, so there is no shared default; later runs on the same
-  server remember it. `local` doesn't need it (its own defaults suit a
-  throwaway dev stack). It accepts
+  Starts none of Versola's own services, touches no database. On `local`
+  the version can be left out, with the same rule as `bootstrap local`:
+  the deployed version is kept, otherwise the latest release is used. For `vps`
+  the version is required, and it also needs `--auth-url` on the first run: the
+  public URL the deployment will be reachable at (e.g. `https://id.example.com`).
+  It is specific to whoever deploys, so there is no shared default; later runs
+  on the same server remember it. `local` doesn't need it (its own defaults suit
+  a throwaway dev stack). It accepts
   `--postgres-host` (your own Postgres; without it, Postgres runs in a
   container of the deployment, see "Postgres on vps"),
   `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
@@ -1600,8 +1626,30 @@ Prints which versola-cli release this binary was built from, plus the Go
 version and target platform. `versola --version` does the same thing.
 
 This is the CLI's own version, independent of the Versola version it
-deploys — that one is whatever you pass to `bootstrap local <version>`.
+deploys — that one is whatever you pass to `bootstrap local <version>`
+(see `versions` for those).
 Binaries built from source without release flags report `dev`.
+
+### `versions`
+
+```
+versola versions                    # the 10 newest releases
+versola versions --all --limit 30   # pre-releases too, 30 of them
+versola versions | cut -f1          # just the version numbers
+```
+
+Lists Versola's releases (Versola itself, not versola-cli) on stdout,
+newest first, one per line, as three tab-separated columns: the version,
+its release date (UTC), and markers -- `latest` (the release `bootstrap
+local` deploys without a version), `deployed` (the version this machine's
+record names, local or vps) and `pre-release`. The markers column may be
+empty. Pre-releases are left out unless `--all` is given. `--limit N`
+shows N releases (default 10, at most 100: one page of GitHub's API).
+
+It asks GitHub's public API without a token (60 requests an hour per
+address is plenty). If GitHub can't be reached it fails with the address
+of the releases page instead; a failed `latest` lookup or an unreadable
+deployment record only leaves that marker out.
 
 ## Releasing
 
@@ -1624,7 +1672,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)
@@ -1634,6 +1682,7 @@ internal/topology/      ports and slots read from the compose file (docker compo
 internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
 internal/docker/        thin wrappers around the docker CLI
 internal/fsutil/        atomic file writes
+internal/release/       GitHub releases API: the latest release and a list (upgrade, versions, bootstrap local without a version)
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 e2e/rollout/            manual end-to-end run of rollout with stand-in images (not in CI)

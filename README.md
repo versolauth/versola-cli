@@ -17,11 +17,13 @@ about Versola's own service topology (ports, service names, config schema)
 
 `doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
 `replica`, `secrets`, `uninstall`, `upgrade` and `version` are all
-implemented and have been tested end-to-end: against a real local
-deployment (Postgres + auth + central + edge + the reverse proxy, real
-browser login through to the admin console), and on a test VPS with Versola
+implemented and have been tested end-to-end: locally by hand against a
+real deployment (including a browser login through to the admin console),
+and on a test VPS with Versola
 0.7.1 (a from-scratch install following this README, `down`/`up`, replicas
-added and removed under load). `rollout` (vps) is implemented too, but has
+added and removed under load). The [`e2e-local`](.github/workflows/e2e-local.yml)
+workflow (`e2e/local/README.md`) runs bootstrap, restart and uninstall with
+real images nightly and on PRs labelled `e2e` (no login). `rollout` (vps) is implemented too, but has
 so far been exercised end-to-end with stand-in images only, not yet with two
 real Versola releases. `certs` and `edge` are implemented too (see their
 sections below); neither of those tests covered them. `upgrade` has moved a

@@ -91,7 +91,7 @@ func TestHelpAllShowsAdvancedFlagsWithoutRunningCommand(t *testing.T) {
 	}
 	// cobra's help subcommand must show configure, rather than its own help.
 	out := cliHelp(t, "help", "configure", "--help-all=true")
-	if !strings.Contains(out, "versola configure <target> <version>") || !strings.Contains(out, advancedFlagsHeading) {
+	if !strings.Contains(out, "versola configure <target> [<version>]") || !strings.Contains(out, advancedFlagsHeading) {
 		t.Fatalf("help subcommand printed the wrong page:\n%s", out)
 	}
 }

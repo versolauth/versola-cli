@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 var doctorTarget, doctorAuthURL, doctorCentralURL string
 var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
+var doctorProxy, doctorPostgresHost, doctorRegistry string
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor",
@@ -41,20 +43,37 @@ Pass --target vps when checking a real server -- some checks differ:
 running it with no flag against a vps machine can fail a check that
 "configure vps" itself would actually pass, or pass one it would actually
 fail. The checks of the public names a deployment will have are under
-"versola doctor --help-all" (README, "doctor").`,
+"versola doctor --help-all" (README, "doctor").
+
+On a server, give it the flags you will give "configure vps": with
+--auth-url (and --proxy) it checks that the name points at this server
+and that the proxy's ports are free; without --postgres-host, that port
+5432 is free for the Postgres container; and that the image registry
+answers. When everything passes, it prints the configure command with
+those flags.`,
+	Example: `  versola doctor
+  versola doctor --target vps --auth-url https://id.example.com
+  versola doctor --target vps --auth-url https://id.example.com --proxy external --postgres-host db.internal:5432`,
 	RunE: runDoctor,
 }
 
-func init() {
-	doctorCmd.Flags().StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with (the public names in --help-all are checked against it)")
-	doctorCmd.Flags().StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
-	doctorCmd.Flags().StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
-	doctorCmd.Flags().StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
-	doctorCmd.Flags().StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
-	doctorCmd.Flags().StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
-	// The other public names are for remote edges and FAPI clients: under
-	// --help-all (see help.go).
-	hideFlags(doctorCmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain")
+func init() { addDoctorFlags(doctorCmd) }
+
+// addDoctorFlags defines doctor's flags on cmd (a fresh command in tests).
+func addDoctorFlags(cmd *cobra.Command) {
+	f := cmd.Flags()
+	f.StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with (the public names in --help-all are checked against it)")
+	f.StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
+	f.StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
+	f.StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
+	f.StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
+	f.StringVar(&doctorProxy, "proxy", proxy.ModeNginx, `vps only: the --proxy you will deploy with ("nginx" or "external"); decides which ports are checked`)
+	f.StringVar(&doctorPostgresHost, "postgres-host", "", "vps only: the --postgres-host you will deploy with, if you use a Postgres of your own (without it, port 5432 is checked for the Postgres container)")
+	f.StringVar(&doctorRegistry, "registry", "", "vps only: the --registry you will deploy with; the registry whose answer over HTTPS is checked (default: ghcr.io)")
+	f.StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
+	// The public names, and the registry, are for remote edges and test
+	// registries: under --help-all (see help.go), as in configure.
+	hideFlags(cmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "registry")
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
@@ -68,6 +87,29 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if doctorTarget != "local" && doctorTarget != "vps" {
 		return fmt.Errorf(`--target must be "local" or "vps", got %q`, doctorTarget)
 	}
+	// The flags are checked before any check runs: a value configure would
+	// refuse is refused here first, and a vps flag on local is not ignored.
+	var vps vpsInputs
+	if doctorTarget == "vps" {
+		// What configure takes from the deployment on this machine when the
+		// flag is left out, doctor takes too: a redeploy is checked as it
+		// will run, not as a first install with the defaults.
+		fill := recordedVpsFlags(cmd.Flags().Changed, deploy.StoredVps(), deploy.StoredPublicDomains())
+		applyRecorded(fill)
+		var err error
+		if vps, err = parseVpsInputs(doctorAuthURL, doctorProxy, doctorPostgresHost, doctorRegistry, doctorCentralURL, doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain); err != nil {
+			return err
+		}
+		if len(fill) > 0 {
+			fmt.Printf("From the deployment on this machine, as configure takes them: %s\n\n", describeRecorded(fill))
+		}
+	} else {
+		for _, name := range doctorVpsOnlyFlags {
+			if cmd.Flags().Changed(name) {
+				return fmt.Errorf("--%s only applies to --target vps", name)
+			}
+		}
+	}
 
 	dockerDaemon := checks.DockerDaemon()
 	results := []checks.Result{
@@ -76,13 +118,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 	// Mirrors deploy.Configure's own target split (see its comment on the
 	// same check) -- vps's reverse proxy is versola-cli's own and which
-	// ports it needs depends on --proxy and --auth-url, which doctor
-	// doesn't take; "configure vps" checks them itself (checkProxyPorts).
+	// ports it needs depends on --proxy and --auth-url (vpsChecks below).
 	if doctorTarget == "local" {
 		results = append(results, checks.PortFree(proxy.LocalPort, proxy.LocalContainerName))
 	}
 	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
 	if doctorTarget == "vps" {
+		results = append(results, vpsChecks(vps)...)
 		central, err := centralChecks(doctorAuthURL, doctorCentralURL)
 		if err != nil {
 			return err
@@ -98,16 +140,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		if r, found := checks.MTLSLeafCheck(deploy.MTLSVolumeName("vps"), "versola-step-ca"); found {
 			results = append(results, r)
 		}
-	} else if doctorAuthURL != "" || doctorCentralURL != "" || doctorMTLSDomain != "" || doctorCentralMTLSDomain != "" || doctorCentralDomain != "" {
-		return fmt.Errorf("--auth-url, --central-url, --mtls-domain, --central-mtls-domain and --central-domain only apply to --target vps")
 	}
 
-	failed := 0
+	failed, warned := 0, 0
 	for _, r := range results {
 		fmt.Println(r.String())
 		if !r.OK {
 			failed++
+		} else if r.Warn {
+			warned++
 		}
+	}
+	if doctorTarget == "vps" && doctorAuthURL == "" {
+		fmt.Println("\nPass --auth-url (and --proxy, if you deploy behind a web server of your own) to check its DNS name and the proxy's ports too.")
 	}
 
 	if !dockerDaemon.OK {
@@ -127,16 +172,173 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// successful `doctor --target vps` used to print this same local
 		// suggestion regardless, telling someone who just checked a server
 		// to go run a local deployment instead (flagged in review).
+		if warned > 0 {
+			fmt.Printf("%d warning(s) above: read them before going on.\n", warned)
+		}
 		if doctorTarget == "vps" {
-			fmt.Println("All checks passed — ready for `versola configure vps <version> --auth-url ...`.")
+			fmt.Printf("All checks passed — ready for:\n\n  %s\n", configureLine(cmd))
 		} else {
-			fmt.Println("All checks passed — ready for `versola bootstrap local <version>`.")
+			fmt.Println("All checks passed — ready for `versola bootstrap local` (the latest Versola release).")
 		}
 		return nil
 	}
 
 	fmt.Printf("%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
 	return fmt.Errorf("doctor found %d problem(s)", failed)
+}
+
+// doctorVpsOnlyFlags are the flags that describe a vps deployment: refused
+// with --target local rather than ignored.
+var doctorVpsOnlyFlags = []string{"auth-url", "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "proxy", "postgres-host", "registry"}
+
+// vpsInputs are doctor's vps flags, validated and normalized as configure
+// does it.
+type vpsInputs struct {
+	// auth is set when --auth-url was given.
+	auth         *proxy.AuthURL
+	mode         string
+	public       proxy.PublicNames
+	postgresHost string
+	registry     string
+}
+
+func parseVpsInputs(authURL, mode, postgresHost, registry, centralURL, mtls, centralMTLS, enroll string) (vpsInputs, error) {
+	var in vpsInputs
+	var err error
+	if in.mode, err = proxy.ParseMode(mode); err != nil {
+		return in, err
+	}
+	if in.registry, err = deploy.ParseRegistry(registry); err != nil {
+		return in, err
+	}
+	in.postgresHost = postgresHost
+	if authURL == "" {
+		// Checked by centralChecks against an empty auth URL, as here.
+		if _, _, err := proxy.ParseCentralURL(centralURL, proxy.AuthURL{}); err != nil {
+			return in, err
+		}
+		return in, nil
+	}
+	auth, err := proxy.ParseAuthURL(authURL, in.mode)
+	if err != nil {
+		return in, err
+	}
+	in.auth = &auth
+	if _, _, err := proxy.ParseCentralURL(centralURL, auth); err != nil {
+		return in, err
+	}
+	if in.public, err = proxy.ParsePublicNames(mtls, centralMTLS, enroll, auth); err != nil {
+		return in, err
+	}
+	return in, nil
+}
+
+// vpsChecks are the checks of what `configure vps` is going to be given:
+// the --auth-url name and the proxy's ports (with --auth-url, which decides
+// them), the Postgres (its port, for the container), the image registry and
+// lingering.
+func vpsChecks(in vpsInputs) []checks.Result {
+	var results []checks.Result
+	if in.auth != nil {
+		results = append(results, checks.AuthName(in.auth.Host, in.auth.TLS(in.mode)), deploy.ProxyPortsCheck(*in.auth, in.mode, in.public))
+	}
+	results = append(results, deploy.PostgresCheck(in.postgresHost), checks.RegistryAnswers(deploy.RegistryHost(in.registry)))
+	// No timer is installed for certificates that never expire: lingering
+	// does not matter then.
+	if days := deploy.StoredCertDays(); days == nil || *days != 0 {
+		if r, ok := lingerCheck(lingerState()); ok {
+			results = append(results, r)
+		}
+	}
+	return results
+}
+
+// lingerCheck: `up` installs a systemd user timer that renews the mutual-TLS
+// certificates, and a user timer stops with the user's last session unless
+// lingering is on -- said now, not after `up`. Nothing when it can't be told.
+func lingerCheck(state string) (checks.Result, bool) {
+	switch state {
+	case "yes":
+		return checks.Result{Name: "Lingering", OK: true, Detail: "on: the certificate-renewal timer `up` installs keeps running after you log out"}, true
+	case "no":
+		u := currentUser()
+		return checks.Result{Name: "Lingering", OK: true, Warn: true, Detail: fmt.Sprintf("off for %s: the certificate-renewal timer `up` installs would stop when your last session ends. Run once: sudo loginctl enable-linger %s", u, u)}, true
+	}
+	return checks.Result{}, false
+}
+
+// configureLine is the `configure vps` command for the flags doctor was
+// given, ready to copy: the values as typed (--proxy too when it is the
+// default: given, it may override a recorded mode), and a placeholder for
+// --auth-url when there is none, neither given nor recorded. Recorded values are not written out: configure takes
+// them itself.
+func configureLine(cmd *cobra.Command) string {
+	parts := []string{"versola configure vps <version>"}
+	if doctorAuthURL == "" {
+		parts = append(parts, "--auth-url https://<your domain>")
+	}
+	for _, name := range []string{"auth-url", "proxy", "postgres-host", "registry", "central-url", "mtls-domain", "central-mtls-domain", "central-domain"} {
+		f := cmd.Flags().Lookup(name)
+		if f == nil || !cmd.Flags().Changed(name) || f.Value.String() == "" {
+			continue
+		}
+		parts = append(parts, "--"+name+" "+shellArg(f.Value.String()))
+	}
+	return strings.Join(parts, " ")
+}
+
+// recordedVpsFlags are the flags `configure vps` takes from the recorded
+// deployment when they are left out (resolveVpsFlags, publicDomains), by
+// name, with the recorded value: --auth-url, --proxy and the public names.
+// --postgres-host is not among them: deploy.PostgresCheck applies the record
+// itself, as configure does.
+func recordedVpsFlags(changed func(string) bool, rec *deploy.RecordedVps, pub deploy.PublicDomains) map[string]string {
+	fill := map[string]string{}
+	if rec != nil {
+		if !changed("auth-url") && rec.AuthURL != "" {
+			fill["auth-url"] = rec.AuthURL
+		}
+		if !changed("proxy") && rec.ProxyMode != "" {
+			fill["proxy"] = rec.ProxyMode
+		}
+	}
+	for name, v := range map[string]string{"mtls-domain": pub.MTLS, "central-mtls-domain": pub.CentralMTLS, "central-domain": pub.Enroll} {
+		if !changed(name) && v != "" {
+			fill[name] = v
+		}
+	}
+	return fill
+}
+
+// applyRecorded sets doctor's flag variables from fill.
+func applyRecorded(fill map[string]string) {
+	for name, to := range map[string]*string{"auth-url": &doctorAuthURL, "proxy": &doctorProxy, "mtls-domain": &doctorMTLSDomain, "central-mtls-domain": &doctorCentralMTLSDomain, "central-domain": &doctorCentralDomain} {
+		if v, ok := fill[name]; ok {
+			*to = v
+		}
+	}
+}
+
+// describeRecorded lists fill as flags, in a fixed order.
+func describeRecorded(fill map[string]string) string {
+	var out []string
+	for _, name := range []string{"auth-url", "proxy", "mtls-domain", "central-mtls-domain", "central-domain"} {
+		if v, ok := fill[name]; ok {
+			out = append(out, "--"+name+" "+v)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// shellArgRe is what a shell takes as one word without quotes.
+var shellArgRe = regexp.MustCompile(`^[A-Za-z0-9@%+=:,./_-]+$`)
+
+// shellArg quotes s for a POSIX shell when it needs it.
+func shellArg(s string) string {
+	if shellArgRe.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // centralChecks: --central-url, when given, is where an edge reaches

@@ -174,10 +174,21 @@ func announcePostgresRole(out io.Writer, dir, target, password string) (string, 
 	fmt.Fprintf(out, "password is not printed; you don't need to know it (it is also kept in %s).\n", secretsEnv)
 	fmt.Fprintf(out, "If the database and its schemas don't exist yet either, `versola postgres init` creates them\n")
 	fmt.Fprintf(out, "(and the role, with this password, if it is still missing) instead of this file:\n")
-	fmt.Fprintf(out, "--sudo-postgres on this server, --admin-url for another one. By hand, deploy.md describes it\n")
-	fmt.Fprintf(out, "(\"Database role and schemas\"). Later configures reuse this password.\n")
+	fmt.Fprintf(out, "--sudo-postgres on this server, --admin-url for another one. By hand, the VPS deployment\n")
+	fmt.Fprintf(out, "guide describes it (%q):\n  %s\n", vpsGuidePostgresSection, vpsGuidePostgresURL)
+	fmt.Fprintf(out, "Later configures reuse this password.\n")
 	return path, nil
 }
+
+// The page of the VPS deployment guide a customer has open while deploying,
+// at the step that creates Versola's Postgres role, database and schemas by
+// hand. Messages point there rather than at deploy.md of the versola
+// repository, which a customer never sees. The section name is printed
+// too, so the step can be found if the anchor ever moves.
+const (
+	vpsGuidePostgresSection = "Step 4 — create the Postgres role, database and schemas"
+	vpsGuidePostgresURL     = "https://docs.versola.io/deployment#step-4--create-the-postgres-role-database-and-schemas"
+)
 
 // postgresRoleCommand is the command that runs the role script at path
 // against a Postgres on this server.

@@ -28,19 +28,22 @@ var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
 var doctorProxy, doctorPostgresHost, doctorRegistry string
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check that this machine has everything Versola needs",
-	Long: `doctor checks this machine for the dependencies Versola needs to run
-locally: a reachable Docker daemon, the Docker Compose plugin, and a
-free port for its reverse proxy. It never installs anything on its own -- if
-Docker isn't found at all, the most it does is offer to open an install
-page in your browser, and only after you confirm.
+	Use:     "doctor",
+	GroupID: groupGetStarted,
+	Short:   "Check that this machine has everything Versola needs",
+	Long: `doctor checks a machine for what Versola needs, your computer (the default)
+or a server (--target vps): a reachable Docker daemon, the Docker Compose
+plugin, enough memory and disk, and on local a free port for its reverse
+proxy. It never installs anything on its own -- if Docker isn't found at
+all, the most it does is offer to open an install page in your browser,
+and only after you confirm.
 
-Run this before "versola bootstrap local <version>" to see ahead of
-time what's missing. Pass --target vps when checking a real server --
-some checks differ (see --target's own help): running it with no flag
-against a vps machine can fail a check that "configure vps" itself
-would actually pass, or pass one it would actually fail.
+Run this before "versola bootstrap" to see ahead of time what's missing.
+Pass --target vps when checking a real server -- some checks differ:
+running it with no flag against a vps machine can fail a check that
+"configure vps" itself would actually pass, or pass one it would actually
+fail. The checks of the public names a deployment will have are under
+"versola doctor --help-all" (README, "doctor").
 
 On a server, give it the flags you will give "configure vps": with
 --auth-url (and --proxy) it checks that the name points at this server
@@ -59,15 +62,18 @@ func init() { addDoctorFlags(doctorCmd) }
 // addDoctorFlags defines doctor's flags on cmd (a fresh command in tests).
 func addDoctorFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with -- checks that its name points at this server and that the proxy's ports (see --proxy) are free; the public names below are checked against it")
+	f.StringVar(&doctorAuthURL, "auth-url", "", "vps only: the --auth-url you will deploy with (the public names in --help-all are checked against it)")
 	f.StringVar(&doctorCentralURL, "central-url", "", "vps only: the --central-url you will deploy with -- checks that its name resolves to this server and that its port answers a TLS handshake")
 	f.StringVar(&doctorMTLSDomain, "mtls-domain", "", "vps only: the --mtls-domain you will deploy with -- checks that it resolves to this server and that 443 answers a TLS handshake for it")
 	f.StringVar(&doctorCentralMTLSDomain, "central-mtls-domain", "", "vps only: the --central-mtls-domain you will deploy with -- same checks")
 	f.StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
-	f.StringVar(&doctorProxy, "proxy", proxy.ModeNginx, `vps only: the --proxy you will deploy with ("nginx" or "external") -- decides which ports are checked: 80/443 for nginx, 127.0.0.1:2821 for external`)
-	f.StringVar(&doctorPostgresHost, "postgres-host", "", "vps only: the --postgres-host you will deploy with, if you use a Postgres of your own -- without it, port 5432 is checked for the Postgres container")
-	f.StringVar(&doctorRegistry, "registry", "", "vps only: the --registry you will deploy with -- the registry whose answer over HTTPS is checked (default: ghcr.io)")
-	f.StringVar(&doctorTarget, "target", "local", `which deployment target to check for ("local" or "vps") -- affects the memory minimum and whether port 2821 (local's own reverse proxy, not part of a vps deployment) is checked`)
+	f.StringVar(&doctorProxy, "proxy", proxy.ModeNginx, `vps only: the --proxy you will deploy with ("nginx" or "external"); decides which ports are checked`)
+	f.StringVar(&doctorPostgresHost, "postgres-host", "", "vps only: the --postgres-host you will deploy with, if you use a Postgres of your own (without it, port 5432 is checked for the Postgres container)")
+	f.StringVar(&doctorRegistry, "registry", "", "vps only: the --registry you will deploy with; the registry whose answer over HTTPS is checked (default: ghcr.io)")
+	f.StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
+	// The public names, and the registry, are for remote edges and test
+	// registries: under --help-all (see help.go), as in configure.
+	hideFlags(cmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "registry")
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {

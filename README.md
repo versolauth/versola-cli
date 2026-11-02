@@ -110,6 +110,7 @@ versola doctor
 versola bootstrap local            # the latest Versola release
 versola bootstrap local 0.7.5      # or a version you pick (versola versions lists them)
 versola status
+versola stats
 versola logs
 versola down
 versola uninstall
@@ -591,7 +592,8 @@ versola secrets plan vps 0.7.1 --json
   `{version, ok, target, state, schemaRevision, deployedRevision?, actions[], problems[]}`.
   Actions are `{service, name, action, source?, reason?}`; problems are
   `{kind, name?, service?, services?, group?, present?, missing?}`.
-  It never contains a value.
+  It never contains a value. The other machine-readable outputs,
+  `status --json` and `stats --json`, are described with their commands.
 - A release that predates the schema (no `secrets.schema.json`) cannot be
   planned; the command says so.
 
@@ -722,9 +724,10 @@ the container, together with what the dump needs to be readable.
 `uninstall` keeps the data volume; `uninstall --purge` destroys it together
 with OpenBao's (see `uninstall`).
 
-`versola logs postgres` shows the container's output (see [`logs`](#logs)).
-Not done yet: `status`/`stats` for the container, and `doctor`'s memory
-figures with it.
+`status` lists the container with the others, `stats` shows what it uses
+(its memory counts as used in the stand-in verdict), and `versola logs postgres`
+shows its output (see [`logs`](#logs)). Not done yet: `doctor`'s memory figures
+with it.
 
 ### Your own Postgres: `postgres init`
 
@@ -1190,7 +1193,8 @@ refuse, and so does `down` unless `--force` is given -- afterwards only
 
 **Before a stand-in starts** the rollout checks, and refuses with the
 numbers if either is short (the way round is `--no-surge`, which needs
-neither):
+neither). `versola stats` makes both checks without starting anything, so
+you can see the answer before you run the rollout (see `stats`):
 
 - memory: free memory (`MemAvailable`) must hold one more replica --
   what a running replica of that service uses now (`docker stats`), never
@@ -1510,6 +1514,92 @@ health (`docker compose ps` under the hood); on `vps` and `local` also the
 `notAfter` of every mutual-TLS certificate and of each public name's own,
 soonest first, marking those due for renewal (see `certs renew`).
 
+```
+versola status
+versola status --json | jq .version
+```
+
+`--json` prints the same facts as one JSON object on stdout, for scripts and
+health checks; nothing else goes to stdout. Fields are stable and additive:
+new ones may appear, none is renamed or changes type; `schema` (now `1`) is
+raised if that ever has to change, so a script can check it. It never contains a
+secret, a password, a URL with credentials or a container's environment
+(containers are read with a fixed `docker inspect` template).
+
+- `schema`; `cliVersion`; `deployed` -- `false` when nothing is deployed (the
+  object then has only `schema`, `cliVersion`, `deployed`, `containers: []` and
+  `warnings`,
+  and the exit code is 0, as for the text form).
+- `target`, `version` (during a rolling upgrade: where it goes), `authUrl`,
+  `centralUrl` (when recorded), `proxyMode`, `imageRegistry` (only when not
+  Versola's own), `migratedAt` (RFC 3339, UTC; absent: never migrated).
+- `rollout`: `{underway, from?, rollingBack}` -- `from` is the version an
+  unfinished rollout comes from.
+- `replicas`: per service (`central`, `auth`, `edge`) the recorded slots,
+  `[{slot, version, standIn?}]`; the version is per slot because a rolling
+  upgrade has two side by side, `standIn: true` marks its extra replica.
+- `database`: `{mode, host}` -- `mode` is `bundled` (the deployment's own
+  Postgres container; always on `local`) or `external`; `host` is the
+  recorded `host:port`, or `null` (local).
+- `containers`: every container of the deployment (services, replicas,
+  reverse proxy, OpenBao, a bundled Postgres), stopped ones included:
+  `[{name, service, slot?, state, health?, image, startedAt?}]`. `service` is
+  `auth` for `auth-2` with `slot: 2`; services that are not replicated have
+  no `slot`. `null` when Docker could not be asked: the object is still
+  printed, with a warning, and the exit code is non-zero.
+- `certificates` (vps and local): `[{name, notAfter?, renewDue, expired,
+  error?}]`, soonest to expire first; `error` instead of `notAfter` for one
+  that could not be read.
+- `warnings`: the `WARNING:` lines of the text form (certificates that should
+  have been renewed, no renewal timer) and what could not be read, as
+  sentences.
+
+### `stats`
+
+One snapshot of what every container of the deployment uses now, and on
+`vps` whether a rolling upgrade's stand-in replica would fit -- in the
+rollout's own numbers, so `stats` and the rollout's pre-flight never
+disagree. Read-only. For a live view use `docker stats` with the names it
+prints.
+
+```
+versola stats
+versola stats --json
+```
+
+- One row per container (services and their replicas, reverse proxy,
+  OpenBao, a bundled Postgres): CPU % (100% is one core, so a busy JVM can
+  show more), memory used / limit and PIDs as `docker stats --no-stream`
+  reports them; `--` for a container that is not running.
+- `vps` only: the free memory (`MemAvailable`, which already counts every
+  running container -- Postgres included -- as used) against what a stand-in
+  needs (see "Before a stand-in starts" under `rollout`: the largest of what
+  a running replica uses now and 900 MiB, plus 256 MiB), for the services a
+  rollout would start a stand-in for, and a verdict:
+  `free 2.34 GiB -- enough for one stand-in (needs 1.13 GiB: ...)`, or
+  `not enough for a stand-in ...: a rollout would refuse; free memory first,
+  or run it with --no-surge (...)`. Like the rollout it has to run on the vps
+  itself; elsewhere (another OS, Docker pointed at a remote host) it prints
+  why it can't tell instead of a verdict.
+- `vps` only: the Postgres connections a stand-in would open against what
+  the server takes (the rollout's `psql` check). It runs only when the
+  `postgres:18-alpine` image is already on the machine -- `stats` never
+  pulls it, and prints `not checked (runs during rollout)` instead. Progress
+  goes to stderr with `--json`.
+- `local` shows the container rows only: Docker Desktop's memory is not the
+  machine's, and no rollout runs there.
+- `--json` prints one object on stdout, stable and additive like `status
+  --json`: `{schema, target, containers, host?, postgres?, warnings}`. `containers`
+  is `[{name, service, slot?, state, cpuPercent, memUsedBytes, memLimitBytes,
+  pids}]` (figures `null` when not measured; the list `null` when Docker
+  could not be asked, with a non-zero exit). `host` is `{readable, reason?,
+  memAvailableBytes?, standIn?}` with `standIn` `{services, service?,
+  needBytes, thresholdBytes, measured, fits}` (`service` is the one that needs
+  the most; `measured` is false when the 900 MiB floor applies). `postgres`
+  is `{checked, reason?, freeConnections?, needConnections?,
+  marginConnections?, service?, fits}`; the three counters are there, 0
+  included, exactly when `checked` is `true`.
+
 ### `logs`
 
 ```bash
@@ -1717,7 +1807,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, logs, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, stats, logs, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)

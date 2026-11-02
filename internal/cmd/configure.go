@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -88,6 +89,12 @@ func init() {
 func runConfigure(cmd *cobra.Command, args []string) error {
 	target := args[0]
 
+	// First of all, before the lock and any question: a typo'd target is a
+	// usage error (exit code 2), and must not cost a "Continue?" answered
+	// for a deployment that was never going to happen.
+	if err := deploy.CheckTarget(target); err != nil {
+		return err
+	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
 	}
@@ -220,17 +227,38 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 
 // rejectVpsOnlyFlags: --proxy/--acme-staging/--postgres-db/--postgres-ca only mean something for vps
 // (local's proxy is always on 127.0.0.1:2821, without TLS) -- say so instead of
-// silently ignoring them.
+// silently ignoring them. A usage error (exit code 2).
+//
+// The four in localFixed used to be accepted on local and ignored, which is
+// the worse failure: a vps command copied with only the target changed gave a
+// local deployment that silently did not use the domain, the database or the
+// OpenBao it named. Their message says what local does instead.
+// --generate-missing, --allow-legacy-secrets, --registry, --no-browser and
+// --yes stay accepted: they mean the same on local.
 func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
 	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
-			return fmt.Errorf("--%s only applies to vps deployments", name)
+			return exitcode.With(exitcode.Usage, fmt.Errorf("--%s only applies to vps deployments", name))
+		}
+	}
+	for _, f := range localFixed {
+		if cmd.Flags().Changed(f.name) {
+			return exitcode.With(exitcode.Usage, fmt.Errorf("--%s only applies to vps deployments (%s)", f.name, f.instead))
 		}
 	}
 	return nil
+}
+
+// localFixed are the vps flags whose job local always does one fixed way;
+// instead says which, for rejectVpsOnlyFlags' message.
+var localFixed = []struct{ name, instead string }{
+	{"auth-url", "local always runs at http://localhost:2821"},
+	{"postgres-host", "local always runs its own Postgres, in a container"},
+	{"setup-openbao", "local always sets up its own OpenBao"},
+	{"no-certs-timer", "local installs no renewal timer"},
 }
 
 const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and 'versola edge add' for a remote edge's bootstrap bundle"

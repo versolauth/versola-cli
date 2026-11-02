@@ -19,6 +19,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -85,7 +86,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// local's success message while claiming to have checked something
 	// else entirely (flagged in review).
 	if doctorTarget != "local" && doctorTarget != "vps" {
-		return fmt.Errorf(`--target must be "local" or "vps", got %q`, doctorTarget)
+		return exitcode.With(exitcode.Usage, fmt.Errorf(`--target must be "local" or "vps", got %q`, doctorTarget))
 	}
 	// The flags are checked before any check runs: a value configure would
 	// refuse is refused here first, and a vps flag on local is not ignored.
@@ -106,7 +107,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	} else {
 		for _, name := range doctorVpsOnlyFlags {
 			if cmd.Flags().Changed(name) {
-				return fmt.Errorf("--%s only applies to --target vps", name)
+				return exitcode.With(exitcode.Usage, fmt.Errorf("--%s only applies to --target vps", name))
 			}
 		}
 	}
@@ -184,7 +185,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
-	return fmt.Errorf("doctor found %d problem(s)", failed)
+	// Exit code 3 (exitcode.Prerequisites), the same as configure's own
+	// prerequisite check: a script running doctor first can tell "this
+	// machine isn't ready" from doctor itself failing.
+	return exitcode.With(exitcode.Prerequisites, fmt.Errorf("doctor found %d problem(s)", failed))
 }
 
 // doctorVpsOnlyFlags are the flags that describe a vps deployment: refused
@@ -387,7 +391,7 @@ func publicNameChecks(authURL, mtls, centralMTLS, enroll string) ([]checks.Resul
 		return nil, nil
 	}
 	if authURL == "" {
-		return nil, fmt.Errorf("--mtls-domain, --central-mtls-domain and --central-domain are checked against --auth-url: pass it too")
+		return nil, exitcode.With(exitcode.Usage, fmt.Errorf("--mtls-domain, --central-mtls-domain and --central-domain are checked against --auth-url: pass it too"))
 	}
 	auth, err := proxy.ParseAuthURL(authURL, proxy.ModeExternal)
 	if err != nil {

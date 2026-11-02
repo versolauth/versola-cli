@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/topology"
@@ -48,8 +49,11 @@ import (
 // recreated as a side effect); never --remove-orphans.
 
 // errInterrupted is a rollout stopped between two steps at the operator's
-// request.
-var errInterrupted = errors.New("stopped at your request, between two steps -- run the same `versola rollout` again to continue")
+// request (the first Ctrl-C, SIGTERM or SIGHUP; see watchInterrupts). It exits
+// with exitcode.Interrupted (130), like the second and third Ctrl-C that leave
+// at once: to a script all three are "stopped by a signal, run it again",
+// not a failed rollout.
+var errInterrupted = exitcode.With(exitcode.Interrupted, errors.New("stopped at your request, between two steps -- run the same `versola rollout` again to continue"))
 
 // standInWarmup is how long a replica is left after it first reports ready
 // before it is probed and put into the proxy: readiness says the process is

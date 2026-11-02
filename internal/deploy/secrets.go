@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/secrets"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -248,7 +249,9 @@ func settleSecrets(ctx context.Context, client *openbao.Client, dir, target, ver
 			if err := secrets.RenderText(os.Stdout, version, result); err != nil {
 				return settledSecrets{}, err
 			}
-			return settledSecrets{}, fmt.Errorf("the secrets plan has %d problem(s), listed above: nothing was written to OpenBao", len(result.Problems))
+			// exitcode.PlanProblems (5), as `versola secrets plan` exits for the
+			// same plan: configure, bootstrap and rollout all stop here.
+			return settledSecrets{}, exitcode.With(exitcode.PlanProblems, fmt.Errorf("the secrets plan has %d problem(s), listed above: nothing was written to OpenBao", len(result.Problems)))
 		}
 		fmt.Printf("  secrets plan (%s, schema revision %d): OK\n", result.State, result.SchemaRevision)
 		shared = sharedValues(schema, existing, candidates)

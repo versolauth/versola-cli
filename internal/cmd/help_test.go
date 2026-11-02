@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -22,11 +21,7 @@ func TestHelpProcess(t *testing.T) {
 			break
 		}
 	}
-	if err := Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	os.Exit(0)
+	os.Exit(Run(os.Args[1:], os.Stderr))
 }
 
 func cliHelp(t *testing.T, args ...string) string {

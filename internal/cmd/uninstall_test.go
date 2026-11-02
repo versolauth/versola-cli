@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -391,5 +392,28 @@ func TestUninstallPurgeNamesRunningContainers(t *testing.T) {
 		if i := strings.Index(r.out, want); i < 0 || i > q {
 			t.Errorf("%q not shown before the question:\n%s", want, r.out)
 		}
+	}
+}
+
+// A shell chaining uninstall and a reinstall must stop after a refusal. The
+// deployment and its files stay intact, and the existing Aborted line stays
+// the only message (Run recognizes Reported and doesn't print it twice).
+func TestUninstallRefusalExitsAbortedWithoutRemovingAnything(t *testing.T) {
+	for _, answer := range []string{"n\n", ""} {
+		t.Run(answer, func(t *testing.T) {
+			r := runUninstallCase(t, uninstallCase{st: vpsState(), files: true, answer: answer})
+			if exitcode.Code(r.err) != exitcode.Aborted || !exitcode.IsReported(r.err) {
+				t.Fatalf("err=%v code=%d, want reported aborted", r.err, exitcode.Code(r.err))
+			}
+			if strings.Count(r.out, "Aborted.") != 1 {
+				t.Errorf("missing abort output: %s", r.out)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("refusal ran destructive commands: %v", r.calls)
+			}
+			if !r.fileExists("vps.json") {
+				t.Error("refusal removed credentials")
+			}
+		})
 	}
 }

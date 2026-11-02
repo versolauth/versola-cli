@@ -97,6 +97,10 @@ func init() {
 func runBootstrap(cmd *cobra.Command, args []string) error {
 	target := args[0]
 
+	// First, as in cmd/configure.go: before the lock and any question.
+	if err := deploy.CheckTarget(target); err != nil {
+		return err
+	}
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
 	}

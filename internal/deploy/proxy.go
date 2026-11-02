@@ -11,6 +11,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -107,11 +108,13 @@ func checkProxyPortsWith(auth proxy.AuthURL, mode string, public proxy.PublicNam
 		}
 	}
 
+	// A taken port is the machine not being ready, the same class as
+	// configure's other prerequisite checks (exit code 3).
 	if port := portConflict(proxyPortsFor(auth, mode, public), ours, proxy.PortInUse); port != 0 {
 		if mode == proxy.ModeExternal {
-			return fmt.Errorf("port %d is already in use on this machine -- with --proxy external Versola's proxy listens on 127.0.0.1:%d, so that port has to be free", port, port)
+			return exitcode.With(exitcode.Prerequisites, fmt.Errorf("port %d is already in use on this machine -- with --proxy external Versola's proxy listens on 127.0.0.1:%d, so that port has to be free", port, port))
 		}
-		return fmt.Errorf("port %d is already in use on this machine, probably by a web server that's already installed. Either stop it, or deploy behind it with --proxy external: Versola's proxy then listens on 127.0.0.1:%d and your web server forwards %s to it", port, proxy.ExternalPort, auth.Host)
+		return exitcode.With(exitcode.Prerequisites, fmt.Errorf("port %d is already in use on this machine, probably by a web server that's already installed. Either stop it, or deploy behind it with --proxy external: Versola's proxy then listens on 127.0.0.1:%d and your web server forwards %s to it", port, proxy.ExternalPort, auth.Host))
 	}
 	return nil
 }

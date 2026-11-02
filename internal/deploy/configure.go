@@ -23,6 +23,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/wait"
@@ -60,6 +61,18 @@ import (
 // rolling upgrades that follow keep pulling from the same place.
 func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string) (ConfigureResult, error) {
 	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, registry, nil)
+}
+
+// CheckTarget refuses a target other than "local" and "vps", as a usage
+// error (exit code 2). configure and bootstrap call it first of all, before the
+// state lock and before any question (internal/cmd): a typo'd target must not
+// cost a "Continue?" answered for nothing. configure checks again for its own
+// callers.
+func CheckTarget(target string) error {
+	if target != "local" && target != "vps" {
+		return exitcode.With(exitcode.Usage, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target))
+	}
+	return nil
 }
 
 // stagedConfigure is what a rolling upgrade (`versola rollout`) changes about
@@ -100,8 +113,8 @@ type stagedConfigure struct {
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
 func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, staged *stagedConfigure) (ConfigureResult, error) {
-	if target != "local" && target != "vps" {
-		return ConfigureResult{}, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported today`, target)
+	if err := CheckTarget(target); err != nil {
+		return ConfigureResult{}, err
 	}
 	if target == "vps" && authURL == "" {
 		// Belt and suspenders -- cmd/bootstrap.go already checks this
@@ -218,7 +231,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	for _, r := range checksToRun {
 		fmt.Println(r.String())
 		if !r.OK {
-			return ConfigureResult{}, fmt.Errorf("prerequisite check failed — run `versola doctor` for details")
+			return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, fmt.Errorf("prerequisite check failed — run `versola doctor` for details"))
 		}
 	}
 	if target == "vps" {
@@ -230,7 +243,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 			r := checkBundledPostgresPort()
 			fmt.Println(r.String())
 			if !r.OK {
-				return ConfigureResult{}, fmt.Errorf("prerequisite check failed -- run `versola doctor` for details")
+				return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, fmt.Errorf("prerequisite check failed -- run `versola doctor` for details"))
 			}
 		} else {
 			fmt.Printf("Postgres: yours, at %s\n", postgresHost)

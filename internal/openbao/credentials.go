@@ -190,3 +190,9 @@ func SaveCredentials(target string, c *Credentials) error {
 	}
 	return nil
 }
+
+// Dir is ~/.versola/openbao, where this CLI keeps each target's AppRole
+// credentials (<target>.json), the admin credentials (<target>-admin.json)
+// and the Postgres role script (<target>-postgres-role.sql). Exported for
+// `versola backup create`, which copies them.
+func Dir() (string, error) { return credentialsDir() }

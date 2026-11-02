@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -274,4 +275,22 @@ func OutputWithin(timeout time.Duration, args ...string) (stdout []byte, stderr 
 		return out, errBuf.String(), fmt.Errorf("docker didn't finish within %s", timeout)
 	}
 	return out, errBuf.String(), err
+}
+
+// RunTo runs docker with its stdout written to w (a dump, an archive of a
+// volume: data, not text for the terminal) and returns its stderr for the
+// caller to report. Not bounded by a timeout: how long a dump takes depends
+// on the size of the database.
+func RunTo(w io.Writer, args ...string) (stderr string, err error) {
+	done, err := track()
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	c := command(args...)
+	c.Stdout = w
+	var errBuf strings.Builder
+	c.Stderr = &errBuf
+	err = c.Run()
+	return errBuf.String(), err
 }

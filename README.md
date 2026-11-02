@@ -237,13 +237,14 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` (see `bootstrap --help`) and accepts
+  it also needs `--auth-url` on the first run (see `bootstrap --help`) and accepts
   `--postgres-host` (your own Postgres; without it, Postgres runs in a
   container of the deployment, see "Postgres on vps"),
   `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
   `--central-mtls-domain` and `--central-domain` (see "Public names").
   `--registry <prefix>` (both targets) pulls the images from another
-  registry, see "Images from another registry".
+  registry, see "Images from another registry". On `vps` it remembers the
+  deployment it replaces, see "Redeploying on the same server" below.
 - **`postgres init`** — for a vps deployment pointed at a Postgres of your
   own (`--postgres-host`): creates the role, the database and the schemas
   `auth`, `central` and `edge` the generated configs name, by the rights it
@@ -285,6 +286,51 @@ replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
 question is answered by stdin, or the command aborts.
 
+#### Redeploying on the same server
+
+`configure vps` (and `bootstrap vps`) run again on a server that already has a
+vps deployment take `--auth-url`, `--proxy`, `--acme-staging`,
+`--setup-openbao` and the Postgres it uses (the container, or your own at its
+`--postgres-host`) from that deployment, so a redeploy or a move to another
+version without `rollout` is
+
+```
+versola configure vps 0.8.1
+versola migrate
+versola up
+```
+
+with no flag to remember. Before it asks to continue it prints what it reused,
+marking anything given on the command line:
+
+```
+Using the recorded settings of this deployment (pass a flag to change one):
+  --auth-url       https://id.example.com
+  --proxy          external
+  Postgres         your own, at 127.0.0.1:5432
+```
+
+A flag always wins over the recorded value: `--proxy nginx` changes the mode
+(the port checks then run for the new one), `--acme-staging=false` goes back to
+a trusted certificate, `--setup-openbao=false` to automatic OpenBao setup.
+Switching between the Postgres container and your own is refused (it is a
+backup and a restore, see "Postgres on vps"). A recorded `--acme-staging` is
+left out, not refused, when the new `--proxy` or `--auth-url` means Versola's
+proxy no longer gets a certificate itself. `--postgres-db`, `--postgres-ca`,
+the public names, `--cert-lifetime-days` and `--est` were remembered already;
+`--registry` is not (see "Images from another registry"). `versola status`
+shows the recorded auth URL, the proxy mode (marked when the certificate comes
+from Let's Encrypt staging) and, when it was set up by hand, OpenBao.
+
+`--auth-url`, `--proxy` and the Postgres are fields of `state.json`. Staging and
+"OpenBao set up by hand" are not: they are read the way `rollout` reads them,
+from the proxy configuration of the current deployment and from whether
+`~/.versola/openbao/vps-admin.json` exists (this CLI writes it whenever it
+provisions OpenBao itself), so deployments made by an older CLI are covered
+too and the state layout is unchanged. Nothing is reused from a `local`
+record, or when there is no readable record: the first `configure vps` needs
+`--auth-url` as before.
+
 ### OpenBao: automatic setup, `--setup-openbao`, `secrets login` / `secrets test`
 
 `configure` starts an OpenBao container for the target
@@ -301,8 +347,8 @@ machine** -- neither value can be recovered. Versola's services never talk
 to OpenBao; it only has to run while `configure` (or `rollout`, `secrets
 plan`) does.
 
-If you run OpenBao yourself, pass `--setup-openbao` to `configure vps` /
-`bootstrap vps`: the CLI then never calls OpenBao's admin API, unsealing is
+If you run OpenBao yourself, pass `--setup-openbao` to the first `configure vps` /
+`bootstrap vps` (later runs remember it, see "Redeploying on the same server"): the CLI then never calls OpenBao's admin API, unsealing is
 yours, and it expects credentials stored beforehand with
 
 ```
@@ -580,11 +626,15 @@ stops the container from starting). Nothing in this mode is done by hand:
   then refuses before anything is started and says to use a newer release or
   `--postgres-host`.
 
+**Back it up.** The volume is the database, on one server: `versola backup
+create` (see [`backup create`](#backup-create--backup-list)) dumps it through
+the container, together with what the dump needs to be readable.
+
 `uninstall` keeps the data volume; `uninstall --purge` destroys it together
 with OpenBao's (see `uninstall`).
 
-Not done yet: `status`/`logs`/`stats`/`backup`
-for the container, and `doctor`'s memory figures with it.
+Not done yet: `status`/`logs`/`stats` for the container, and `doctor`'s memory
+figures with it.
 
 ### Your own Postgres: `postgres init`
 
@@ -706,7 +756,8 @@ serves the admin console at `/central/admin/`.
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but
   without production's rate limits (a handful of certificates per domain
-  per week).
+  per week). It is remembered by later `configure vps` runs;
+  `--acme-staging=false` switches to a trusted certificate.
 
   Each public name you ask for (see "Public names" below) also needs a DNS
   record pointing at this server, next to `--auth-url`'s name.
@@ -1126,8 +1177,10 @@ the renewal.
 1. Read the release notes of the new version: additive migrations, the
    running version working on the new schema. If not, this is a
    `configure` / `migrate` / `up` deployment instead.
-2. Back the database up (`pg_dump` of each schema) -- migrations can't be
-   rolled back -- and copy `~/.versola/active/state.json`.
+2. `versola backup create` -- migrations can't be rolled back -- and copy
+   the archive off the server. Without the CLI: a `pg_dump -Fc` of the
+   database and a copy of `~/.versola/active/state.json` (and OpenBao's data
+   and `~/.versola/openbao/`, without which the dump can't be read).
 3. `versola rollout <version> --dry-run`: the plan, the checks, the
    secrets plan, the migrations it would apply. Nothing changes.
 4. `versola rollout <version> --assume-compatible`. Cut off, run the same
@@ -1306,9 +1359,61 @@ the files and stops. A partner's edge does not use any of this: it has no
 connection to central. (Central's own `edge-identity` setting only matters for
 partners' edges; an operator's own, first-party, edges are always extended by central.)
 
+### `backup create` / `backup list`
+
+```bash
+versola backup create [--out <dir>] [--skip-database]
+versola backup list [--out <dir>]
+```
+
+`backup create` writes one archive of the deployment this machine tracks
+(vps or local), `versola-backup-<target>-<version>-<UTC time>.tar.gz`, mode
+0600, into `--out` (default `~/versola-backups`, outside `~/.versola` so
+`uninstall` never touches it). It holds what `configure` cannot make again:
+
+| Member | What |
+|---|---|
+| `manifest.json` | CLI and Versola versions, target, Postgres mode (`bundled`: the deployment's own container, and local; `external`: yours), database and role, the vps proxy's configuration generation, and the size and SHA-256 of every other member; what was left out and why |
+| `database.dump` | `pg_dump -Fc` of the database. The deployment's own Postgres is dumped inside its container (`docker exec`, the server's own `pg_dump`); yours from a throw-away `postgres:18-alpine` container on the host network, connecting and verifying TLS as the services do, with the password read by Docker from `auth.secrets.env`, never put on a command line |
+| `openbao-volume.tar` | OpenBao's data volume. OpenBao's file storage has no online snapshot, so OpenBao is stopped for the copy (seconds; the services keep running, they read their secrets from their own files), then started and unsealed with the saved key (also when the copy failed). A Ctrl-C, a dropped SSH session or a kill meanwhile waits until it runs again (it says so at once). The image the copy runs in (`postgres:18-alpine`) is pulled before the stop, never while OpenBao is down. It is stopped only when it is sure to come back, so no question is asked: its configuration file still exists, and this machine has an unseal key and a root token the running OpenBao accepts. Otherwise (OpenBao set up by hand, a stale key file) it is not stopped and the copy is left out, with the reason; the archive is still written, but the command fails (exit code 1), since a dump without OpenBao's data can't be read after a restore. A stopped OpenBao is copied as it is |
+| `openbao/` | `<target>.json`, `<target>-admin.json` (the root token and unseal key), `<target>-postgres-role.sql`, the ones present |
+| `state/` | `state.json`, and the copy of `--postgres-ca`'s file if there is one |
+
+Not in it: the generated deployment files (`configure` writes them again),
+the ACME certificate volume (a redeploy requests a new certificate) and the
+mutual-TLS volume (`versola up` reissues the certificates). The command
+prints what the archive holds, file names and sizes only, and what it does
+not.
+
+**Whoever has the archive has every secret of the deployment**: OpenBao's
+data and the key that unseals it are in the same file, as they have to be
+for the dump to be readable after a restore. Keep it like a password, and
+copy it off the server: a backup that lives only on the server is lost with
+it.
+
+`--skip-database` leaves the dump out, for a managed database with
+snapshots of its own (it warns when the database is the deployment's own
+container: nothing else backs that one up). The database is dumped first, so
+a database that refuses the login fails the command before OpenBao is
+stopped. Any failure leaves no archive: it is packed under a temp name and
+renamed at the end; the staging copies are removed, and those of a run that
+was killed outright are removed by the next `backup create` into the same
+directory. During an
+unfinished rolling upgrade the archive is made, and the manifest
+(`unfinishedRollout`) and the output say so: the dump may already have the
+new version's schema. While it runs the
+deployment is locked like for `configure`, and the dump is staged on disk
+before packing, so `--out` needs about twice the dump's size free.
+
+`backup list` shows the archives in `--out`, newest first, with the summary
+from each manifest. `backup restore` does not exist yet.
+
 ### `status`
 
-Shows the deployed version and target (and the registry, when it is not
+Shows the deployed version and target (on `vps` also the recorded auth URL,
+the proxy mode, marked when the certificate comes from Let's Encrypt staging,
+and OpenBao when it was set up by hand -- what a `configure vps` without flags
+keeps; and the registry, when it is not
 Versola's own), when migrations last ran, the replicas of each service, the
 progress of an unfinished rolling upgrade, and the containers with their
 health (`docker compose ps` under the hood); on `vps` and `local` also the
@@ -1457,7 +1562,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)

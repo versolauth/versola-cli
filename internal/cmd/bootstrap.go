@@ -29,79 +29,34 @@ var bootstrapYes bool
 var bootstrapNoCertsTimer bool
 
 var bootstrapCmd = &cobra.Command{
-	Use:   "bootstrap <target> <version>",
-	Short: "Deploy a specific version of Versola",
-	Long: `bootstrap deploys a specific released version of Versola.
-
-Currently supported:
+	Use:     "bootstrap <target> <version>",
+	GroupID: groupGetStarted,
+	Short:   "Deploy a specific version of Versola",
+	Long: `bootstrap deploys a released version of Versola in one go: configure, migrate, up.
 
   versola bootstrap local 0.1.1
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com
   versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432 --proxy external
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host db.example.com:5432 --postgres-db versola --postgres-ca /etc/ssl/db-ca.pem
+  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --proxy external
 
-On vps Versola gets its own reverse proxy (nginx) with a Let's Encrypt
-certificate -- see "versola configure --help" for --proxy.
+local needs no flag. On vps, --auth-url is the public URL the deployment is
+reached at (needed the first time, then remembered); Versola gets its own nginx
+with a Let's Encrypt certificate, OpenBao is set up automatically, Postgres
+runs in a container unless --postgres-host names your own, and a daily timer
+renews the mutual-TLS certificates. On vps it asks once, before anything
+changes. With your own Postgres a first install stops before migrate, after
+printing how to set the role's password. Run "versola configure", "migrate"
+and "up" one by one to stop between the steps.
 
-On vps, --mtls-domain, --central-mtls-domain and --central-domain (optional)
-publish the mutual-TLS listeners and central's enrollment route -- see
-"versola configure --help".
-
-On vps, --postgres-db names the database (default: auth) and --postgres-ca
-points at a PEM file with the CA that signed Postgres' server certificate
--- see "versola configure --help".
-
-vps deploys to a real server. By default this provisions vps's OpenBao
-automatically too (init, unseal, kv-v2, AppRole, policy, role — same as
-local always has) — pass --setup-openbao if you've already set OpenBao
-up yourself and just want to hand this CLI a role-id/secret-id via
-"versola secrets login vps" instead. Either way this asks for
-confirmation before it touches the live database.
-
---auth-url is required on the first vps deployment: the public domain this
-deployment will actually be reachable at. It is specific to whoever's
-deploying, so there's no sensible shared default. local doesn't need it
-(docker-local's own defaults are fine for a throwaway dev stack). Later
-runs on the same server remember it, with --proxy, --acme-staging,
---setup-openbao and the Postgres -- see "versola configure --help".
-
-On vps Postgres runs in a container of the deployment by default: no
---postgres-host, no database step. The first start creates the role, the
-database and the schemas auth, central and edge, from the password stored
-in OpenBao; the data is in the Docker volume versola-postgres-data-vps,
-which "down" and "uninstall" leave alone. It listens on 127.0.0.1:5432
-only, so that port has to be free on the server. --postgres-host selects
-your own Postgres instead (its host:port), and configure run again without
-it keeps the one already chosen. This needs a versola-tools release that
-can run it; an older one is refused before anything is started.
-
-This CLI doesn't know Versola's own topology (ports, service names,
-config schema) — that lives entirely in the versioned "versola-tools"
-image, which this command pulls and runs to generate everything the
-compose stack needs. See the project design doc, section 3.5.
-
-Before it writes any secret, configure (the first of those steps) works
-out what it may do about each one and stops, with nothing written, if a
-secret looks lost or a key pair is only half stored -- see "versola
-configure --help" for --generate-missing and --allow-legacy-secrets.
-
-On vps it also installs the daily systemd timer that runs "versola certs
-renew" (--no-certs-timer to skip it): the mutual-TLS certificates are
-short-lived. Without systemd it prints the crontab line instead.
-
-Internally this runs "configure", "migrate", and "up" in order, asking
-for confirmation only once up front on vps rather than once per step.
-Run those separately instead of bootstrap when a deployment (e.g. onto
-a server) needs to stop between them — to review the plan before it
-touches a live database, or to run migrate on its own schedule.`,
+More: README "bootstrap local <version>", "Deploying to a VPS: the reverse
+proxy", "Postgres on vps", "Secrets". Every flag: versola bootstrap --help-all`,
 	Args: cobra.ExactArgs(2),
 	RunE: runBootstrap,
 }
 
 func init() {
 	bootstrapCmd.Flags().BoolVarP(&bootstrapYes, "yes", "y", false, "don't ask for confirmation (vps)")
-	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
+	bootstrapCmd.Flags().BoolVar(&bootstrapNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates ('versola certs renew'); refused unless the certificates are unlimited (--cert-lifetime-days unlimited), since they expire without it")
 	bootstrapCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
 	bootstrapCmd.Flags().StringVar(&authURL, "auth-url", "", authURLUsage)
 	bootstrapCmd.Flags().StringVar(&postgresHost, "postgres-host", "", postgresHostUsage)
@@ -115,6 +70,8 @@ func init() {
 	bootstrapCmd.Flags().StringSliceVar(&bootstrapGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	bootstrapCmd.Flags().BoolVar(&bootstrapAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	bootstrapCmd.Flags().BoolVar(&setupOpenBao, "setup-openbao", false, setupOpenBaoUsage)
+	// As configure: the advanced flags are under --help-all (see help.go).
+	hideFlags(bootstrapCmd, advancedDeployFlags...)
 }
 
 // runBootstrap deploys in one go, which is all this command has ever

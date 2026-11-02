@@ -26,8 +26,9 @@ var (
 )
 
 var edgeCmd = &cobra.Command{
-	Use:   "edge",
-	Short: "Register an edge that runs elsewhere, and set one up",
+	Use:     "edge",
+	GroupID: groupAdvanced,
+	Short:   "Register an edge that runs elsewhere, and set one up",
 }
 
 var edgeAddCmd = &cobra.Command{

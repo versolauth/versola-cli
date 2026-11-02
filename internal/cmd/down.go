@@ -28,8 +28,9 @@ var downCompose = func(args []string) error {
 }
 
 var downCmd = &cobra.Command{
-	Use:   "down",
-	Short: "Stop the stack (keeps data and images for next bootstrap)",
+	Use:     "down",
+	GroupID: groupOperate,
+	Short:   "Stop the stack (keeps data and images for next bootstrap)",
 	Long: `down stops the containers of the deployment this machine tracks, local
 or vps. By default the data is kept: on local the Postgres volume, so a later
 bootstrap picks up the same data; on vps the Postgres, OpenBao and TLS

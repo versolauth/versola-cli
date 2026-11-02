@@ -111,6 +111,7 @@ versola bootstrap local            # the latest Versola release
 versola bootstrap local 0.7.5      # or a version you pick (versola versions lists them)
 versola status
 versola stats
+versola logs
 versola down
 versola uninstall
 versola upgrade
@@ -723,9 +724,10 @@ the container, together with what the dump needs to be readable.
 `uninstall` keeps the data volume; `uninstall --purge` destroys it together
 with OpenBao's (see `uninstall`).
 
-`status` lists the container with the others, and `stats` shows what it uses
-(its memory counts as used in the stand-in verdict). Not done yet: `logs` for
-the container, and `doctor`'s memory figures with it.
+`status` lists the container with the others, `stats` shows what it uses
+(its memory counts as used in the stand-in verdict), and `versola logs postgres`
+shows its output (see [`logs`](#logs)). Not done yet: `doctor`'s memory figures
+with it.
 
 ### Your own Postgres: `postgres init`
 
@@ -945,7 +947,7 @@ What each does, with `--proxy nginx`:
   100 connections per client address (the only thing that can be said about a
   client before its certificate is checked; a refused connection is logged at
   `warn` in nginx's error log) and a log of its own: one line per connection
-  tagged `mtls-public` on the proxy's stdout (`docker logs versola-proxy | grep
+  tagged `mtls-public` on the proxy's stdout (`versola logs proxy | grep
   mtls-public`), with the name, the client address, the status and the bytes.
   Alert on a spike of sessions that end within a second after a few hundred
   bytes there: from outside, that is what failed handshakes look like (nginx
@@ -1598,6 +1600,49 @@ versola stats --json
   marginConnections?, service?, fits}`; the three counters are there, 0
   included, exactly when `checked` is `true`.
 
+### `logs`
+
+```bash
+versola logs                         # the last 200 lines of every service
+versola logs central --tail 100      # one service
+versola logs auth -f                 # every replica of auth, until Ctrl-C
+versola logs proxy --since 10m       # what the reverse proxy said in the last 10 minutes
+```
+
+Shows what the deployment's services print, on `local` and `vps`, without a
+docker command, a container name or a compose file path: it is `docker compose
+logs` for the compose project this machine tracks, with the same files `status`
+uses, so the replicas, the reverse proxy and OpenBao are part of it.
+
+- **`[service...]`**: the deployment's compose services, as Compose lists them
+  (`central`, `auth`, `edge`, `proxy`, `openbao`, `step-ca`, `postgres` where the
+  deployment has one, ...), or a replica as `status` shows it. `auth` is every
+  replica of auth (`auth` and each `auth-N`, also a stand-in of a rolling
+  upgrade), `auth-3` only slot 3, `auth-1` slot 1. A name the deployment does
+  not have is refused with the list of those it has. `postgres` on a vps that
+  uses your own Postgres (`--postgres-host`) says so: its logs are on the
+  server that runs it. No service: all of them, each line prefixed with its
+  service; with exactly one service the prefix is left out, so
+  `versola logs auth-3 | jq` reads the service's own lines.
+- **`--tail <n|all>`**: lines from the end of each service's log, 200 by
+  default, also with `--follow`; `all` for the whole history.
+- **`-f`, `--follow`**: keep printing new lines; Ctrl-C ends it, with exit
+  status 0.
+- **`--since <duration|time>`**: only lines since then (`10m`, `2h`,
+  `2026-11-02T10:00:00`), as `docker compose logs` takes it.
+- **`-t`, `--timestamps`**: when each line was written.
+
+Nothing deployed on this machine: it exits 1 and says to run `versola
+bootstrap` first. It takes no lock, like `status`, so a `logs -f` left open
+never holds up a `configure`, `up` or `rollout`.
+
+**Mind where you paste it.** The output is the services' own, unchanged: the
+CLI neither adds to it nor filters it, and a service can print what it should
+not. step-ca prints its administrative password on its first start, so
+`versola logs step-ca --tail all` shows it: do not paste that into a ticket or
+a chat. When `up` or `rollout` reports that a service never became ready,
+the error ends with the `versola logs` command to run.
+
 ### `down`
 
 Stops the deployment this machine tracks, local or vps. Nothing is deleted
@@ -1762,7 +1807,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, stats, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, stats, logs, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)

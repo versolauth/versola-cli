@@ -75,6 +75,7 @@ func init() {
 
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)

@@ -17,9 +17,6 @@ var versionsLimit int
 
 // versionsCmd lists Versola releases, so picking a version for "bootstrap",
 // "configure" or "rollout" needs no browser (versolauth/versola-cli#66).
-//
-// TODO(#72): once command groups land in root.go, put this next to
-// "version" in its group.
 var versionsCmd = &cobra.Command{
 	Use:     "versions",
 	GroupID: groupGetStarted,

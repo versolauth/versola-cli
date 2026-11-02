@@ -635,7 +635,7 @@ func TestRolloutCentralNeverReadyThenRetried(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"central never became ready", "waited 5m0s", "versola rollout --abort", "run the same `versola rollout` again"} {
+	for _, want := range []string{"central never became ready", "waited 5m0s", "versola rollout --abort", "run the same `versola rollout` again", "`versola logs central --tail 100`"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}
@@ -682,6 +682,9 @@ func TestRolloutReplacedReplicaNotReadyThenRetried(t *testing.T) {
 	err := engineFor(w, true, false).run()
 	if err == nil || !strings.Contains(err.Error(), "auth-2 never became ready") {
 		t.Fatalf("error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "see: `versola logs auth-2 --tail 100`") {
+		t.Errorf("error doesn't point at the replica's logs: %v", err)
 	}
 	for _, s := range w.upstream[AuthService] {
 		if s == "auth-2" {

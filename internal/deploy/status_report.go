@@ -19,7 +19,13 @@ import (
 // changes type. Nothing in it is a secret -- it is built from state.json
 // (which holds none), a strict inspect template (containerInspectFormat,
 // never the container's environment) and the certificates' dates.
+// ReportSchema is the version of the JSON that `status --json` and `stats
+// --json` print. It stays 1 while fields are only added; a change a script
+// could trip on (a rename, a type change, a field removed) raises it.
+const ReportSchema = 1
+
 type StatusReport struct {
+	Schema     int    `json:"schema"`
 	CLIVersion string `json:"cliVersion"`
 	// Deployed is false when this machine has no deployment (no compose
 	// file): every other field but warnings is then left out, and the
@@ -102,6 +108,7 @@ type CertStatus struct {
 // warnings are the caller's: they need Docker.
 func NewStatusReport(st *state.State, cliVersion string) StatusReport {
 	r := StatusReport{
+		Schema:        ReportSchema,
 		CLIVersion:    cliVersion,
 		Deployed:      true,
 		Target:        st.Target,
@@ -142,7 +149,7 @@ func NewStatusReport(st *state.State, cliVersion string) StatusReport {
 
 // NotDeployedReport is status --json on a machine with nothing deployed.
 func NotDeployedReport(cliVersion string) StatusReport {
-	return StatusReport{CLIVersion: cliVersion, Containers: []ContainerStatus{}, Warnings: []string{}}
+	return StatusReport{Schema: ReportSchema, CLIVersion: cliVersion, Containers: []ContainerStatus{}, Warnings: []string{}}
 }
 
 // CertStatuses turns the certificate report into its JSON form, soonest

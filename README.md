@@ -1519,12 +1519,14 @@ versola status --json | jq .version
 
 `--json` prints the same facts as one JSON object on stdout, for scripts and
 health checks; nothing else goes to stdout. Fields are stable and additive:
-new ones may appear, none is renamed or changes type. It never contains a
+new ones may appear, none is renamed or changes type; `schema` (now `1`) is
+raised if that ever has to change, so a script can check it. It never contains a
 secret, a password, a URL with credentials or a container's environment
 (containers are read with a fixed `docker inspect` template).
 
-- `cliVersion`; `deployed` -- `false` when nothing is deployed (the object
-  then has only `cliVersion`, `deployed`, `containers: []` and `warnings`,
+- `schema`; `cliVersion`; `deployed` -- `false` when nothing is deployed (the
+  object then has only `schema`, `cliVersion`, `deployed`, `containers: []` and
+  `warnings`,
   and the exit code is 0, as for the text form).
 - `target`, `version` (during a rolling upgrade: where it goes), `authUrl`,
   `centralUrl` (when recorded), `proxyMode`, `imageRegistry` (only when not
@@ -1585,7 +1587,7 @@ versola stats --json
 - `local` shows the container rows only: Docker Desktop's memory is not the
   machine's, and no rollout runs there.
 - `--json` prints one object on stdout, stable and additive like `status
-  --json`: `{target, containers, host?, postgres?, warnings}`. `containers`
+  --json`: `{schema, target, containers, host?, postgres?, warnings}`. `containers`
   is `[{name, service, slot?, state, cpuPercent, memUsedBytes, memLimitBytes,
   pids}]` (figures `null` when not measured; the list `null` when Docker
   could not be asked, with a non-zero exit). `host` is `{readable, reason?,
@@ -1593,7 +1595,8 @@ versola stats --json
   needBytes, thresholdBytes, measured, fits}` (`service` is the one that needs
   the most; `measured` is false when the 900 MiB floor applies). `postgres`
   is `{checked, reason?, freeConnections?, needConnections?,
-  marginConnections?, service?, fits}`.
+  marginConnections?, service?, fits}`; the three counters are there, 0
+  included, exactly when `checked` is `true`.
 
 ### `down`
 

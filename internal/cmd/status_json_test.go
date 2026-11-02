@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,5 +174,31 @@ func TestStatsNothingDeployed(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := writeStats(&stdout, &stderr, false); err == nil || !strings.Contains(err.Error(), "versola bootstrap") || stdout.Len() != 0 {
 		t.Errorf("err %v, stdout %q", err, stdout.String())
+	}
+}
+
+// The certificate probes run together, and their results keep the order of the
+// endpoints (the report lists them in that order).
+func TestProbeAllIsParallelAndKeepsOrder(t *testing.T) {
+	addrs := []string{"a:443", "b:443", "c:443", "d:443"}
+	var running, peak atomic.Int32
+	out := probeAll(addrs, func(addr string) deploy.CertInfo {
+		n := running.Add(1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		time.Sleep(50 * time.Millisecond)
+		running.Add(-1)
+		return deploy.CertInfo{Name: addr}
+	})
+	if peak.Load() != int32(len(addrs)) {
+		t.Errorf("at most %d probes ran at once, want %d", peak.Load(), len(addrs))
+	}
+	for i, a := range addrs {
+		if out[i].Name != a {
+			t.Errorf("result %d is %q, want %q", i, out[i].Name, a)
+		}
+	}
+	if got := probeAll(nil, nil); len(got) != 0 {
+		t.Errorf("no endpoints: %v", got)
 	}
 }

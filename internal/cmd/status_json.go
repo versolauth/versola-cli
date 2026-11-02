@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
@@ -17,15 +18,31 @@ var (
 	statusContainers = deploy.ListContainers
 	statusCertReport = deploy.CertReport
 	statusProbeCerts = func(st *state.State) []deploy.CertInfo {
-		var out []deploy.CertInfo
-		for _, addr := range deploy.PublicEndpoints(st) {
-			out = append(out, deploy.ProbeCertificate(addr, 5*time.Second))
-		}
-		return out
+		return probeAll(deploy.PublicEndpoints(st), func(addr string) deploy.CertInfo {
+			return deploy.ProbeCertificate(addr, 5*time.Second)
+		})
 	}
 	statusCertsWarning = certsWarning
 	statusNow          = time.Now
 )
+
+// probeAll runs probe on every address at once and returns the results in the
+// order of addrs: an unreachable name costs its timeout once, not once per
+// endpoint, so a health check with several dead names is not several times
+// slower.
+func probeAll(addrs []string, probe func(addr string) deploy.CertInfo) []deploy.CertInfo {
+	out := make([]deploy.CertInfo, len(addrs))
+	var wg sync.WaitGroup
+	for i, addr := range addrs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i] = probe(addr)
+		}()
+	}
+	wg.Wait()
+	return out
+}
 
 // writeStatusJSON is `status --json`: the same facts as the text form, as one
 // object on w and nothing else there -- whatever goes wrong becomes a warning

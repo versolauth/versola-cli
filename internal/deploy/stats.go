@@ -24,6 +24,7 @@ import (
 //
 // Like StatusReport its JSON field names are a contract: additive only.
 type StatsReport struct {
+	Schema int    `json:"schema"` // ReportSchema
 	Target string `json:"target"`
 	// Containers is null when Docker could not be asked.
 	Containers []ContainerStats `json:"containers"`
@@ -87,10 +88,13 @@ type PgHeadroomStatus struct {
 	Checked bool   `json:"checked"`
 	Reason  string `json:"reason,omitempty"`
 	// FreeConnections Postgres takes now; NeedConnections a stand-in of
-	// Service opens, plus MarginConnections kept free.
-	FreeConnections   int    `json:"freeConnections,omitempty"`
-	NeedConnections   int    `json:"needConnections,omitempty"`
-	MarginConnections int    `json:"marginConnections,omitempty"`
+	// Service opens, plus MarginConnections kept free. Pointers, so that they
+	// are present, 0 included, exactly when Checked is true: with 0 free
+	// connections -- the case a script most needs to see -- a plain int with
+	// omitempty would drop the field.
+	FreeConnections   *int   `json:"freeConnections,omitempty"`
+	NeedConnections   *int   `json:"needConnections,omitempty"`
+	MarginConnections *int   `json:"marginConnections,omitempty"`
 	Service           string `json:"service,omitempty"`
 	Fits              bool   `json:"fits"`
 }
@@ -139,7 +143,7 @@ func CollectStats(st *state.State, progress io.Writer) (StatsReport, error) {
 }
 
 func collectStats(st *state.State, composePath string, d statsDeps, progress io.Writer) (StatsReport, error) {
-	r := StatsReport{Target: st.Target, Warnings: []string{}}
+	r := StatsReport{Schema: ReportSchema, Target: st.Target, Warnings: []string{}}
 	list, dockerErr := d.containers(composePath)
 	if dockerErr != nil {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("Docker could not list the containers: %v", errFirstLine(dockerErr)))
@@ -175,8 +179,9 @@ func collectStats(st *state.State, composePath string, d statsDeps, progress io.
 		if !ok {
 			r.Postgres = &PgHeadroomStatus{Reason: why}
 		} else {
-			r.Postgres = &PgHeadroomStatus{Checked: true, FreeConnections: headroom, NeedConnections: need,
-				MarginConnections: pgMargin, Service: needFor, Fits: headroom >= need+pgMargin}
+			margin := pgMargin
+			r.Postgres = &PgHeadroomStatus{Checked: true, FreeConnections: &headroom, NeedConnections: &need,
+				MarginConnections: &margin, Service: needFor, Fits: headroom >= need+pgMargin}
 		}
 	}
 	return r, dockerErr
@@ -363,9 +368,9 @@ func pgLine(p *PgHeadroomStatus) string {
 	case !p.Checked:
 		return "Postgres connections: " + p.Reason
 	case p.Fits:
-		return fmt.Sprintf("Postgres connections: %d free -- enough for a stand-in %s replica (opens %d, plus %d kept free)", p.FreeConnections, p.Service, p.NeedConnections, p.MarginConnections)
+		return fmt.Sprintf("Postgres connections: %d free -- enough for a stand-in %s replica (opens %d, plus %d kept free)", *p.FreeConnections, p.Service, *p.NeedConnections, *p.MarginConnections)
 	}
-	return fmt.Sprintf("Postgres connections: %d free -- not enough for a stand-in %s replica (opens %d, plus %d kept free): a rollout would refuse; raise max_connections, or run it with --no-surge", p.FreeConnections, p.Service, p.NeedConnections, p.MarginConnections)
+	return fmt.Sprintf("Postgres connections: %d free -- not enough for a stand-in %s replica (opens %d, plus %d kept free): a rollout would refuse; raise max_connections, or run it with --no-surge", *p.FreeConnections, p.Service, *p.NeedConnections, *p.MarginConnections)
 }
 
 func gib(b int64) string { return fmt.Sprintf("%.2f GiB", float64(b)/(1<<30)) }

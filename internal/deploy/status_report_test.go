@@ -106,7 +106,7 @@ func TestStatusReportKeys(t *testing.T) {
 	}, now)
 
 	want := []string{"authUrl", "centralUrl", "certificates", "cliVersion", "containers", "database", "deployed", "migratedAt",
-		"proxyMode", "replicas", "rollout", "target", "version", "warnings"}
+		"proxyMode", "replicas", "rollout", "schema", "target", "version", "warnings"}
 	if got := keysOf(t, r); !reflect.DeepEqual(got, want) {
 		t.Errorf("keys %v, want %v", got, want)
 	}
@@ -157,7 +157,7 @@ func TestStatusReportDatabase(t *testing.T) {
 
 func TestNotDeployedReport(t *testing.T) {
 	b, _ := json.Marshal(NotDeployedReport("0.3.2"))
-	if string(b) != `{"cliVersion":"0.3.2","deployed":false,"containers":[],"warnings":[]}` {
+	if string(b) != `{"schema":1,"cliVersion":"0.3.2","deployed":false,"containers":[],"warnings":[]}` {
 		t.Errorf("got %s", b)
 	}
 }

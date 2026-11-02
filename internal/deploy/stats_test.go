@@ -239,3 +239,47 @@ func TestStatsSnapshotFailure(t *testing.T) {
 		t.Fatal("failed snapshot must leave measurements unknown")
 	}
 }
+
+// A script reads the Postgres verdict from the JSON: the counters are there,
+// zero included, whenever the check ran, and absent when it did not.
+func TestPgStatusJSONKeepsZeroCounters(t *testing.T) {
+	zero := 0
+	need, margin := 13, 3
+	b, err := json.Marshal(PgHeadroomStatus{Checked: true, FreeConnections: &zero, NeedConnections: &need, MarginConnections: &margin, Service: EdgeService})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := m["freeConnections"]; !ok || v != float64(0) || m["fits"] != false {
+		t.Errorf("checked, 0 free: %s", b)
+	}
+	b, _ = json.Marshal(PgHeadroomStatus{Reason: pgNotPulled})
+	m = nil
+	_ = json.Unmarshal(b, &m)
+	for _, k := range []string{"freeConnections", "needConnections", "marginConnections"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("not checked, but %s is present: %s", k, b)
+		}
+	}
+	if line := pgLine(&PgHeadroomStatus{Checked: true, FreeConnections: &zero, NeedConnections: &need, MarginConnections: &margin, Service: EdgeService}); !strings.Contains(line, "0 free -- not enough") {
+		t.Errorf("text line: %s", line)
+	}
+}
+
+// Both reports say which version of the JSON they are.
+func TestReportsCarryTheSchemaVersion(t *testing.T) {
+	for name, v := range map[string]any{
+		"stats":  StatsReport{Schema: ReportSchema},
+		"status": NotDeployedReport("1.2.3"),
+	} {
+		b, _ := json.Marshal(v)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		if m["schema"] != float64(1) {
+			t.Errorf("%s: %s", name, b)
+		}
+	}
+}

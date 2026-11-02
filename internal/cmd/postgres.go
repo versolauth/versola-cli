@@ -16,8 +16,9 @@ import (
 
 // postgresCmd is a parent for subcommands, like secretsCmd.
 var postgresCmd = &cobra.Command{
-	Use:   "postgres",
-	Short: "Prepare the Postgres a vps deployment uses",
+	Use:     "postgres",
+	GroupID: groupDeploy,
+	Short:   "Prepare the Postgres a vps deployment uses",
 }
 
 var (

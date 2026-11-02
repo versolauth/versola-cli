@@ -11,6 +11,8 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 )
 
@@ -30,22 +32,57 @@ released version of the Versola stack using Docker.`,
 	Version: version,
 }
 
+// Command groups of `versola --help`, in the order a new customer meets
+// them: check the machine and deploy in one go, the same deployment step by
+// step, day-to-day operation, upgrades and scaling, then everything else.
+// A command joins a group by setting GroupID in its own cobra.Command
+// literal; cobra panics at start-up if a command names a group that is not
+// added below, which the tests in help_test.go catch first.
+const (
+	groupGetStarted = "get-started"
+	groupDeploy     = "deploy"
+	groupOperate    = "operate"
+	groupUpgrade    = "upgrade"
+	groupAdvanced   = "advanced"
+)
+
 func init() {
+	rootCmd.AddGroup(
+		&cobra.Group{ID: groupGetStarted, Title: "Get started:"},
+		&cobra.Group{ID: groupDeploy, Title: "Deploy step by step:"},
+		&cobra.Group{ID: groupOperate, Title: "Operate:"},
+		&cobra.Group{ID: groupUpgrade, Title: "Upgrade and scale:"},
+		&cobra.Group{ID: groupAdvanced, Title: "Advanced:"},
+	)
+	rootCmd.SetHelpCommandGroupID(groupAdvanced)
+	rootCmd.SetCompletionCommandGroupID(groupAdvanced)
+
+	// Commands are listed in the order they are added, not alphabetically:
+	// within a group, the order below is the order a customer uses them in
+	// (doctor before bootstrap, configure before migrate before up). It is a
+	// package-level switch of cobra, so subcommands (secrets login/test/plan,
+	// edge add/bootstrap, ...) also keep the order their files add them in.
+	cobra.EnableCommandSorting = false
+
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+
 	rootCmd.AddCommand(configureCmd)
+	rootCmd.AddCommand(postgresCmd)
 	rootCmd.AddCommand(migrateCmd)
 	rootCmd.AddCommand(upCmd)
-	rootCmd.AddCommand(replicaCmd)
-	rootCmd.AddCommand(rolloutCmd)
+
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(logsCmd)
+	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(uninstallCmd)
+
+	rootCmd.AddCommand(rolloutCmd)
+	rootCmd.AddCommand(replicaCmd)
 	rootCmd.AddCommand(upgradeCmd)
+
 	rootCmd.AddCommand(secretsCmd)
-	rootCmd.AddCommand(postgresCmd)
-	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(certsCmd)
 	rootCmd.AddCommand(edgeCmd)
 	rootCmd.AddCommand(versionCmd)
@@ -55,9 +92,13 @@ func init() {
 	// version <x>") and the two spellings of the same question answer it
 	// differently.
 	rootCmd.SetVersionTemplate(versionString() + "\n")
+
+	// --help-all and the template that shows hidden flags: see help.go.
+	setupHelp(rootCmd)
 }
 
 // Execute runs the root command. Called once from main.main.
 func Execute() error {
+	rootCmd.SetArgs(rewriteHelpAll(os.Args[1:]))
 	return rootCmd.Execute()
 }

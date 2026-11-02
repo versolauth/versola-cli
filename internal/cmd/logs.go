@@ -9,11 +9,10 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// (#72 puts the commands into groups in root.go; this one belongs with
-// status, once GroupID exists.)
 var logsCmd = &cobra.Command{
-	Use:   "logs [service...]",
-	Short: "Show the deployment's service logs",
+	Use:     "logs [service...]",
+	GroupID: groupOperate,
+	Short:   "Show the deployment's service logs",
 	Long: `logs shows what the deployment's services print, local or vps,
 without docker commands or container names: "docker compose logs" for the
 compose project this machine tracks, replicas, the reverse proxy and OpenBao

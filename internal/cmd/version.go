@@ -19,8 +19,9 @@ import (
 var version = "dev"
 
 var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print the versola-cli version",
+	Use:     "version",
+	GroupID: groupAdvanced,
+	Short:   "Print the versola-cli version",
 	Long: `version prints which versola-cli release this binary was built from,
 along with the Go version and platform it was built for.
 

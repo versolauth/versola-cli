@@ -24,8 +24,9 @@ const upgradeRepo = "versolauth/versola-cli"
 var upgradeAssumeYes bool
 
 var upgradeCmd = &cobra.Command{
-	Use:   "upgrade",
-	Short: "Update versola-cli to the latest release",
+	Use:     "upgrade",
+	GroupID: groupUpgrade,
+	Short:   "Update versola-cli to the latest release",
 	Long: `upgrade checks the latest versola-cli release on GitHub, and if it's
 different from this binary's version, downloads it (verified against
 that release's published checksums.txt, same as install.sh/install.ps1

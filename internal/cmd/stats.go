@@ -11,10 +11,10 @@ import (
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
-// TODO(#72): GroupID once root.go has its command groups.
 var statsCmd = &cobra.Command{
-	Use:   "stats",
-	Short: "Show memory and CPU per container, and whether a rollout's stand-in fits",
+	GroupID: groupOperate,
+	Use:     "stats",
+	Short:   "Show memory and CPU per container, and whether a rollout's stand-in fits",
 	Long: `stats takes one snapshot of what every container of the deployment
 uses now (CPU, memory used / limit, PIDs) -- the services, the reverse
 proxy, OpenBao and a bundled Postgres. For a live view, use

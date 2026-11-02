@@ -13,13 +13,15 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show what's currently deployed and its health",
-	Long: `status shows the containers from the last "versola bootstrap local"
-run and their health, straight from Docker Compose. This command
-doesn't know anything about Versola's own services — it just asks
-Docker what it knows about the compose project bootstrap created, the
-same way "doctor" doesn't know Versola's topology either.
+	Use:     "status",
+	GroupID: groupOperate,
+	Short:   "Show what's currently deployed and its health",
+	Long: `status shows the containers of the deployment this machine tracks
+(local or vps) and their health, straight from Docker Compose. This
+command doesn't know anything about Versola's own services — it just
+asks Docker what it knows about the compose project configure (or
+bootstrap) created, the same way "doctor" doesn't know Versola's
+topology either.
 
 It also lists every mutual-TLS certificate with its notAfter (auth's and
 central's listeners, the edge's identity, and the public names' own),
@@ -46,7 +48,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return writeStatusJSON(os.Stdout, composePath, exists)
 	}
 	if !exists {
-		fmt.Println("Nothing deployed yet — run `versola bootstrap local <version>` first.")
+		fmt.Println("Nothing deployed yet — " + deploy.NothingDeployedHint + ".")
 		return nil
 	}
 

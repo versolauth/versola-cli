@@ -237,13 +237,14 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` (see `bootstrap --help`) and accepts
+  it also needs `--auth-url` on the first run (see `bootstrap --help`) and accepts
   `--postgres-host` (your own Postgres; without it, Postgres runs in a
   container of the deployment, see "Postgres on vps"),
   `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
   `--central-mtls-domain` and `--central-domain` (see "Public names").
   `--registry <prefix>` (both targets) pulls the images from another
-  registry, see "Images from another registry".
+  registry, see "Images from another registry". On `vps` it remembers the
+  deployment it replaces, see "Redeploying on the same server" below.
 - **`postgres init`** — for a vps deployment pointed at a Postgres of your
   own (`--postgres-host`): creates the role, the database and the schemas
   `auth`, `central` and `edge` the generated configs name, by the rights it
@@ -283,6 +284,51 @@ replacing that record, even with `--yes`, because replacing it leaves `status`,
 `down` and `uninstall` unable to find the VPS containers. In a script that
 question is answered by stdin, or the command aborts.
 
+#### Redeploying on the same server
+
+`configure vps` (and `bootstrap vps`) run again on a server that already has a
+vps deployment take `--auth-url`, `--proxy`, `--acme-staging`,
+`--setup-openbao` and the Postgres it uses (the container, or your own at its
+`--postgres-host`) from that deployment, so a redeploy or a move to another
+version without `rollout` is
+
+```
+versola configure vps 0.8.1
+versola migrate
+versola up
+```
+
+with no flag to remember. Before it asks to continue it prints what it reused,
+marking anything given on the command line:
+
+```
+Using the recorded settings of this deployment (pass a flag to change one):
+  --auth-url       https://id.example.com
+  --proxy          external
+  Postgres         your own, at 127.0.0.1:5432
+```
+
+A flag always wins over the recorded value: `--proxy nginx` changes the mode
+(the port checks then run for the new one), `--acme-staging=false` goes back to
+a trusted certificate, `--setup-openbao=false` to automatic OpenBao setup.
+Switching between the Postgres container and your own is refused (it is a
+backup and a restore, see "Postgres on vps"). A recorded `--acme-staging` is
+left out, not refused, when the new `--proxy` or `--auth-url` means Versola's
+proxy no longer gets a certificate itself. `--postgres-db`, `--postgres-ca`,
+the public names, `--cert-lifetime-days` and `--est` were remembered already;
+`--registry` is not (see "Images from another registry"). `versola status`
+shows the recorded auth URL, the proxy mode (marked when the certificate comes
+from Let's Encrypt staging) and, when it was set up by hand, OpenBao.
+
+`--auth-url`, `--proxy` and the Postgres are fields of `state.json`. Staging and
+"OpenBao set up by hand" are not: they are read the way `rollout` reads them,
+from the proxy configuration of the current deployment and from whether
+`~/.versola/openbao/vps-admin.json` exists (this CLI writes it whenever it
+provisions OpenBao itself), so deployments made by an older CLI are covered
+too and the state layout is unchanged. Nothing is reused from a `local`
+record, or when there is no readable record: the first `configure vps` needs
+`--auth-url` as before.
+
 ### OpenBao: automatic setup, `--setup-openbao`, `secrets login` / `secrets test`
 
 `configure` starts an OpenBao container for the target
@@ -299,8 +345,8 @@ machine** -- neither value can be recovered. Versola's services never talk
 to OpenBao; it only has to run while `configure` (or `rollout`, `secrets
 plan`) does.
 
-If you run OpenBao yourself, pass `--setup-openbao` to `configure vps` /
-`bootstrap vps`: the CLI then never calls OpenBao's admin API, unsealing is
+If you run OpenBao yourself, pass `--setup-openbao` to the first `configure vps` /
+`bootstrap vps` (later runs remember it, see "Redeploying on the same server"): the CLI then never calls OpenBao's admin API, unsealing is
 yours, and it expects credentials stored beforehand with
 
 ```
@@ -701,7 +747,8 @@ serves the admin console at `/central/admin/`.
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but
   without production's rate limits (a handful of certificates per domain
-  per week).
+  per week). It is remembered by later `configure vps` runs;
+  `--acme-staging=false` switches to a trusted certificate.
 
   Each public name you ask for (see "Public names" below) also needs a DNS
   record pointing at this server, next to `--auth-url`'s name.
@@ -1303,7 +1350,10 @@ partners' edges; an operator's own, first-party, edges are always extended by ce
 
 ### `status`
 
-Shows the deployed version and target (and the registry, when it is not
+Shows the deployed version and target (on `vps` also the recorded auth URL,
+the proxy mode, marked when the certificate comes from Let's Encrypt staging,
+and OpenBao when it was set up by hand -- what a `configure vps` without flags
+keeps; and the registry, when it is not
 Versola's own), when migrations last ran, the replicas of each service, the
 progress of an unfinished rolling upgrade, and the containers with their
 health (`docker compose ps` under the hood); on `vps` and `local` also the

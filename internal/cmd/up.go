@@ -15,8 +15,9 @@ var upNoBrowser bool
 var upNoCertsTimer bool
 
 var upCmd = &cobra.Command{
-	Use:   "up",
-	Short: "Start the deployment configure/migrate prepared",
+	Use:     "up",
+	GroupID: groupDeploy,
+	Short:   "Start the deployment configure/migrate prepared",
 	Long: `up starts the stack "versola configure" prepared and waits until it's
 actually serving traffic, not merely started.
 
@@ -41,8 +42,10 @@ real traffic, so it asks for confirmation first.`,
 
 func init() {
 	upCmd.Flags().BoolVarP(&upYes, "yes", "y", false, "don't ask for confirmation (vps)")
-	upCmd.Flags().BoolVar(&upNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates (`versola certs renew`); refused unless the certificates are unlimited (--cert-lifetime-days unlimited at configure)")
+	upCmd.Flags().BoolVar(&upNoCertsTimer, "no-certs-timer", false, "vps only: don't install the daily timer that renews the mutual-TLS certificates ('versola certs renew'); refused unless the certificates are unlimited (--cert-lifetime-days unlimited at configure)")
 	upCmd.Flags().BoolVar(&upNoBrowser, "no-browser", false, "don't open the admin console in a browser once it's ready")
+	// Only for certificates that never expire: under --help-all.
+	hideFlags(upCmd, "no-certs-timer")
 }
 
 func runUp(cmd *cobra.Command, args []string) error {

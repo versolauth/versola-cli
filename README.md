@@ -15,20 +15,25 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
-`doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
-`replica`, `secrets`, `uninstall`, `upgrade` and `version` are all
-implemented and have been tested end-to-end: locally by hand against a
-real deployment (including a browser login through to the admin console),
-and on a test VPS with Versola
-0.7.1 (a from-scratch install following this README, `down`/`up`, replicas
-added and removed under load). The [`e2e-local`](.github/workflows/e2e-local.yml)
-workflow (`e2e/local/README.md`) runs bootstrap, restart and uninstall with
-real images nightly and on PRs labelled `e2e` (no login). `rollout` (vps) is implemented too, but has
-so far been exercised end-to-end with stand-in images only, not yet with two
-real Versola releases. `certs` and `edge` are implemented too (see their
-sections below); neither of those tests covered them. `upgrade` has moved a
-production server between published releases. Releases are automated (see
-Releasing below) and installed via the one-line scripts below.
+Commands: `doctor`, `bootstrap`, `configure`, `postgres`, `migrate`, `up`,
+`status`, `backup`, `down`, `uninstall`, `rollout`, `replica`, `upgrade`,
+`secrets`, `certs`, `edge` and `version`.
+
+What was tested end-to-end:
+
+- a real local deployment (Postgres + auth + central + edge + the reverse
+  proxy, real browser login through to the admin console);
+- a test VPS with Versola 0.7.1: a from-scratch install following this
+  README, `down`/`up`, replicas added and removed under load;
+- `rollout` (vps) with stand-in images only, not with two real
+  Versola releases;
+- `upgrade`, moving a production server between published releases.
+
+`postgres`, `backup`, `certs` and `edge` were not part of these tests.
+Releases are automated (see Releasing below) and installed via the one-line
+scripts below.
+
+The [`e2e-local`](.github/workflows/e2e-local.yml) workflow exercises local bootstrap, restart and uninstall with real images nightly and on PRs labelled `e2e` (no login). The first run passed bootstrap and HTTP probes but exposed a restart failure in released tools 0.7.5: local Postgres has no explicit persistent volume (versolauth/versola#891). Restart coverage remains blocked until a supporting tools release.
 
 ## Install
 
@@ -125,6 +130,18 @@ built it:
 ```
 (substitute whichever binary you built above)
 
+### Help: `--help` and `--help-all`
+
+`versola --help` lists the commands grouped in the order a first deployment
+uses them. `versola <command> --help` starts with examples and shows the flags
+a deployment on one server needs; the flags for remote edges, test registries,
+staging certificates, a Postgres elsewhere and recovery are left out of it
+(they work the same). `versola <command> --help-all` (or `versola help
+<command> --help-all`) shows them too, under "Advanced flags", and every
+command that has such flags ends its `--help` with a line saying so. Shell
+completion does not offer the advanced flags; type them out. This README
+describes every flag either way.
+
 ### `doctor`
 
 Checks this machine has what Versola needs. It never installs anything on
@@ -220,7 +237,11 @@ default browser automatically. Pass `--no-browser` to skip that (e.g.
 running headless over SSH).
 
 Internally this runs `configure`, `migrate`, and `up` back to back —
-see below for when to run those separately instead.
+see below for when to run those separately instead. On vps it asks for
+confirmation once, up front, before `configure` changes anything, rather
+than once per step, and at the end installs the daily timer that renews the
+mutual-TLS certificates (on a host without systemd it prints the crontab
+line to add instead; see `certs renew`).
 
 ### `configure <target> <version>` / `migrate` / `up`
 
@@ -239,7 +260,11 @@ versola up
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
   Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` on the first run (see `bootstrap --help`) and accepts
+  it also needs `--auth-url` on the first run: the public URL the deployment
+  will be reachable at (e.g. `https://id.example.com`). It is specific to
+  whoever deploys, so there is no shared default; later runs on the same
+  server remember it. `local` doesn't need it (its own defaults suit a
+  throwaway dev stack). It accepts
   `--postgres-host` (your own Postgres; without it, Postgres runs in a
   container of the deployment, see "Postgres on vps"),
   `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
@@ -265,7 +290,9 @@ versola up
 
 Run against a `vps` deployment, each of the three asks for confirmation
 first, describing what that particular step is about to do. So does `down`,
-which stops the whole stack. Migrations
+which stops the whole stack. `configure` starts and stops nothing, but it
+replaces this machine's record of which deployment is the current one, which
+is what `status`, `down` and `uninstall` act on. Migrations
 cannot be rolled back — back the database up before running `migrate`
 against a live one.
 
@@ -276,7 +303,7 @@ Pasting several commands into an interactive terminal is different: the shell
 has already taken the next line as typed-ahead input, and the prompt reads it
 as the answer. To avoid prompts in scripts, pass `-y`/`--yes` to `configure`,
 `migrate`, `up`, `down`, `bootstrap` and `replica add|remove`; `rollout`,
-`upgrade` and `uninstall` accept it too. With `--yes`, `configure`, `migrate`,
+`postgres init`, `upgrade` and `uninstall` accept it too. With `--yes`, `configure`, `migrate`,
 `up`, `down`, `bootstrap`, `replica` and `rollout` still print the "This will …" line (so a
 script's log shows what it agreed to) and then go on without asking.
 `local` never asks about its own deployment, so `--yes` changes nothing there.

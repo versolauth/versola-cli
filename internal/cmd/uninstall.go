@@ -64,8 +64,9 @@ func volumeShown(name string) bool {
 const purgeWord = "vps"
 
 var uninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Stop the stack and remove its data, images, and local state",
+	Use:     "uninstall",
+	GroupID: groupOperate,
+	Short:   "Stop the stack and remove its data, images, and local state",
 	Long: `uninstall stops the locally deployed Versola stack (including its
 Postgres data volume), removes the Docker images versola pulled, and
 clears ~/.versola/active.

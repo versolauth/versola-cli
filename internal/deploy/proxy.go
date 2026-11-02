@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -79,13 +81,19 @@ func StoredPublicDomains() PublicDomains {
 // port(s) the proxy is about to bind are already taken by something
 // else -- typically a web server already installed on the host.
 func checkProxyPorts(auth proxy.AuthURL, mode string, public proxy.PublicNames) error {
+	return checkProxyPortsWith(auth, mode, public, docker.IsRunning)
+}
+
+// checkProxyPortsWith is checkProxyPorts asking isRunning whether this
+// deployment's own proxy runs.
+func checkProxyPortsWith(auth proxy.AuthURL, mode string, public proxy.PublicNames, isRunning func(string) (bool, error)) error {
 	// Ports our own proxy from the current deployment holds are fine --
 	// `up` replaces it. Only those: if this configure switches mode (say
 	// external -> nginx), the ports the new mode needs must still be free
 	// of anything else, or `up` would tear down a working proxy for one
 	// that can't bind.
 	ours := map[int]bool{}
-	running, err := docker.IsRunning(proxy.ContainerName)
+	running, err := isRunning(proxy.ContainerName)
 	if err != nil {
 		return err
 	}
@@ -99,21 +107,66 @@ func checkProxyPorts(auth proxy.AuthURL, mode string, public proxy.PublicNames) 
 		}
 	}
 
-	ports := proxy.Ports(auth, mode)
-	if auth.TLS(mode) {
-		// Loopback ports of the stream server on 443's fallback and its relays.
-		ports = append(ports, public.LoopbackPorts()...)
-	}
-	for _, port := range ports {
-		if ours[port] || !proxy.PortInUse(port) {
-			continue
-		}
+	if port := portConflict(proxyPortsFor(auth, mode, public), ours, proxy.PortInUse); port != 0 {
 		if mode == proxy.ModeExternal {
 			return fmt.Errorf("port %d is already in use on this machine -- with --proxy external Versola's proxy listens on 127.0.0.1:%d, so that port has to be free", port, port)
 		}
 		return fmt.Errorf("port %d is already in use on this machine, probably by a web server that's already installed. Either stop it, or deploy behind it with --proxy external: Versola's proxy then listens on 127.0.0.1:%d and your web server forwards %s to it", port, proxy.ExternalPort, auth.Host)
 	}
 	return nil
+}
+
+// portConflict is the first of ports that something other than this
+// deployment's own proxy (ours) listens on, 0 when there is none.
+func portConflict(ports []int, ours map[int]bool, inUse func(int) bool) int {
+	for _, port := range ports {
+		if !ours[port] && inUse(port) {
+			return port
+		}
+	}
+	return 0
+}
+
+// proxyPortsFor are the ports Versola's proxy binds on this host for auth and
+// mode: 80 (and 443 with TLS) for nginx, 127.0.0.1:2821 behind a web server of
+// the host's own, and with TLS the loopback ports of the stream server on
+// 443's fallback and its relays.
+func proxyPortsFor(auth proxy.AuthURL, mode string, public proxy.PublicNames) []int {
+	ports := proxy.Ports(auth, mode)
+	if auth.TLS(mode) {
+		ports = append(ports, public.LoopbackPorts()...)
+	}
+	return ports
+}
+
+// ProxyPortsCheck is checkProxyPorts as one line of `doctor --target vps`:
+// the same ports, the same exception for the deployment's own proxy, the same
+// advice, and which ports were looked at and why.
+func ProxyPortsCheck(auth proxy.AuthURL, mode string, public proxy.PublicNames) checks.Result {
+	ports := proxyPortsFor(auth, mode, public)
+	list := make([]string, len(ports))
+	for i, p := range ports {
+		list[i] = strconv.Itoa(p)
+	}
+	name := "Proxy port(s) " + strings.Join(list, ", ")
+	// doctor is run on servers without Docker too, where its own line says
+	// so: no Docker (or one that doesn't answer in time) is "no proxy of
+	// ours running", and the ports are still looked at.
+	ownRunning := func(c string) (bool, error) {
+		running, err := docker.IsRunningWithin(c, 5*time.Second)
+		return running && err == nil, nil
+	}
+	if err := checkProxyPortsWith(auth, mode, public, ownRunning); err != nil {
+		return checks.Result{Name: name, Detail: err.Error()}
+	}
+	why := "free: Versola's proxy listens there"
+	switch {
+	case mode == proxy.ModeExternal:
+		why = fmt.Sprintf("free: Versola's proxy listens on 127.0.0.1:%d, behind your web server (--proxy external)", proxy.ExternalPort)
+	case auth.TLS(mode):
+		why = "free: Versola's proxy serves HTTPS on 443 and answers Let's Encrypt and the redirect to HTTPS on 80"
+	}
+	return checks.Result{Name: name, OK: true, Detail: why}
 }
 
 // requireAdminConsole: versola-tools puts the built admin console into

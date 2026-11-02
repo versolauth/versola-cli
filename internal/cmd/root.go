@@ -66,6 +66,7 @@ func init() {
 
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(bootstrapCmd)
+	rootCmd.AddCommand(versionsCmd)
 
 	rootCmd.AddCommand(configureCmd)
 	rootCmd.AddCommand(postgresCmd)

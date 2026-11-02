@@ -54,6 +54,10 @@ func registryHost(registry string) string {
 	return host
 }
 
+// RegistryHost is the host the Versola images of a deployment with registry
+// (as ParseRegistry returns it, "" for the default) are pulled from.
+func RegistryHost(registry string) string { return registryHost(registry) }
+
 // requireRegistryImages checks, in the compose file versola-tools just wrote,
 // that it really names the Versola images under registry, at this version.
 // Without it, a versola-tools release that does not know IMAGE_REGISTRY would

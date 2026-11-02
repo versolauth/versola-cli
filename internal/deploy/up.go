@@ -20,7 +20,7 @@ import (
 // yet. It names both targets: the same binary runs on a laptop and on a
 // server, and telling a vps operator to run `bootstrap local` (as these
 // messages once did) sends them the wrong way.
-const NothingDeployedHint = "run `versola bootstrap local <version>` on your machine, or `versola configure vps <version> --auth-url ...` on a server"
+const NothingDeployedHint = "run `versola bootstrap local` on your machine, or `versola configure vps <version> --auth-url ...` on a server"
 
 // UpOptions are the choices Up leaves to the caller. They're a struct
 // rather than plain parameters because the list only grows from here (a

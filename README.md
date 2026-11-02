@@ -107,7 +107,8 @@ If you installed via the Install section above, `versola` is on your PATH
 case, add the printed line to your shell profile first):
 ```bash
 versola doctor
-versola bootstrap local <version>
+versola bootstrap local            # the latest Versola release
+versola bootstrap local 0.7.5      # or a version you pick (versola versions lists them)
 versola status
 versola stats
 versola down
@@ -148,9 +149,41 @@ its own — if Docker isn't found at all, the most it does is offer to open
 an install page in your browser, and only after you confirm:
 - Docker daemon reachable (not just `docker` on PATH)
 - Docker Compose v2 plugin present
-- Port 2821 free on localhost (`local` only — for `vps`, `configure`
-  itself checks the ports its reverse proxy needs, which depend on
-  `--proxy` and `--auth-url`: see "Deploying to a VPS" below)
+- Port 2821 free on localhost (`local` only)
+- With `--target vps`, the checks of what `configure vps` will be given.
+  Pass the same flags you will pass it (`--auth-url`, `--proxy`,
+  `--postgres-host`, `--registry`); on a server that already has a vps
+  deployment, the ones `configure` remembers are taken from it when left
+  out, as `configure` takes them: `--auth-url`, `--proxy` and the public
+  names, listed first, and the Postgres, shown on its own line. A value `configure` would
+  refuse is refused here, before any check runs, and these flags are
+  refused with `--target local`:
+  - with `--auth-url`: its name resolves, to this server. A name that
+    doesn't resolve fails; one that resolves to an address none of this
+    server's interfaces has is a warning (right behind NAT or a load
+    balancer, wrong otherwise -- with `--proxy nginx` and an https URL,
+    Let's Encrypt then issues no certificate), and so is one that resolves
+    here and elsewhere too (a stale A or AAAA record)
+  - with `--auth-url`: the ports Versola's proxy binds are free, the same
+    check as `configure`'s, with the same exception for this deployment's
+    own proxy: 80 and 443 with `--proxy nginx` (80 alone for an http URL),
+    `127.0.0.1:2821` with `--proxy external` (the default is `nginx`)
+  - the Postgres, decided as `configure` decides it (see "Postgres on vps"):
+    for the container (no `--postgres-host`, and no deployment here with a
+    Postgres of its own), port 5432 is free; for your own, which one it is
+    (`postgres init` checks and prepares it after `configure`)
+  - the image registry (`ghcr.io`, or the host of `--registry`) answers over
+    HTTPS: any HTTP answer will do, no answer fails. Docker pulling through
+    a proxy set for its daemon is not seen by this check
+  - lingering of your user (`loginctl`), when it can be told: off is a
+    warning with `sudo loginctl enable-linger $USER`, since the
+    certificate-renewal timer `up` installs stops with your last session
+    otherwise
+
+  When nothing fails, the last line is the `configure vps` command with the
+  flags given (remembered ones are left to `configure`), ready to copy (`--auth-url https://<your domain>` when there
+  is none, neither given nor remembered). Without `--auth-url` the name and
+  port checks are skipped, and `doctor` says to pass it. Warnings don't fail `doctor`; their number is printed above it.
 - With `--target vps` and `--auth-url`, and any of `--mtls-domain`,
   `--central-mtls-domain`, `--central-domain` (the names you will deploy
   with, see "Public names" below): each name resolves, to this server, and
@@ -173,22 +206,25 @@ different memory checks, not just a different number:
   — three JVMs plus local's own containerized Postgres. On Docker
   Desktop (macOS/Windows) this is the VM's allocation, a budget nothing
   else competes with; on native Linux it's the host's own physical RAM.
-- `vps` checks `/proc/meminfo`'s MemAvailable instead — vps's Postgres is
-  a native, non-Docker install, so total physical RAM isn't the right
-  number there (native Postgres and the rest of the host OS already
-  compete for it). The minimum is ~1 GiB if `versola-central`/`auth`/
+- `vps` checks `/proc/meminfo`'s MemAvailable instead — on a server the
+  services share the host's RAM with everything else on it (the Postgres
+  container, or a native Postgres, and the OS), so total physical RAM isn't
+  the right number there. The minimum is ~1 GiB if `versola-central`/`auth`/
   `edge` are already running (an in-place redeploy roughly nets out) or
-  ~3 GiB if none of them are yet (starting three JVMs from cold, closer
-  to local's own estimate minus the containerized Postgres vps doesn't
-  have), plus a bit more if OpenBao also isn't running yet. This check
+  ~3 GiB if none of them are yet (starting three JVMs from cold), plus a
+  bit more if OpenBao also isn't running yet. These figures do not count
+  the Postgres container yet: they are to come from the release
+  (versolauth/versola#825), not from new constants here. This check
   only works run directly on the VPS itself over SSH — it fails outright
   (not a silent skip) if the Docker CLI is pointed at a remote host
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
   rather than quietly checking the wrong machine's memory.
 
-Exits non-zero if any check fails. `bootstrap`/`configure` run the same
-checks themselves before doing anything, so running `doctor` first is
-optional but gives you the same picture ahead of time.
+Exits non-zero if any check fails. `bootstrap`/`configure` run the
+machine checks themselves before doing anything (Docker, memory, disk,
+the proxy's ports, port 5432 for the Postgres container); the name of
+`--auth-url`, the registry and lingering are only checked here, so on a
+server run `doctor --target vps` with your flags first.
 
 If Docker isn't reachable, `doctor` tells the two possible reasons apart
 and reacts differently: already installed but not running just gets a
@@ -198,7 +234,12 @@ Colima on macOS, Docker Desktop on Windows, the Docker Engine install
 docs on Linux. It only ever opens a browser tab — never installs or
 downloads anything itself.
 
-### `bootstrap local <version>`
+### `bootstrap local [<version>]`
+
+```
+versola bootstrap local
+versola bootstrap local 0.7.5
+```
 
 (`bootstrap vps <version>` does the same on a server, with the flags of
 `configure vps` below; it asks for confirmation first, and on a first
@@ -222,14 +263,32 @@ by an older versola-cli still runs its own gateway (`versola-nginx`) on
 that port, `configure` reports the port as taken: remove that container
 first (`docker rm -f versola-nginx`).
 
+Without `<version>`, the first line says which version it deploys:
+
+- nothing deployed on this machine yet (or a record of a VPS deployment, or
+  one too old to read): the latest Versola release, as GitHub defines it --
+  never a pre-release: `Deploying Versola 0.7.5 (the latest release; pass a
+  version to pick another).` If GitHub can't be reached (offline, rate
+  limit), it stops with nothing done and asks for a version instead of
+  guessing one.
+- a local deployment already recorded: its version is kept, so running
+  `bootstrap local` again (after `down`, or to change a flag) never turns
+  into an upgrade on its own: `Keeping Versola 0.7.2 (deployed; 0.7.5 is the
+  latest, pass it to move).` The latest is looked up best-effort; offline the
+  line just says to pass a version to move.
+
+The version chosen this way is used and recorded exactly as a typed one.
+`vps` always needs the version: a server runs only a version someone named.
+
 `<version>` is a Versola release, which is tagged **without** a leading
 `v` — so `versola bootstrap local 0.1.2`, not `v0.1.2`. (versola-cli's own
 releases use the same format since 0.2.6; older ones were `v0.2.5` and
-earlier.) Passing a version
+earlier.) `versola versions` lists them. Passing a version
 that was never published fails with a clear error explaining that,
-instead of Docker's raw `manifest unknown`; the available versions are
-the tags published for the `versola-tools` package under the
-organization's GitHub packages.
+instead of Docker's raw `manifest unknown`. A release's images are
+built after the release is published, so for a short while the newest
+release has none yet: when `bootstrap local` picked that release itself, it
+says so -- retry in a few minutes, or pass the release before it.
 
 Once auth and edge are ready, this opens the admin console in your
 default browser automatically. Pass `--no-browser` to skip that (e.g.
@@ -242,7 +301,7 @@ than once per step, and at the end installs the daily timer that renews the
 mutual-TLS certificates (on a host without systemd it prints the crontab
 line to add instead; see `certs renew`).
 
-### `configure <target> <version>` / `migrate` / `up`
+### `configure <target> [<version>]` / `migrate` / `up`
 
 The same three steps `bootstrap` runs together, available individually
 for when a deployment needs to stop between them — which on a server it
@@ -255,15 +314,17 @@ versola migrate
 versola up
 ```
 
-- **`configure <target> <version>`** — checks the machine, generates this
+- **`configure <target> [<version>]`** — checks the machine, generates this
   release's config via `versola-tools`, and resolves its secrets against
   OpenBao (starting OpenBao itself first if it isn't already running).
-  Starts none of Versola's own services, touches no database. For `vps`
-  it also needs `--auth-url` on the first run: the public URL the deployment
-  will be reachable at (e.g. `https://id.example.com`). It is specific to
-  whoever deploys, so there is no shared default; later runs on the same
-  server remember it. `local` doesn't need it (its own defaults suit a
-  throwaway dev stack). It accepts
+  Starts none of Versola's own services, touches no database. On `local`
+  the version can be left out, with the same rule as `bootstrap local`:
+  the deployed version is kept, otherwise the latest release is used. For `vps`
+  the version is required, and it also needs `--auth-url` on the first run: the
+  public URL the deployment will be reachable at (e.g. `https://id.example.com`).
+  It is specific to whoever deploys, so there is no shared default; later runs
+  on the same server remember it. `local` doesn't need it (its own defaults suit
+  a throwaway dev stack). It accepts
   `--postgres-host` (your own Postgres; without it, Postgres runs in a
   container of the deployment, see "Postgres on vps"),
   `--postgres-db` and `--postgres-ca`, and `--mtls-domain`,
@@ -1652,8 +1713,30 @@ Prints which versola-cli release this binary was built from, plus the Go
 version and target platform. `versola --version` does the same thing.
 
 This is the CLI's own version, independent of the Versola version it
-deploys — that one is whatever you pass to `bootstrap local <version>`.
+deploys — that one is whatever you pass to `bootstrap local <version>`
+(see `versions` for those).
 Binaries built from source without release flags report `dev`.
+
+### `versions`
+
+```
+versola versions                    # the 10 newest releases
+versola versions --all --limit 30   # pre-releases too, 30 of them
+versola versions | cut -f1          # just the version numbers
+```
+
+Lists Versola's releases (Versola itself, not versola-cli) on stdout,
+newest first, one per line, as three tab-separated columns: the version,
+its release date (UTC), and markers -- `latest` (the release `bootstrap
+local` deploys without a version), `deployed` (the version this machine's
+record names, local or vps) and `pre-release`. The markers column may be
+empty. Pre-releases are left out unless `--all` is given. `--limit N`
+shows N releases (default 10, at most 100: one page of GitHub's API).
+
+It asks GitHub's public API without a token (60 requests an hour per
+address is plenty). If GitHub can't be reached it fails with the address
+of the releases page instead; a failed `latest` lookup or an unreadable
+deployment record only leaves that marker out.
 
 ## Releasing
 
@@ -1676,7 +1759,7 @@ version it names is compiled into the binaries via ldflags, so
 
 ```
 cmd/versola/            entry point
-internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, stats, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version)
+internal/cmd/           cobra commands (doctor, bootstrap, configure, migrate, up, status, stats, down, replica, rollout, secrets, postgres, backup, certs, edge, uninstall, upgrade, version, versions)
 internal/checks/        the actual check logic doctor (and configure) run
 internal/deploy/        the deployment steps themselves — configure, migrate, up, replicas, rollout — which bootstrap chains together
 internal/secrets/       the secret schema reader and the plan (secrets plan / configure / rollout)
@@ -1686,6 +1769,7 @@ internal/topology/      ports and slots read from the compose file (docker compo
 internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
 internal/docker/        thin wrappers around the docker CLI
 internal/fsutil/        atomic file writes
+internal/release/       GitHub releases API: the latest release and a list (upgrade, versions, bootstrap local without a version)
 internal/wait/          polls a readiness endpoint until it answers 200 or times out
 internal/browser/       opens a URL in the default browser — used by bootstrap (admin console) and doctor (install pages)
 e2e/rollout/            manual end-to-end run of rollout with stand-in images (not in CI)

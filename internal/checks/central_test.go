@@ -34,14 +34,14 @@ func TestCentralName(t *testing.T) {
 		"nat.example.com":     {"198.51.100.1"},
 	}, "10.0.0.5", "203.0.113.7")
 
-	if r := CentralName("central.example.com"); !r.OK || !strings.Contains(r.Detail, "(this host)") {
+	if r := CentralName("central.example.com"); !r.OK || r.Warn || !strings.Contains(r.Detail, "(this host)") {
 		t.Errorf("own address: %+v", r)
 	}
 	if r := CentralName("missing.example.com"); r.OK || !strings.Contains(r.Detail, "doesn't resolve") {
 		t.Errorf("unresolved: %+v", r)
 	}
 	// Possibly NAT: reported, not failed.
-	if r := CentralName("nat.example.com"); !r.OK || !strings.Contains(r.Detail, "NAT") {
+	if r := CentralName("nat.example.com"); !r.OK || !r.Warn || !strings.Contains(r.Detail, "NAT") {
 		t.Errorf("foreign address: %+v", r)
 	}
 }

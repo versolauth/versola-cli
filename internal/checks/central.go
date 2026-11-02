@@ -30,20 +30,13 @@ func NameResolves(label, host string) Result {
 	if err != nil || len(addrs) == 0 {
 		return Result{Name: name, OK: false, Detail: "doesn't resolve -- add a DNS record for it pointing at this server"}
 	}
-	own := map[string]bool{}
-	if ifs, err := interfaceAddrs(); err == nil {
-		for _, a := range ifs {
-			if ipn, ok := a.(*net.IPNet); ok {
-				own[ipn.IP.String()] = true
-			}
-		}
-	}
+	own := ownAddresses()
 	for _, a := range addrs {
 		if ip := net.ParseIP(a); ip != nil && own[ip.String()] {
 			return Result{Name: name, OK: true, Detail: "resolves to " + a + " (this host)"}
 		}
 	}
-	return Result{Name: name, OK: true, Detail: "resolves to " + strings.Join(addrs, ", ") + ", which is none of this host's addresses -- right only if this server is behind NAT and that is its public address"}
+	return Result{Name: name, OK: true, Warn: true, Detail: "resolves to " + strings.Join(addrs, ", ") + ", which is none of this host's addresses -- right only if this server is behind NAT and that is its public address"}
 }
 
 // TLSAnswers checks that something at addr answers a TLS handshake for

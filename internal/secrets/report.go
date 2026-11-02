@@ -63,12 +63,42 @@ func RenderText(w io.Writer, version string, r Result) error {
 		for _, p := range r.Problems {
 			fmt.Fprintf(&b, "  %s: %s\n", p.Kind, explain(r, p))
 		}
+		if r.State == StateUnknown && r.Target == "vps" && startOverHelps(r) {
+			// Once for the plan, not once per unknown-state problem: there is
+			// one problem per missing secret, and the way out is the same for
+			// all of them. The two cases look the same from here -- a second
+			// attempt after a failed first install (OpenBao's volume outlives
+			// `uninstall` on vps) and a live server whose ~/.versola was lost
+			// -- so both are named, and the purge is offered only for the
+			// first. No `docker volume rm`: that is the purge without its
+			// typed confirmation.
+			b.WriteString("\nOpenBao already holds secrets for \"vps\", but this machine has no record of a deployment.\n")
+			b.WriteString("  - Starting over, and nothing in the database is worth keeping:\n")
+			b.WriteString("      versola uninstall --purge      (then configure again)\n")
+			b.WriteString("  - This server ran Versola before and ~/.versola was lost: the keys in OpenBao protect live data.\n")
+			b.WriteString("      Do NOT purge. Restore the missing secrets from a backup, or name them in --generate-missing\n")
+			b.WriteString("      only if their old values are gone for good.\n")
+		}
 		b.WriteString("\nResult: NOT OK — nothing would be applied.\n")
 	} else {
 		b.WriteString("\nResult: OK\n")
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// startOverHelps reports whether a plan of unknown state has a problem that a
+// fresh start answers: a secret it cannot tell new from lost, or a key group
+// stored in part. Not for the others (a mistyped --generate-missing, an
+// operator-supplied secret not set yet, ...): pointing at the most
+// destructive command there would be pointing the wrong way.
+func startOverHelps(r Result) bool {
+	for _, p := range r.Problems {
+		if p.Kind == ProblemUnknownState || p.Kind == ProblemGroupPartial {
+			return true
+		}
+	}
+	return false
 }
 
 func describeState(s StateKind) string {

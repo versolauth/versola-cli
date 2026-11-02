@@ -99,6 +99,27 @@ func PostgresInitScriptPath(target string) (string, error) {
 	return filepath.Join(dir, target+"-postgres-init.sql"), nil
 }
 
+// TargetFiles lists every file this CLI keeps in ~/.versola/openbao for
+// target, whether or not it exists: the AppRole credentials (<target>.json),
+// the root token and unseal key (<target>-admin.json, adminCredsPath) and the
+// two Postgres SQL files. `uninstall --purge` removes exactly these, so a new
+// file kept here per target belongs in this list. Unlike the path functions
+// above it never creates the directory: it is for removing, not writing.
+func TargetFiles(target string) ([]string, error) {
+	if !validTargets[target] {
+		return nil, fmt.Errorf(`unsupported target %q — only "local" and "vps" are supported`, target)
+	}
+	dir, err := credentialsDir()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, suffix := range []string{".json", "-admin.json", "-postgres-role.sql", "-postgres-init.sql"} {
+		out = append(out, filepath.Join(dir, target+suffix))
+	}
+	return out, nil
+}
+
 // ensureCredentialsDir creates credentialsDir if needed and makes sure it's
 // 0o700, even on a machine that ran an older CLI version which created it
 // at 0o755 -- os.MkdirAll is a documented no-op, including on mode, when

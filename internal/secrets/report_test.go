@@ -250,3 +250,44 @@ func TestRenderText(t *testing.T) {
 		}
 	})
 }
+
+// The unknown-state way out is printed once per plan, however many secrets it
+// is about, names both cases, and never offers to remove the volume directly.
+func TestRenderTextUnknownStateWayOut(t *testing.T) {
+	r := Result{Target: "vps", State: StateUnknown, SchemaRevision: 1, Problems: []Problem{
+		{Kind: ProblemUnknownState, Name: "A", Services: []string{"auth"}},
+		{Kind: ProblemUnknownState, Name: "B", Services: []string{"central"}},
+	}}
+	var b bytes.Buffer
+	if err := RenderText(&b, "1.0.0", r); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if n := strings.Count(out, "this machine has no record of a deployment.\n"); n != 1 {
+		t.Errorf("way-out paragraph printed %d times, want 1:\n%s", n, out)
+	}
+	for _, want := range []string{"versola uninstall --purge", "~/.versola was lost", "Do NOT purge"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "docker volume rm") {
+		t.Errorf("offers a raw volume removal:\n%s", out)
+	}
+
+	// Not for local (throwaway, never unknown in practice) nor for another state.
+	for _, other := range []Result{
+		{Target: "local", State: StateUnknown, Problems: r.Problems},
+		{Target: "vps", State: StateUpgrade, Problems: []Problem{{Kind: ProblemLost, Name: "A"}}},
+		// Unknown state, but nothing a fresh start answers.
+		{Target: "vps", State: StateUnknown, Problems: []Problem{{Kind: ProblemExternalMissing, Name: "A"}, {Kind: ProblemUnknownSecret, Name: "B"}}},
+	} {
+		b.Reset()
+		if err := RenderText(&b, "1.0.0", other); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(b.String(), "uninstall --purge") {
+			t.Errorf("%s/%s offers the purge:\n%s", other.Target, other.State, b.String())
+		}
+	}
+}

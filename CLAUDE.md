@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `versola-cli` is a Go (cobra) CLI that deploys and manages Versola (an auth platform) via Docker Compose on a local machine (`local`) or a single VPS (`vps`). It is deliberately thin: it knows nothing about Versola's service topology/config schema. That comes from the separately versioned `versola-tools` Docker image, which the CLI pulls and runs to generate the compose file, configs and `secrets.schema.json`. The CLI then parses those outputs (`internal/topology`, `internal/secrets`) rather than hard-coding ports or service names. `README.md` is the detailed user-facing spec for every command — read the relevant section before changing behaviour.
 
+## Product priority: the first customer
+
+Every plan, set of options, design, review finding and error message is judged first by what a new customer has to do, after safety (last bullet): a small team on one VPS, no infrastructure expert, going from nothing to a working identity server.
+
+- Before proposing anything, write the customer's path as they live it: the exact commands they type, what they see, where it fails and how they got there (the cause is often an earlier step of ours, e.g. on vps `uninstall` removing `secrets-pending.json` while keeping OpenBao's volume, so the next `configure` refuses an interrupted first install; see #73).
+- Prefer, in this order: nothing to do (the CLI detects it) > one command > a flag > a manual step. No raw `docker` commands, and no `ssh` beyond logging into the VPS, in the happy path. An error message ends with the command that gets the customer out, where one exists.
+- For each option give the customer's worst case, not only the technical one. Fewer flags beat finer control unless a real scenario needs the control.
+- Safety still wins over convenience: destruction asks first and says what it will remove; `--yes` only answers the question that would have been shown, and removing data that cannot be regenerated (OpenBao's volume, a Postgres) needs its own explicit flag; secret values are never printed, live data is never put at risk to save a step.
+
 ## Commands
 
 ```bash
@@ -51,7 +60,7 @@ Rollout end-to-end test (needs Docker; uses stub services instead of real Versol
 - Pass a pull request body as `gh pr create --body-file - <<'EOF'` ... `EOF`, not `--body "$(cat <<'EOF' ...)"`: the hook skips a plain heredoc body, but inside `"$(...)"` an unbalanced `"` in the text makes it read the rest of the body as commands.
 - Pull request description in English: what changed and why, which tests were added at which level (unit / e2e), and any gap left (missing test level, unverified path) with the reason. After pushing, show the operator `git diff origin/main --stat`.
 - Do not touch the production or the test stand (`ssh`, `versola up`/`rollout` against a real host, `run.sh clean`), secrets (`~/.versola`, `*.secrets.env`) or `.github/workflows/` without an explicit go from the operator. Secret values are never printed, logged or committed.
-- When a task needs a decision (design, a new flag, a state layout change), propose two or three options with the worst case of each and wait; do not pick silently.
+- When a task needs a decision (design, a new flag, a state layout change), propose two or three options with the worst case of each (for the customer, see "Product priority") and wait; do not pick silently.
 
 ## Review loop before the commit
 

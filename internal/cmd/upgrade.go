@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/versolauth/versola-cli/internal/exitcode"
 )
 
 // upgradeRepo is versola-cli's own repository -- not to be confused with
@@ -101,7 +103,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	fmt.Printf("versola-cli %s is available (you have %s).\n", latestTag, version)
 	if !upgradeAssumeYes && !confirm("Update now?") {
 		fmt.Println("Aborted.")
-		return nil
+		return exitcode.Reported(exitcode.Aborted, fmt.Errorf("aborted"))
 	}
 
 	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/%s", upgradeRepo, latestTag)

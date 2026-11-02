@@ -2,15 +2,13 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/versolauth/versola-cli/internal/cmd"
 )
 
+// The exit code says why versola failed (see README.md, "Exit codes"); cmd.Run
+// has already printed the error, once, on stderr.
 func main() {
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	os.Exit(cmd.Run(os.Args[1:], os.Stderr))
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/deploy"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -203,10 +204,10 @@ func confirmPurge(in io.Reader) error {
 	fmt.Printf("Type %q to destroy this for good: ", purgeWord)
 	line, err := deploy.ReadLine(in)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("aborted: nothing was removed: %w", err)
+		return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted: nothing was removed: %w", err))
 	}
 	if strings.TrimSpace(line) != purgeWord {
-		return fmt.Errorf("aborted: nothing was removed (the purge needs %q typed)", purgeWord)
+		return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted: nothing was removed (the purge needs %q typed)", purgeWord))
 	}
 	return nil
 }
@@ -251,7 +252,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	// local's own volumes, and a vps volume beside a local record is not
 	// something this machine's record says anything about.
 	if uninstallPurge && target == "local" {
-		return fmt.Errorf("--purge is for vps: the deployment recorded here is local, and a plain `versola uninstall` already removes its OpenBao and Postgres data")
+		return exitcode.With(exitcode.Usage, fmt.Errorf("--purge is for vps: the deployment recorded here is local, and a plain `versola uninstall` already removes its OpenBao and Postgres data"))
 	}
 
 	// If the daemon isn't reachable at all, there's nothing "docker compose
@@ -421,8 +422,13 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else if !assumeYes && !confirm("Continue?") {
+		// Exit code 4 (exitcode.Aborted), as for every other "no" at a
+		// confirmation: it used to be 0, which told a script that ran
+		// `versola uninstall && <reinstall>` with nothing on stdin that the
+		// deployment was gone when nothing was removed. "Aborted." stays the
+		// one line printed (Reported keeps Run from adding "aborted" after it).
 		fmt.Println("Aborted.")
-		return nil
+		return exitcode.Reported(exitcode.Aborted, errors.New("aborted"))
 	}
 
 	if stopStack {

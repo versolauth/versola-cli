@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -66,11 +67,11 @@ func init() {
 func parseReplicaArgs(args []string) (service string, count int, err error) {
 	service, count = args[0], 1
 	if !deploy.Scalable(service) {
-		return "", 0, fmt.Errorf("%q can't have replicas: only %s and %s can", service, deploy.AuthService, deploy.EdgeService)
+		return "", 0, exitcode.With(exitcode.Usage, fmt.Errorf("%q can't have replicas: only %s and %s can", service, deploy.AuthService, deploy.EdgeService))
 	}
 	if len(args) == 2 {
 		if count, err = strconv.Atoi(args[1]); err != nil || count < 1 {
-			return "", 0, fmt.Errorf("the number of replicas must be a whole number of at least 1, got %q", args[1])
+			return "", 0, exitcode.With(exitcode.Usage, fmt.Errorf("the number of replicas must be a whole number of at least 1, got %q", args[1]))
 		}
 	}
 	return service, count, nil

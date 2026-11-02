@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -804,7 +805,7 @@ func copyWithOpenbaoStopped(c openbaoCtl, target, container, address string, out
 		return "", fmt.Errorf("OpenBao is running again but couldn't be unsealed: %w", err)
 	}
 	if stopWatching() {
-		return "", errors.New("interrupted -- OpenBao runs again; no archive was written")
+		return "", exitcode.With(exitcode.Interrupted, errors.New("interrupted -- OpenBao runs again; no archive was written"))
 	}
 	return "", copyErr
 }

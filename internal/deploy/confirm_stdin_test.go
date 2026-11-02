@@ -2,9 +2,12 @@ package deploy
 
 import (
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/versolauth/versola-cli/internal/exitcode"
 )
 
 // callsOverStdin feeds input to os.Stdin through a real pipe (what a script or
@@ -148,5 +151,26 @@ func TestConfirmReadErrorIsNotConsent(t *testing.T) {
 	}
 	if err := confirmVpsFrom(strings.NewReader("y"), false, "do a thing"); err != nil {
 		t.Errorf("clean EOF after y: %v, want consent", err)
+	}
+}
+
+// A "no" (or no answer) at the prompt every vps command shares exits 4, with
+// the text it always had: scripts tell it from a failed deployment by the code.
+func TestConfirmRefusalIsAborted(t *testing.T) {
+	for name, in := range map[string]io.Reader{
+		"n":          strings.NewReader("n\n"),
+		"empty":      strings.NewReader(""),
+		"read error": &failAfter{data: "y"},
+	} {
+		err := confirmVpsFrom(in, false, "do a thing")
+		if code := exitcode.Code(err); code != exitcode.Aborted {
+			t.Errorf("%s: exit code %d (err=%v), want %d", name, code, err, exitcode.Aborted)
+		}
+		if err != nil && !strings.HasPrefix(err.Error(), "aborted") {
+			t.Errorf("%s: text changed: %q", name, err)
+		}
+	}
+	if err := confirmVpsFrom(strings.NewReader("n\n"), false, "do a thing"); err.Error() != "aborted" {
+		t.Errorf("text changed: %q", err)
 	}
 }

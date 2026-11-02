@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -30,9 +31,10 @@ and asks for confirmation first. Migrations cannot be rolled back
 answering yes.
 
 Exits non-zero if any migration fails (e.g. a pipeline step calling this
-should fail its build the same way) -- this was already true before
---dry-run/--service existed, since Go's own os.Exit(1) on a returned
-error doesn't change with either flag.
+should fail its build the same way), with or without --dry-run/--service:
+1 for a failed migration, 4 for a "no" at the confirmation, 2 for a bad
+--service (see "Exit codes" in the README). --dry-run exits 0 when it
+could report, pending migrations or not.
 
 --dry-run connects to the real database and reports which migrations
 would be applied, without applying any of them or asking for
@@ -54,7 +56,7 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 	case "", "auth", "central", "edge":
 		// ok
 	default:
-		return fmt.Errorf(`--service must be "auth", "central", or "edge", got %q`, migrateService)
+		return exitcode.With(exitcode.Usage, fmt.Errorf(`--service must be "auth", "central", or "edge", got %q`, migrateService))
 	}
 
 	// Held from before the confirmation read through deploy.Migrate's own

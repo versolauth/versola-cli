@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -70,7 +71,7 @@ func init() {
 func runCertsRenew(cmd *cobra.Command, args []string) error {
 	if certsShowTimer || certsInstallTimer {
 		if certsShowTimer && certsInstallTimer {
-			return fmt.Errorf("--show-timer and --install-timer are alternatives")
+			return exitcode.With(exitcode.Usage, fmt.Errorf("--show-timer and --install-timer are alternatives"))
 		}
 		return certsTimer(certsInstallTimer)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -528,6 +529,9 @@ func TestPostgresInitDryRunAndDecline(t *testing.T) {
 			// A declined question fails the command: `init && migrate` must stop.
 			if (err != nil) != (c.name == "declined") {
 				t.Fatalf("err = %v", err)
+			}
+			if err != nil && exitcode.Code(err) != exitcode.Aborted {
+				t.Errorf("declined: exit code %d, want %d", exitcode.Code(err), exitcode.Aborted)
 			}
 			if f.mutating != 0 {
 				t.Errorf("nothing may change, %d statements ran", f.mutating)

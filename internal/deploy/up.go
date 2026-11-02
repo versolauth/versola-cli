@@ -11,6 +11,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 	"github.com/versolauth/versola-cli/internal/wait"
@@ -341,12 +342,16 @@ func confirmVpsFrom(in io.Reader, assumeYes bool, action string) error {
 	line, err := ReadLine(in)
 	// Only a clean end of input after the answer counts: a read error after
 	// a partial "y" must not read as consent.
+	//
+	// Both refusals exit with exitcode.Aborted (4), whichever command asked:
+	// a script can tell "nobody said yes" (no --yes, nothing on stdin) from
+	// a deployment that failed.
 	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("aborted: %w", err)
+		return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted: %w", err))
 	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line != "y" && line != "yes" {
-		return fmt.Errorf("aborted")
+		return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted"))
 	}
 	return nil
 }

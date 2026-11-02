@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/fsutil"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -769,7 +770,7 @@ func runPostgresInit(st *state.State, dir string, opts PostgresInitOptions, deps
 	if !opts.Yes {
 		if deps.Confirm == nil || !deps.Confirm("\nContinue?") {
 			fmt.Fprintln(out, "Aborted. Nothing was changed.")
-			return fmt.Errorf("aborted: nothing was changed (--yes answers the question)")
+			return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted: nothing was changed (--yes answers the question)"))
 		}
 	}
 

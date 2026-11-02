@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -109,7 +110,7 @@ func resolveVpsFlags(cmd *cobra.Command, target string) (vpsFlags, error) {
 		if _, err := state.Load(); errors.Is(err, state.ErrNewerSchema) {
 			return v, err
 		}
-		return v, fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)")
+		return v, exitcode.With(exitcode.Usage, fmt.Errorf("--auth-url is required for vps deployments (e.g. --auth-url https://id.example.com)"))
 	}
 	return v, nil
 }

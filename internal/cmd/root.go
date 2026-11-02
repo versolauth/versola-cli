@@ -23,6 +23,8 @@ It checks your machine for what Versola needs (Docker, free ports, disk
 space), helps you install what's missing, and deploys a specific
 released version of the Versola stack using Docker.`,
 	SilenceUsage: true,
+	// The error is printed once, by Run (exit.go), not also by cobra.
+	SilenceErrors: true,
 	// Setting this makes cobra add a "--version" flag automatically, so
 	// both "versola version" and "versola --version" work -- people reach
 	// for either, and a support question always starts with "what version
@@ -54,9 +56,4 @@ func init() {
 	// version <x>") and the two spellings of the same question answer it
 	// differently.
 	rootCmd.SetVersionTemplate(versionString() + "\n")
-}
-
-// Execute runs the root command. Called once from main.main.
-func Execute() error {
-	return rootCmd.Execute()
 }

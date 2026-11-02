@@ -168,7 +168,7 @@ different memory checks, not just a different number:
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
   rather than quietly checking the wrong machine's memory.
 
-Exits non-zero if any check fails. `bootstrap`/`configure` run the same
+Exits 3 if any check fails (see "Exit codes"). `bootstrap`/`configure` run the same
 checks themselves before doing anything, so running `doctor` first is
 optional but gives you the same picture ahead of time.
 
@@ -245,6 +245,13 @@ versola up
   `--registry <prefix>` (both targets) pulls the images from another
   registry, see "Images from another registry". On `vps` it remembers the
   deployment it replaces, see "Redeploying on the same server" below.
+  On `local` the vps-only flags are refused (exit code 2) rather than
+  ignored: `--auth-url` (local always runs at `http://localhost:2821`),
+  `--postgres-host`, `--setup-openbao`, `--no-certs-timer`, `--proxy`,
+  `--acme-staging`, `--central-url`, `--postgres-db`, `--postgres-ca`, `--est` and
+  the public-name flags; `bootstrap local` the same. An unknown target is
+  refused before anything is asked. `--registry`, `--generate-missing`,
+  `--allow-legacy-secrets` and `--yes` work on both targets.
 - **`postgres init`** — for a vps deployment pointed at a Postgres of your
   own (`--postgres-host`): creates the role, the database and the schemas
   `auth`, `central` and `edge` the generated configs name, by the rights it
@@ -496,8 +503,10 @@ versola secrets plan vps 0.7.1 --json
 - `rollout` builds and checks the same plan for the version it moves to, so
   a secret new in that version is generated before any of it starts.
 - Progress goes to stderr, the report to stdout.
-- Exit code is non-zero when the plan has problems
-  (`the plan has N problem(s): nothing would be applied`).
+- Exit code is 5 when the plan has problems
+  (`the plan has N problem(s): nothing would be applied`); `configure`,
+  `bootstrap` and `rollout` stop with the same code when their own secrets
+  plan has problems.
 - `--json` prints the same report for scripts:
   `{version, ok, target, state, schemaRevision, deployedRevision?, actions[], problems[]}`.
   Actions are `{service, name, action, source?, reason?}`; problems are
@@ -699,7 +708,7 @@ What it does depends on the rights it finds:
   plain (1-63 letters, digits, `_` or `-`); anything else is refused, create it
   by hand.
 - **Declining** the question, or having no terminal without `--yes`, ends with
-  an error and a non-zero exit, so `postgres init && migrate` does not go on.
+  an error and exit code 4, so `postgres init && migrate` does not go on.
 - **Run again**, it re-checks: a deployment that is ready says "Nothing to do".
   Cut off half way, it continues with what is missing.
 - Not for a deployment that runs its own Postgres in a container: that one
@@ -1049,7 +1058,8 @@ running proxy does not front central yet (a deployment from before that,
 whose first rollout moves central to its new ports), central is stopped and
 started in place instead: the admin console and self-registration are down
 until it is ready, auth and edge keep serving from their caches. Cut off anywhere (an error, Ctrl-C,
-a dropped SSH session), the same command continues; progress is read back
+a dropped SSH session), the same command continues (a Ctrl-C, the first one
+included, exits 130); progress is read back
 from `state.json` and the containers. `--dry-run` shows the plan, the
 secrets plan and the pending migrations and changes nothing. `--no-surge`
 replaces replicas without a stand-in (one fewer serves meanwhile; with one
@@ -1445,7 +1455,8 @@ stops the stack anyway.
 Removes everything versola deployed locally: stops the stack and deletes
 its Postgres volume, removes the `versola-*` images that were pulled, and
 clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
-to skip that.
+to skip that. Any answer but yes prints `Aborted.`, removes nothing and
+exits 4 (versions before this one exited 0 there).
 
 On `vps`, OpenBao's data volume (`versola-openbao-file-vps`: every secret
 and signing key), the Postgres data volume (`versola-postgres-data-vps`, when
@@ -1479,7 +1490,7 @@ the question: that is also what a live server whose `~/.versola` was lost
 looks like. If Docker cannot say whether a volume exists, nothing is removed.
 
 Only what exists is listed and removed. It asks you to **type `vps`**; any other
-answer aborts with an error and removes nothing, and `--yes` does not answer
+answer aborts with an error (exit code 4) and removes nothing, and `--yes` does not answer
 it (a script feeds `vps` on stdin). It works without a deployment record (after
 a plain `uninstall`), needs Docker running, and is refused when the record on
 this machine is `local` (a plain `uninstall` already removes local's data).
@@ -1540,6 +1551,28 @@ version and target platform. `versola --version` does the same thing.
 This is the CLI's own version, independent of the Versola version it
 deploys — that one is whatever you pass to `bootstrap local <version>`.
 Binaries built from source without release flags report `dev`.
+
+## Exit codes
+
+Every command prints its error once, on stderr, and exits with a code a
+script can act on:
+
+| Code | Meaning | Examples |
+|---|---|---|
+| 0 | Success | |
+| 1 | Failure not listed below | a docker command failed, a migration failed, a service never got ready |
+| 2 | Wrong arguments or flags | unknown command or flag, wrong number of arguments, an unknown target for `configure`/`bootstrap` or `doctor --target`, a flag that only applies to vps given on `local`, a missing `--auth-url` on vps, a bad value (`--service`, `--cert-lifetime-days`, a replica count) |
+| 3 | The machine isn't ready | `doctor` found problems; `configure`'s/`bootstrap`'s prerequisite checks failed (Docker, memory, disk, a port already in use) |
+| 4 | Not confirmed | anything but yes at a `Continue? [y/N]` (or no terminal and no `--yes`), at `uninstall`'s or `upgrade`'s question, at `postgres init`'s, or a purge without `vps` typed |
+| 5 | The secrets plan has problems | `secrets plan`; `configure`, `bootstrap` and `rollout` when their secrets plan has problems (nothing is written to OpenBao) |
+| 130 | Interrupted | Ctrl-C during `rollout` (the first one stops between two steps, later ones leave sooner) or during `backup create`'s OpenBao copy |
+
+A problem found inside a command that has no code of its own is 1. In
+particular `migrate --dry-run` exits 0 whenever it could report, with or
+without pending migrations, and 1 when it couldn't. Validation errors raised deeper in deployment or secrets handling stay 1,
+such as an invalid `--auth-url` or an unsupported `secrets plan` target;
+`secrets test` errors without a class also stay 1. A Ctrl-C while `secrets plan` or `rollout --dry-run` runs
+versola-tools exits 130 (SIGTERM 143, SIGHUP 129), as the shell does.
 
 ## Releasing
 

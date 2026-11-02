@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/secrets"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -250,7 +251,7 @@ func runSecretsPlan(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if !res.OK() {
-		return fmt.Errorf("the plan has %d problem(s): nothing would be applied", len(res.Problems))
+		return exitcode.With(exitcode.PlanProblems, fmt.Errorf("the plan has %d problem(s): nothing would be applied", len(res.Problems)))
 	}
 	return nil
 }

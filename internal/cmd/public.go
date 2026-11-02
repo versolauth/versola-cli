@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/deploy"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 )
 
 // The public names are opt-in: with none of the three flags nothing is
@@ -100,7 +101,7 @@ func parseCertDays(raw string) (*int, error) {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 || n > 36500 {
-		return nil, fmt.Errorf("--cert-lifetime-days %q: use a number of days from 1 to 36500, or \"unlimited\"", raw)
+		return nil, exitcode.With(exitcode.Usage, fmt.Errorf("--cert-lifetime-days %q: use a number of days from 1 to 36500, or \"unlimited\"", raw))
 	}
 	return &n, nil
 }
@@ -109,7 +110,7 @@ func parseCertDays(raw string) (*int, error) {
 // --no-certs-timer is refused unless the certificates never expire.
 func refuseNoTimerWhenFinite(noTimer bool, days *int) error {
 	if noTimer && (days == nil || *days != 0) {
-		return fmt.Errorf("--no-certs-timer is refused: the certificates live %s days and expire without `versola certs renew` -- install the timer, or pass --cert-lifetime-days unlimited to have certificates that never expire", certDaysText(days))
+		return exitcode.With(exitcode.Usage, fmt.Errorf("--no-certs-timer is refused: the certificates live %s days and expire without `versola certs renew` -- install the timer, or pass --cert-lifetime-days unlimited to have certificates that never expire", certDaysText(days)))
 	}
 	return nil
 }

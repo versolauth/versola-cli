@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,5 +91,50 @@ func TestCheckOverlapRefuses(t *testing.T) {
 	}
 	if got := m.Check("0.7.2"); got != Rolling {
 		t.Errorf("0.7.2: %v", got)
+	}
+}
+
+func TestLoadOnlyReadsASmallRegularFile(t *testing.T) {
+	// A directory named release.json: not a regular file, not read.
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, File), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := Load(dir); m != nil || err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("a directory: %v, %v", m, err)
+	}
+	// Larger than any real manifest: refused without being parsed.
+	big := `{"schemaVersion": 1, "notes": "` + strings.Repeat("x", maxSize) + `"}`
+	if m, err := Load(write(t, big)); m != nil || err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("a large file: %v, %v", m, err)
+	}
+}
+
+func TestLoadDropsNotesThatAreNotASafeURL(t *testing.T) {
+	for name, notes := range map[string]string{
+		"http":      "http://example.com/notes",
+		"not a url": "see the release page",
+		"escape":    "https://example.com/" + string(rune(27)) + "[2Jgone",
+		"newline":   "https://example.com/a" + string(rune(10)) + "run it",
+		"space":     "https://example.com/a b",
+		"non-ASCII": "https://example.com/" + string(rune(0xe9)),
+		"too long":  "https://example.com/" + strings.Repeat("a", maxNotes),
+		"empty":     "",
+	} {
+		body, err := json.Marshal(map[string]any{"schemaVersion": 1, "notes": notes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := Load(write(t, string(body)))
+		if err != nil || m == nil {
+			t.Fatalf("%s: %v %v", name, m, err)
+		}
+		if m.Notes != "" {
+			t.Errorf("%s: notes %q should be dropped", name, m.Notes)
+		}
+	}
+	m, _ := Load(write(t, valid))
+	if m.Notes != "https://example.com/notes" {
+		t.Errorf("a good URL is kept, got %q", m.Notes)
 	}
 }

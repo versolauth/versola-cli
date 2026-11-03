@@ -29,7 +29,7 @@ type PostgresOptions struct {
 	// recorded, so that a rolling upgrade generates the same bundle again.
 	Mode string
 	// AllowFreshDatabase is configure's --allow-fresh-database: the operator
-	// says the database is new (restored or emptied), so a release that
+	// says the database is new (emptied), so a release that
 	// declares it needs one (release.json, freshDatabaseFrom) may be
 	// configured over the recorded deployment. Never recorded, and not read
 	// from the record: a rollout never gets it.

@@ -39,6 +39,7 @@ func TestRequireCompatibility(t *testing.T) {
 		c        compatCheck
 		wantErr  []string // substrings; none: must pass
 		wantOut  string
+		to       string // default 0.7.6, the manifest's own version
 	}{
 		{name: "rolling declared: no flag needed, says why", manifest: testManifest,
 			c: compatCheck{from: "0.7.5", rollout: true}, wantOut: "rolling upgrade supported by the release (release notes: https://example.com/notes/0.7.6)"},
@@ -60,7 +61,7 @@ func TestRequireCompatibility(t *testing.T) {
 			c: compatCheck{from: "0.6.2", allowFresh: true}, wantOut: "Warning"},
 		{name: "undeclared version: a rollout needs the flag, and why", manifest: testManifest,
 			c:       compatCheck{from: "0.7.0", rollout: true},
-			wantErr: []string{"does not state compatibility with 0.7.0", "--assume-compatible"}},
+			wantErr: []string{"does not state compatibility with 0.7.0", "--assume-compatible", "Nothing was changed"}},
 		{name: "undeclared version: the flag lets it through", manifest: testManifest,
 			c: compatCheck{from: "0.7.0", rollout: true, assume: true}},
 		{name: "undeclared version: configure goes on as before", manifest: testManifest,
@@ -72,6 +73,9 @@ func TestRequireCompatibility(t *testing.T) {
 			c: compatCheck{from: "0.7.5", rollout: true, assume: true}},
 		{name: "no manifest: configure goes on as before", manifest: "",
 			c: compatCheck{from: "0.6.2"}},
+		{name: "a manifest for another version is refused (a wrong image)", manifest: testManifest,
+			c:       compatCheck{from: "0.7.5", rollout: true, assume: true},
+			wantErr: []string{"is for 0.7.6", "wrongly built image", "Nothing was changed"}, to: "0.7.7"},
 		{name: "unknown schema is refused, not guessed at", manifest: `{"schemaVersion": 2}`,
 			c:       compatCheck{from: "0.7.5", rollout: true, assume: true},
 			wantErr: []string{"schemaVersion 2", "versola upgrade"}},
@@ -79,6 +83,9 @@ func TestRequireCompatibility(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.c.dir, tc.c.to = toolsDir(t, tc.manifest), to
+			if tc.to != "" {
+				tc.c.to = tc.to
+			}
 			var out bytes.Buffer
 			err := requireCompatibility(tc.c, &out)
 			if len(tc.wantErr) == 0 {

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -26,6 +27,13 @@ import (
 
 // File is the manifest's name in a versola-tools output directory.
 const File = "release.json"
+
+// maxSize bounds what Load reads: a real manifest is a few hundred bytes, and the
+// file is written by a container whose image the operator merely chose.
+const maxSize = 64 << 10
+
+// maxNotes bounds the notes URL that is printed.
+const maxNotes = 200
 
 // SchemaVersion is the layout of release.json this package reads. A manifest
 // with another one is refused rather than guessed at: a field that changed its
@@ -58,16 +66,37 @@ const (
 )
 
 // Load reads the manifest from a versola-tools output directory. nil, nil when
-// there is none (an older release). Any other problem -- unreadable, not JSON,
-// another schemaVersion -- is an error that names the file: a manifest that
-// cannot be understood must not be taken for an absent one.
+// there is none (an older release). Any other problem -- unreadable, not a
+// regular file, too large, not JSON, another schemaVersion -- is an error that
+// names the file: a manifest that cannot be understood must not be taken for an
+// absent one. Only a regular file is read (a symlink or a FIFO in the output
+// directory would be followed or block), and at most maxSize bytes of it. Notes
+// that are not a short https URL of printable ASCII are dropped: they are
+// printed to the operator, and a manifest from a registry image may hold
+// anything, control characters included.
 func Load(dir string) (*Manifest, error) {
-	data, err := os.ReadFile(filepath.Join(dir, File))
+	path := filepath.Join(dir, File)
+	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", File, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", File)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", File, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", File, err)
+	}
+	if len(data) > maxSize {
+		return nil, fmt.Errorf("%s is larger than %d bytes", File, maxSize)
 	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -76,7 +105,24 @@ func Load(dir string) (*Manifest, error) {
 	if m.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("%s has schemaVersion %d; this versola understands %d -- upgrade versola (`versola upgrade`) to deploy this release", File, m.SchemaVersion, SchemaVersion)
 	}
+	if !printableURL(m.Notes) {
+		m.Notes = ""
+	}
 	return &m, nil
+}
+
+// printableURL: an https URL of printable ASCII (no spaces, no control
+// characters), short enough to print on one line.
+func printableURL(s string) bool {
+	if !strings.HasPrefix(s, "https://") || len(s) > maxNotes {
+		return false
+	}
+	for _, r := range s {
+		if r <= ' ' || r >= 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // Check says what the manifest declares about upgrading from version. A nil

@@ -347,7 +347,7 @@ versola up
   `configure vps <version>` over a recorded deployment of a version in that
   second list is refused after versola-tools has run and before a secret is
   written or the record is replaced, with the release notes URL: the old
-  database would fail `migrate`. Back it up, restore or empty it, then
+  database would fail `migrate`. Back it up, empty it (drop and recreate the database; restoring the old dump brings the old schema back), then
   `versola configure vps <version> --allow-fresh-database` (advanced flag,
   `--help-all`; it removes nothing, it only says the database is new). A
   release with no manifest, or one that does not list the running version,

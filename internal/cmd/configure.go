@@ -267,7 +267,7 @@ const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listene
 
 const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, run docker login first"
 
-const allowFreshDatabaseUsage = "vps only: the release you configure declares (release.json) that it needs a fresh database, and the one this deployment uses has been restored or emptied; without this flag configure refuses before changing anything"
+const allowFreshDatabaseUsage = "vps only: the release you configure declares (release.json) that it needs a fresh database, and the database this deployment uses has been emptied (dropped and recreated); without this flag configure refuses before changing anything"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

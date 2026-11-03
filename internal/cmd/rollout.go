@@ -30,14 +30,17 @@ var rolloutCmd = &cobra.Command{
 keeps serving.
 
   versola rollout 0.8.1 --dry-run
-  versola rollout 0.8.1 --assume-compatible
+  versola rollout 0.8.1
   versola rollout --abort
 
 It prepares the new version next to the running one, migrates the database
 (back it up first: migrations can't be rolled back), replaces central, auth
 and edge one replica at a time behind a stand-in, then moves the proxy.
---assume-compatible says you read the release notes: the running version works
-on the new schema (releases before 1.0 don't promise it). Cut off -- an error,
+The release declares which versions it can replace (release.json): a rollout
+from one of them needs no flag, one from a version that needs a fresh database
+is refused. --assume-compatible is for a release that declares nothing: it says
+you read the release notes and the running version works on the new schema
+(releases before 1.0 don't promise it). Cut off -- an error,
 Ctrl-C, a dropped SSH session -- the same command continues where it stopped;
 Ctrl-C stops after the step under way, a second Ctrl-C exits at once. --abort
 goes back to the version the rollout came from; migrations and secrets stay.
@@ -64,7 +67,7 @@ func init() {
 	rolloutCmd.Flags().StringSliceVar(&rolloutGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAbort, "abort", false, "go back to the version the unfinished rollout came from (migrations and secrets stay; add --no-surge if memory or Postgres connections are short)")
-	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "you checked the release notes: the running version works on the new version's schema (releases before 1.0 don't promise it)")
+	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "only for a release that declares no compatibility with the running version: you checked its notes and the running version works on the new schema (cannot override a release that declares it needs a fresh database)")
 	// Recovery flags, for a secrets plan that stops: under --help-all.
 	hideFlags(rolloutCmd, "generate-missing", "allow-legacy-secrets")
 }
@@ -106,10 +109,6 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if rolloutDryRun {
 		return deploy.RolloutDryRun(st, version, opts)
 	}
-	if err := deploy.RequireCompatible(st, version, opts); err != nil {
-		return err
-	}
-
 	fmt.Print(deploy.RolloutPlan(st, version, opts))
 	if err := deploy.ConfirmVpsDeployYes(rolloutYes, fmt.Sprintf("roll Versola %s out on the VPS as above, applying its migrations to the live database", version)); err != nil {
 		return err

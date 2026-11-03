@@ -5,7 +5,7 @@
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 #                  [--abort-at prepared|central|standin|midway] [--strict]
-#                  [--slow-central SECONDS]
+#                  [--slow-central SECONDS] [--declared]
 #   ./run.sh clean
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -25,6 +25,8 @@
 # Cuts of the long-lived 8083 connections (nginx closes a retired worker's
 # connections 30 s after each reload) are the known limitation: reported, not
 # a failure. --strict counts them as failures (see README.md).
+# --declared: B's versola-tools declares it can replace A in its compatibility
+# manifest (release.json), and the rollout is run without --assume-compatible.
 #
 # Run it ONLY on a throwaway machine (the test stand): it starts containers
 # named versola-*, a real OpenBao and the proxy on 127.0.0.1:2821/8082/8083,
@@ -88,7 +90,7 @@ clean() {
 }
 
 build() {
-  local base="$1" slow_central="${2:-}"
+  local base="$1" slow_central="${2:-}" declared="${3:-}"
   say "building stub images ($A, $B) and the wrapped versola-tools (base $base)"
   for v in "$A" "$B"; do
     for s in central auth edge; do
@@ -97,8 +99,10 @@ build() {
       docker build -q --platform linux/amd64 --build-arg ROLE="$s" --build-arg VERSION="$v" \
         ${delay[@]+"${delay[@]}"} -t "versola-e2e/$s:$v" "$HERE/stub" >/dev/null
     done
+    local rolling=()
+    [ -n "$declared" ] && [ "$v" = "$B" ] && rolling=(--build-arg ROLLING_FROM="$A")
     docker build -q --platform linux/amd64 --build-arg BASE="ghcr.io/versolauth/versola-tools:$base" \
-      --build-arg VERSION="$v" -t "ghcr.io/versolauth/versola-tools:$v" "$HERE/tools" >/dev/null
+      --build-arg VERSION="$v" ${rolling[@]+"${rolling[@]}"} -t "ghcr.io/versolauth/versola-tools:$v" "$HERE/tools" >/dev/null
   done
   # `versola rollout` pulls the new version's images first; the stubs are only
   # in the local store, so compose must skip them (pull_policy: never). Check
@@ -112,7 +116,7 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" declared="" assume="--assume-compatible"
   while [ $# -gt 0 ]; do
     case "$1" in
       --abort-at) abort_at="$2"; shift 2 ;;
@@ -120,6 +124,7 @@ run() {
       --no-surge) surge="--no-surge"; shift ;;
       --base-tools) base="$2"; shift 2 ;;
       --strict) strict=yes; shift ;;
+      --declared) declared=yes; assume=""; shift ;;
       --slow-central) slow_central="$2"; shift 2 ;;
       *) die "unknown argument $1" ;;
     esac
@@ -157,7 +162,7 @@ $found"
   done
 
   [ -z "$slow_central" ] || [[ "$slow_central" =~ ^[0-9]+$ ]] || die "--slow-central: a number of seconds"
-  build "$base" "$slow_central"
+  build "$base" "$slow_central" "$declared"
 
   # The CLI keeps its state under $HOME; the docker CLI's own config stays where it is.
   export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
@@ -202,11 +207,11 @@ $found"
   [ "$abort_at" != central ] || idsA="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
   if [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
+    "$cli" rollout "$B" --yes $assume --allow-legacy-secrets $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes $assume --allow-legacy-secrets $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
@@ -263,7 +268,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--declared]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

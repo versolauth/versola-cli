@@ -38,8 +38,8 @@ type RolloutOptions struct {
 	Secrets SecretOptions
 	// AssumeCompatible is --assume-compatible: the operator confirms that the
 	// running version works on the new version's schema while the rollout is
-	// under way, and the other way round should it be aborted. Pre-1.0
-	// releases do not promise it (see RequireCompatible).
+	// under way, and the other way round should it be aborted. Needed only
+	// for a release whose manifest does not declare it (see requireCompatibility).
 	AssumeCompatible bool
 }
 
@@ -133,23 +133,6 @@ func CheckRollout(st *state.State, version string, o RolloutOptions) (done bool,
 		}
 	}
 	return false, nil
-}
-
-// RequireCompatible refuses to start a rollout the operator has not
-// confirmed compatible (--assume-compatible). A rolling upgrade runs the two
-// versions side by side on the new version's schema, and an abort runs the
-// old one on it alone; Versola's releases before 1.0 do not promise either
-// ("compatibility between 0.x releases is not guaranteed" -- 0.7.0, for one,
-// needs a fresh database). Nothing in a release says so yet, so the operator
-// has to, having read its notes. Continuing a rollout under way needs no
-// confirmation: it was given when it started.
-func RequireCompatible(st *state.State, version string, o RolloutOptions) error {
-	if st.RolloutUnderway() || o.AssumeCompatible {
-		return nil
-	}
-	return fmt.Errorf("a rolling upgrade runs %s and %s side by side on the database as %s migrates it, and Versola releases before 1.0 don't promise that works (some, like 0.7.0, need a fresh database) -- "+
-		"read the release notes of %s; if its migrations are additive and %s runs on its schema, run again with --assume-compatible. Otherwise deploy it with `versola configure`, `migrate` and `up` (a short stop; back the database up first)",
-		st.Version, version, version, version, st.Version)
 }
 
 // CheckAbort is everything about `rollout --abort` that can be refused on
@@ -252,10 +235,12 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 	switch {
 	case st.RolloutUnderway():
 	case o.AssumeCompatible:
-		b.WriteString("  Compatibility: confirmed by you (--assume-compatible) -- releases before 1.0 don't promise it\n")
+		b.WriteString("  Compatibility: confirmed by you (--assume-compatible), unless the release declares it needs a fresh database\n")
 	default:
-		b.WriteString("  Compatibility: NOT confirmed -- the rollout refuses without --assume-compatible (releases before 1.0\n" +
-			"  don't promise the running version works on the new schema; read the release notes)\n")
+		// Printed before versola-tools has run, so before the release's manifest
+		// (release.json) can be read: step 1 does that (requireCompatibility).
+		b.WriteString("  Compatibility: read from the release's manifest (release.json) in step 1; a release that declares nothing needs\n" +
+			"  --assume-compatible (releases before 1.0 don't promise the running version works on the new schema)\n")
 	}
 	b.WriteString("\n  Steps:\n")
 	done := func(ok bool) string {
@@ -441,7 +426,7 @@ func Rollout(st *state.State, version string, o RolloutOptions) error {
 	}
 	if !st.RolloutUnderway() {
 		fmt.Printf("\nPreparing Versola %s next to the running %s (nothing running changes in this step)...\n", version, st.Version)
-		next, err := prepareStaged(st, version, o, &stagedConfigure{from: st, surge: !o.NoSurge})
+		next, err := prepareStaged(st, version, o, &stagedConfigure{from: st, surge: !o.NoSurge, assumeCompatible: o.AssumeCompatible})
 		if err != nil {
 			return fmt.Errorf("preparing %s failed -- nothing running was changed: %w", version, err)
 		}
@@ -831,7 +816,7 @@ func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 		fmt.Printf("Pending migrations of %s (from its prepared bundle):\n", version)
 		return Migrate(st, MigrateOptions{DryRun: true})
 	}
-	return previewVersion(st, version, o.Secrets)
+	return previewVersion(st, version, o)
 }
 
 // AbortDryRun prints what `rollout --abort` would do and changes nothing:
@@ -881,7 +866,8 @@ func AbortDryRun(st *state.State, o RolloutOptions) error {
 // values included -- is removed before this returns, and on Ctrl-C; one a
 // kill -9 leaves behind (rollout-dryrun-*) is removed by the next plan or dry
 // run after an hour.
-func previewVersion(st *state.State, version string, secretOpts SecretOptions) error {
+func previewVersion(st *state.State, version string, o RolloutOptions) error {
+	secretOpts := o.Secrets
 	creds, err := openbao.LoadCredentials(st.Target)
 	if err != nil {
 		if errors.Is(err, openbao.ErrNoCredentials) {
@@ -923,6 +909,9 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	}
 	if err := requireAdminConsole(dir, version); err != nil {
 		return err
+	}
+	if err := requireCompatibility(compatCheck{dir: dir, from: st.Version, to: version, rollout: true, assume: o.AssumeCompatible}, os.Stdout); err != nil {
+		return fmt.Errorf("the rollout would stop when preparing %s: %w", version, err)
 	}
 	fmt.Println("Secrets (read from OpenBao, nothing written):")
 	set, err := settleSecrets(ctx, client, dir, st.Target, version, secretOpts)

@@ -20,6 +20,21 @@ done
 
 ./entrypoint.sh "$@"
 
+# E2E_ROLLING_FROM: this version declares itself rollable from that one, in
+# the compatibility manifest (release.json) the real tools image writes to /out.
+# The base image's own release.json, if it has one, is replaced: the stub
+# declares exactly what the test says, so a rollout needs no --assume-compatible.
+if [ -n "${E2E_ROLLING_FROM:-}" ] && [ -d /out ]; then
+  printf '{
+  "schemaVersion": 1,
+  "version": "%s",
+  "rollingFrom": ["%s"],
+  "freshDatabaseFrom": [],
+  "notes": "https://example.invalid/e2e"
+}
+'     "$E2E_VERSION" "$E2E_ROLLING_FROM" >/out/release.json
+fi
+
 f=/out/compose.fragment.yml
 [ -f "$f" ] || exit 0 # e.g. `secrets plan`: nothing to rewrite
 

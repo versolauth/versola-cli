@@ -26,6 +26,7 @@ var configureAllowLegacy bool
 var configurePostgresDB string
 var configurePostgresCA string
 var configureRegistry string
+var configureAllowFreshDatabase bool
 
 var configureCmd = &cobra.Command{
 	Use:     "configure <target> [<version>]",
@@ -81,9 +82,10 @@ func init() {
 	configureCmd.Flags().StringSliceVar(&configureGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	configureCmd.Flags().BoolVar(&configureAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	configureCmd.Flags().BoolVar(&configureSetupOpenBao, "setup-openbao", false, setupOpenBaoUsage)
+	configureCmd.Flags().BoolVar(&configureAllowFreshDatabase, "allow-fresh-database", false, allowFreshDatabaseUsage)
 	// --help shows what a first deployment on one server needs; the rest is
 	// under --help-all (see help.go).
-	hideFlags(configureCmd, advancedDeployFlags...)
+	hideFlags(configureCmd, append([]string{"allow-fresh-database"}, advancedDeployFlags...)...)
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
@@ -100,7 +102,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
-	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)
+	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA, AllowFreshDatabase: configureAllowFreshDatabase}.Validate(target)
 	if err != nil {
 		return err
 	}
@@ -239,7 +241,7 @@ func rejectVpsOnlyFlags(cmd *cobra.Command, target string) error {
 	if target == "vps" {
 		return nil
 	}
-	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est"}, publicFlagNames...) {
+	for _, name := range append([]string{"proxy", "acme-staging", "central-url", "postgres-db", "postgres-ca", "est", "allow-fresh-database"}, publicFlagNames...) {
 		if cmd.Flags().Changed(name) {
 			return exitcode.With(exitcode.Usage, fmt.Errorf("--%s only applies to vps deployments", name))
 		}
@@ -264,6 +266,8 @@ var localFixed = []struct{ name, instead string }{
 const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listener (default: https://127.0.0.1:8093, the loopback address -- a local edge never uses a public name). Only for an edge elsewhere that is configured by hand; see --central-mtls-domain for publishing the name and 'versola edge add' for a remote edge's bootstrap bundle"
 
 const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, run docker login first"
+
+const allowFreshDatabaseUsage = "vps only: the release you configure declares (release.json) that it needs a fresh database, and the one this deployment uses has been restored or emptied; without this flag configure refuses before changing anything"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

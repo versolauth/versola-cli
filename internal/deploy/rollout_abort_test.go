@@ -688,26 +688,16 @@ func TestCheckRolloutDuringAnAbort(t *testing.T) {
 	}
 }
 
-func TestRequireCompatible(t *testing.T) {
+// The plan is printed before versola-tools has run, so it cannot know the
+// release's verdict: it says where that is read, and what the flag is for.
+func TestRolloutPlanCompatibility(t *testing.T) {
 	st := rolloutGuardState(t)
-	err := RequireCompatible(st, toV, RolloutOptions{})
-	if err == nil || !strings.Contains(err.Error(), "--assume-compatible") || !strings.Contains(err.Error(), "fresh database") {
-		t.Errorf("unconfirmed: %v", err)
-	}
-	if err := RequireCompatible(st, toV, RolloutOptions{AssumeCompatible: true}); err != nil {
-		t.Errorf("confirmed: %v", err)
-	}
-	s := *st
-	s.PreviousVersion, s.Version = fromV, toV
-	if err := RequireCompatible(&s, toV, RolloutOptions{}); err != nil {
-		t.Errorf("continuing needs no confirmation: %v", err)
-	}
 	plan := RolloutPlan(st, toV, RolloutOptions{})
-	if !strings.Contains(plan, "Compatibility: NOT confirmed") {
-		t.Errorf("plan without the flag:\n%s", plan)
+	if !strings.Contains(plan, "release.json") || !strings.Contains(plan, "declares nothing needs") {
+		t.Errorf("plan without the flag: %s", plan)
 	}
-	if plan := RolloutPlan(st, toV, RolloutOptions{AssumeCompatible: true}); !strings.Contains(plan, "confirmed by you") {
-		t.Errorf("plan with the flag:\n%s", plan)
+	if plan := RolloutPlan(st, toV, RolloutOptions{AssumeCompatible: true}); !strings.Contains(plan, "confirmed by you") || !strings.Contains(plan, "fresh database") {
+		t.Errorf("plan with the flag: %s", plan)
 	}
 }
 

@@ -90,6 +90,8 @@ type stagedConfigure struct {
 	// on the old version), migrations are recorded as done (an abort never
 	// migrates), and the record is marked RollingBack.
 	abort bool
+	// assumeCompatible is --assume-compatible, for requireCompatibility.
+	assumeCompatible bool
 }
 
 // configure is Configure, or with staged set the preparation step of a
@@ -285,6 +287,14 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	}
 	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), registry, version); err != nil {
 		return ConfigureResult{}, err
+	}
+	// The release's own statement about the deployment it would replace, before
+	// a secret is written or the record is touched (the abort goes back to a
+	// version that already ran on this database: nothing to ask).
+	if check, ok := compatibilityCheck(dir, version, stored, staged, pg); ok {
+		if err := requireCompatibility(check, os.Stdout); err != nil {
+			return ConfigureResult{}, err
+		}
 	}
 	if pg.Mode == PostgresModeBundled {
 		if err := requireBundledPostgres(filepath.Join(dir, "compose.fragment.yml"), version, staged != nil); err != nil {

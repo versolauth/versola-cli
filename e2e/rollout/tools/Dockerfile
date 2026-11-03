@@ -5,7 +5,9 @@
 ARG BASE
 FROM ${BASE}
 ARG VERSION
+ARG ROLLING_FROM=
 ENV E2E_VERSION=${VERSION}
+ENV E2E_ROLLING_FROM=${ROLLING_FROM}
 USER root
 COPY --chmod=755 e2e-entrypoint.sh /e2e-entrypoint.sh
 ENTRYPOINT ["/e2e-entrypoint.sh"]

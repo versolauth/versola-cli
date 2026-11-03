@@ -336,10 +336,22 @@ versola up
   On `local` the vps-only flags are refused (exit code 2) rather than
   ignored: `--auth-url` (local always runs at `http://localhost:2821`),
   `--postgres-host`, `--setup-openbao`, `--no-certs-timer`, `--proxy`,
-  `--acme-staging`, `--central-url`, `--postgres-db`, `--postgres-ca`, `--est` and
-  the public-name flags; `bootstrap local` the same. An unknown target is
+  `--acme-staging`, `--central-url`, `--postgres-db`, `--postgres-ca`, `--est`,
+  `--allow-fresh-database` and the public-name flags; `bootstrap local` the same. An unknown target is
   refused before anything is asked. `--registry`, `--generate-missing`,
   `--allow-legacy-secrets` and `--yes` work on both targets.
+- **A release that needs a fresh database.** A release declares in its
+  compatibility manifest (`release.json`, written by versola-tools next to the
+  configs) which earlier versions it can replace while they run
+  (`rollingFrom`) and which need a fresh database (`freshDatabaseFrom`).
+  `configure vps <version>` over a recorded deployment of a version in that
+  second list is refused after versola-tools has run and before a secret is
+  written or the record is replaced, with the release notes URL: the old
+  database would fail `migrate`. Back it up, restore or empty it, then
+  `versola configure vps <version> --allow-fresh-database` (advanced flag,
+  `--help-all`; it removes nothing, it only says the database is new). A
+  release with no manifest, or one that does not list the running version,
+  configures as before.
 - **`postgres init`** — for a vps deployment pointed at a Postgres of your
   own (`--postgres-host`): creates the role, the database and the schemas
   `auth`, `central` and `edge` the generated configs name, by the rights it
@@ -1136,7 +1148,7 @@ versola replica remove edge
 
 ### `rollout <version>` / `rollout --abort` (vps)
 
-`versola rollout <version> --assume-compatible` moves a running vps
+`versola rollout <version>` moves a running vps
 deployment to another Versola version without stopping it: the new
 version is prepared next to the running one (versola-tools, the secrets
 plan), the database is migrated, central is moved to the new version
@@ -1159,14 +1171,30 @@ replaces replicas without a stand-in (one fewer serves meanwhile; with one
 replica it needs `--allow-downtime`; central is restarted in place, as
 before stand-ins).
 
-**Compatibility is yours to confirm.** During a rollout the running
+**Compatibility is declared by the release.** During a rollout the running
 version works on the new version's schema, and an abort runs it there
-alone. Versola releases before 1.0 don't promise that ("compatibility
-between 0.x releases is not guaranteed"), so `rollout` refuses to start
-without `--assume-compatible`: read the release notes first (additive
-migrations; the running version works on the new schema). A release that
-is not compatible is deployed with `configure`, `migrate` and `up` (a
-short stop) after a database backup.
+alone. Versola releases before 1.0 don't promise that, so each release
+says which versions it can replace in its manifest (`release.json`, in
+the versola-tools output, read in step 1 of the rollout -- the plan printed
+before it cannot know the answer yet):
+
+- the running version is in `rollingFrom`: the rollout needs no flag and
+  prints `0.7.4 -> 0.7.6: rolling upgrade supported by the release`;
+- it is in `freshDatabaseFrom`: refused before anything is written, with the
+  release notes URL, and `--assume-compatible` does not change that -- the
+  release itself says the old database does not work with it. Deploy it with
+  `configure vps <version> --allow-fresh-database`, `migrate` and `up` after a
+  database backup;
+- it is in neither list, or the release has no manifest (every release
+  before manifests): the rollout refuses without `--assume-compatible`, as it
+  always did -- read the release notes first (additive migrations; the
+  running version works on the new schema) -- and says which of the two it
+  is. A missing manifest is never read as "compatible".
+
+A manifest this versola cannot read (another `schemaVersion`) stops the
+rollout and `configure` with a message naming it, instead of being
+guessed at. `rollout --dry-run` prints the same verdict. An abort goes back
+to a version that already ran on this database and asks nothing.
 
 `versola rollout --abort` goes back to the version the unfinished rollout
 came from:
@@ -1287,8 +1315,9 @@ the renewal.
    and `~/.versola/openbao/`, without which the dump can't be read).
 3. `versola rollout <version> --dry-run`: the plan, the checks, the
    secrets plan, the migrations it would apply. Nothing changes.
-4. `versola rollout <version> --assume-compatible`. Cut off, run the same
-   command again; `versola status` shows where it stands.
+4. `versola rollout <version>` (add `--assume-compatible` only for a release
+   that declares nothing about the running version: it says so). Cut off,
+   run the same command again; `versola status` shows where it stands.
 5. Check through the proxy (`curl -H 'Host: <your domain>'
    http://127.0.0.1:2821/.well-known/openid-configuration` and the admin
    console).

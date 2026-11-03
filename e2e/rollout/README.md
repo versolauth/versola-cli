@@ -73,6 +73,7 @@ The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
 ./run.sh run /path/to/versola --abort-at prepared|central|standin|midway
 ./run.sh run /path/to/versola --strict      # cuts on 8083 fail the run
 ./run.sh run /path/to/versola --slow-central 40   # central B needs 40 s to become ready
+./run.sh run /path/to/versola --declared      # B's release.json declares it replaces A: no --assume-compatible
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
 

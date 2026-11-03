@@ -28,6 +28,12 @@ type PostgresOptions struct {
 	// --postgres-host and the recorded deployment (resolvePostgres), and
 	// recorded, so that a rolling upgrade generates the same bundle again.
 	Mode string
+	// AllowFreshDatabase is configure's --allow-fresh-database: the operator
+	// says the database is new (restored or emptied), so a release that
+	// declares it needs one (release.json, freshDatabaseFrom) may be
+	// configured over the recorded deployment. Never recorded, and not read
+	// from the record: a rollout never gets it.
+	AllowFreshDatabase bool
 }
 
 var postgresDBPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)

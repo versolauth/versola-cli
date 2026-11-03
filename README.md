@@ -173,6 +173,14 @@ an install page in your browser, and only after you confirm:
     for the container (no `--postgres-host`, and no deployment here with a
     Postgres of its own), port 5432 is free; for your own, which one it is
     (`postgres init` checks and prepares it after `configure`)
+  - your own Postgres (`--postgres-host`, not a loopback address, and `--postgres-ca`
+    when its CA is private; without the flag, the CA recorded by `configure` for that
+    same host is used): the address answers and the certificate is accepted
+    for that name, as the services will check it (`sslmode=verify-full`). A
+    `psql` runs in a throwaway `postgres:18-alpine` container; no role or
+    password is known before `configure`, so the check ends at the login. A
+    wrong CA or host name fails, with the flag that fixes it; an address that
+    can't be reached, or Docker unable to run the check, is a warning
   - the image registry (`ghcr.io`, or the host of `--registry`) answers over
     HTTPS: any HTTP answer will do, no answer fails. Docker pulling through
     a proxy set for its daemon is not seen by this check
@@ -854,6 +862,21 @@ serves the admin console at `/central/admin/`.
   or sets its password to `~/.versola/openbao/vps-postgres-role.sql` (see
   Secrets above): run it **before** `migrate`, or `migrate` fails with
   `password authentication failed`.
+
+  Right after that, for a Postgres of your own, `configure` connects the way
+  the services will (a `psql` in a throwaway container; the password goes
+  only into its environment) and prints one line: reachable, TLS accepted,
+  login, the server's version (a warning below 18, the version CI runs
+  against) and which of the schemas `auth`, `central` and `edge` exist. It
+  only reads. A certificate problem (unknown CA, a name not in the
+  certificate, no TLS offered) stops `configure` before `migrate` and `up`,
+  with the flag that fixes it (`--postgres-ca`, or the certificate's name as
+  `--postgres-host`), and the previous deployment stays as it was. The role
+  not being set up yet on the first `configure` is "not yet", not an error;
+  a refused login on a later one, an unreachable address, a missing
+  database or a check that could not run (no Docker, no image) are warnings,
+  so that a run of `configure` before the role SQL has been applied is not
+  blocked.
 
   For a test deployment, add `--acme-staging`: the certificate then comes
   from Let's Encrypt's staging environment — untrusted by browsers, but

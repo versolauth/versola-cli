@@ -475,6 +475,10 @@ func pgDockerArgsOn(c pgConn, vars map[string]string, network string) []string {
 		"-e", "PGCONNECT_TIMEOUT=10", "-e", "PGAPPNAME=versola-postgres-init"}
 	args = append(args, pgTLSArgs(c.sslmode, c.caFile)...)
 	args = append(args, "-e", pgInitAdminEnv, pgCheckImage, "sh", "-c", pgInitScript, "sh")
+	if c.password == "" {
+		// No password to give (doctor's probe): fail rather than let psql read one from the SQL on stdin.
+		args = append(args, "-w")
+	}
 	return append(args, psqlVarArgs(vars)...)
 }
 

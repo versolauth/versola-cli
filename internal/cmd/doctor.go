@@ -26,7 +26,7 @@ import (
 
 var doctorTarget, doctorAuthURL, doctorCentralURL string
 var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
-var doctorProxy, doctorPostgresHost, doctorRegistry string
+var doctorProxy, doctorPostgresHost, doctorPostgresCA, doctorRegistry string
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor",
@@ -70,11 +70,12 @@ func addDoctorFlags(cmd *cobra.Command) {
 	f.StringVar(&doctorCentralDomain, "central-domain", "", "vps only: the --central-domain you will deploy with -- same checks")
 	f.StringVar(&doctorProxy, "proxy", proxy.ModeNginx, `vps only: the --proxy you will deploy with ("nginx" or "external"); decides which ports are checked`)
 	f.StringVar(&doctorPostgresHost, "postgres-host", "", "vps only: the --postgres-host you will deploy with, if you use a Postgres of your own (without it, port 5432 is checked for the Postgres container)")
+	f.StringVar(&doctorPostgresCA, "postgres-ca", "", "vps only: the --postgres-ca you will deploy with (PEM file); the CA the connection to your Postgres is verified against")
 	f.StringVar(&doctorRegistry, "registry", "", "vps only: the --registry you will deploy with; the registry whose answer over HTTPS is checked (default: ghcr.io)")
 	f.StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
 	// The public names, and the registry, are for remote edges and test
 	// registries: under --help-all (see help.go), as in configure.
-	hideFlags(cmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "registry")
+	hideFlags(cmd, "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "registry", "postgres-ca")
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
@@ -101,6 +102,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		if vps, err = parseVpsInputs(doctorAuthURL, doctorProxy, doctorPostgresHost, doctorRegistry, doctorCentralURL, doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain); err != nil {
 			return err
 		}
+		vps.postgresCA = doctorPostgresCA
 		if len(fill) > 0 {
 			fmt.Printf("From the deployment on this machine, as configure takes them: %s\n\n", describeRecorded(fill))
 		}
@@ -193,7 +195,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 // doctorVpsOnlyFlags are the flags that describe a vps deployment: refused
 // with --target local rather than ignored.
-var doctorVpsOnlyFlags = []string{"auth-url", "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "proxy", "postgres-host", "registry"}
+var doctorVpsOnlyFlags = []string{"auth-url", "central-url", "mtls-domain", "central-mtls-domain", "central-domain", "proxy", "postgres-host", "postgres-ca", "registry"}
 
 // vpsInputs are doctor's vps flags, validated and normalized as configure
 // does it.
@@ -203,6 +205,7 @@ type vpsInputs struct {
 	mode         string
 	public       proxy.PublicNames
 	postgresHost string
+	postgresCA   string
 	registry     string
 }
 
@@ -246,7 +249,11 @@ func vpsChecks(in vpsInputs) []checks.Result {
 	if in.auth != nil {
 		results = append(results, checks.AuthName(in.auth.Host, in.auth.TLS(in.mode)), deploy.ProxyPortsCheck(*in.auth, in.mode, in.public))
 	}
-	results = append(results, deploy.PostgresCheck(in.postgresHost), checks.RegistryAnswers(deploy.RegistryHost(in.registry)))
+	results = append(results, deploy.PostgresCheck(in.postgresHost))
+	if r, ok := deploy.PostgresProbeCheck(in.postgresHost, in.postgresCA); ok {
+		results = append(results, r)
+	}
+	results = append(results, checks.RegistryAnswers(deploy.RegistryHost(in.registry)))
 	// No timer is installed for certificates that never expire: lingering
 	// does not matter then.
 	if days := deploy.StoredCertDays(); days == nil || *days != 0 {
@@ -281,7 +288,7 @@ func configureLine(cmd *cobra.Command) string {
 	if doctorAuthURL == "" {
 		parts = append(parts, "--auth-url https://<your domain>")
 	}
-	for _, name := range []string{"auth-url", "proxy", "postgres-host", "registry", "central-url", "mtls-domain", "central-mtls-domain", "central-domain"} {
+	for _, name := range []string{"auth-url", "proxy", "postgres-host", "postgres-ca", "registry", "central-url", "mtls-domain", "central-mtls-domain", "central-domain"} {
 		f := cmd.Flags().Lookup(name)
 		if f == nil || !cmd.Flags().Changed(name) || f.Value.String() == "" {
 			continue

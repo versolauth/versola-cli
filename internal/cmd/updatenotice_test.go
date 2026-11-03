@@ -138,6 +138,13 @@ func newNoticeEnv(t *testing.T, apiStatus int, latest string) *noticeEnv {
 	outputIsInteractive = func() bool { return true }
 	updateNow = func() time.Time { return e.now }
 	version = "0.3.2"
+	// The gate reads the environment: CI (set on GitHub Actions) and the
+	// opt-out (set on some developer machines) would close it for every test.
+	t.Setenv("CI", "")
+	t.Setenv(noUpdateNotifierEnv, "")
+	if err := os.Unsetenv(noUpdateNotifierEnv); err != nil { // "set to empty" counts as set
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		updateCachePath, outputIsInteractive, updateNow, version = oldPath, oldTTY, oldNow, oldVer
 	})

@@ -489,6 +489,18 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 	}
 
+	// A Postgres of the customer's own: can the services reach it the way they
+	// will? A TLS problem stops here, before migrate and `up`, instead of
+	// becoming a crash loop; anything the probe merely could not tell is said
+	// and configure goes on. The role of the first configure cannot log in yet.
+	if target == "vps" && pg.Mode != PostgresModeBundled {
+		p := ProbeConfiguredPostgres(dir, newPgPassword != "")
+		if p.Kind == PgProbeFail {
+			return ConfigureResult{}, fmt.Errorf("the Postgres at %s: %s. No service was started and the previous deployment is untouched; fix this and run configure again (the role SQL printed above, or `versola postgres init`, still applies)", postgresHost, p.Detail)
+		}
+		fmt.Println("Postgres: " + p.Detail)
+	}
+
 	// versola-tools writes the compose file under a "fragment" name and
 	// this step renames it, so a half-written or failed generation never
 	// leaves behind something the later steps would happily treat as a

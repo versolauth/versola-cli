@@ -208,10 +208,17 @@ func TestPostgresSummary(t *testing.T) {
 }
 
 func TestForgottenPostgresPasswordNote(t *testing.T) {
-	note := forgottenPostgresPasswordNote("versola_app", "/home/u/.versola/active")
-	for _, want := range []string{PostgresVolumeName(), "versola_app", "versola-postgres-vps", "auth.secrets.env"} {
+	note := forgottenPostgresPasswordNote("versola_app")
+	// Ends with a versola command: no raw docker command (CLAUDE.md, "Product
+	// priority"), and no file or value that would put the password on a command line.
+	for _, want := range []string{PostgresVolumeName(), "versola_app", "versola uninstall --purge"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("the note does not mention %q:\n%s", want, note)
+		}
+	}
+	for _, bad := range []string{"docker", "psql", "POSTGRES_PASSWORD", "auth.secrets.env"} {
+		if strings.Contains(note, bad) {
+			t.Errorf("the note still mentions %q:\n%s", bad, note)
 		}
 	}
 }

@@ -459,7 +459,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		// The password is stored by now: the next configure sees it as already
 		// there and says nothing, so this is the one time to say it.
 		if pg.Mode == PostgresModeBundled && pgDataExisted && newPgPassword != "" {
-			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir), dir))
+			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir)))
 		}
 		return ConfigureResult{}, err
 	}
@@ -481,7 +481,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 		}
 		if pgDataExisted && newPgPassword != "" {
 			pgPasswordMismatch = true
-			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir), dir))
+			fmt.Print("\n" + forgottenPostgresPasswordNote(postgresUser(dir)))
 		}
 	} else if newPgPassword != "" {
 		if pgRoleScript, err = announcePostgresRole(os.Stdout, dir, target, newPgPassword); err != nil {

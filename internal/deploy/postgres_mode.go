@@ -299,16 +299,22 @@ func postgresCheckOf(mode, host string, err error, bundledPort func() checks.Res
 // password for the role while the data volume of an earlier one is still
 // there: the data directory keeps the role it was created with, so the
 // services would be refused. Nothing is changed: the volume is the data.
-func forgottenPostgresPasswordNote(role, dir string) string {
+//
+// It ends with a versola command, never a docker one: the way out is a fresh
+// start (`uninstall --purge`), because what the volume holds was encrypted with
+// keys of the OpenBao that is gone. Setting the role's password inside the
+// volume would only give the services a database they cannot read.
+func forgottenPostgresPasswordNote(role string) string {
 	return fmt.Sprintf(`Postgres: the data volume %s already exists, and this configure generated a new
-password for the role %q (the OpenBao it reads is new). If a Postgres was initialised in
-that volume, it still has the old password, and the services will be refused until
-the role is given the new one:
+password for the role %q (the OpenBao it reads is new). A Postgres initialised in that
+volume still has the old password, so the services will be refused.
 
-  docker exec -it %s psql -U %s -d postgres -c '\password %s'
+What the volume holds was encrypted with keys of the old OpenBao. Unless you can bring that
+OpenBao back (its volume and the vps files in ~/.versola/openbao), it can no longer be read:
+to start over from scratch, which destroys the volume, run
 
-and enter the POSTGRES_PASSWORD from %s (it is also in OpenBao). The container has
-to be running for that, which `+"`versola up`"+` does once this configure has finished (the services
-will be refused until the role has the new password). Nothing in the volume was changed.
-`, bundledPostgresVolume, role, bundledPostgresContainer, role, role, filepath.Join(dir, "auth.secrets.env"))
+  versola uninstall --purge
+
+Nothing in the volume was changed by this configure.
+`, bundledPostgresVolume, role)
 }

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Credentials are what this machine uses to authenticate to one target's
@@ -116,6 +117,33 @@ func TargetFiles(target string) ([]string, error) {
 	var out []string
 	for _, suffix := range []string{".json", "-admin.json", "-postgres-role.sql", "-postgres-init.sql"} {
 		out = append(out, filepath.Join(dir, target+suffix))
+	}
+	return out, nil
+}
+
+// LeftoverTempFiles lists the `.tmp-*` files an atomic write (atomicWriteFile
+// here, fsutil.WriteFileAtomic) left in ~/.versola/openbao because the process
+// was killed between writing and renaming. Such a file can be a partial copy of
+// a credentials file, so `uninstall --purge` removes them with the target's
+// files. Full paths only: nothing is read. Like TargetFiles it never creates
+// the directory, and a missing one is no files.
+func LeftoverTempFiles() ([]string, error) {
+	dir, err := credentialsDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("couldn't list %s: %w", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), ".tmp-") {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
 	}
 	return out, nil
 }

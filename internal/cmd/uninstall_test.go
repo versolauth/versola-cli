@@ -28,6 +28,7 @@ type uninstallCase struct {
 	stopped   []string     // containers that exist but are not running
 	project   []string     // containers of the vps compose project (running if also in running)
 	tmpFiles  bool         // leave a cut-off atomic write (.tmp-*) in ~/.versola/openbao
+	pending   bool         // the note of an unfinished first install of vps, in ~/.versola/active
 	rmFails   string       // a volume whose `docker volume rm` fails
 	volumeErr string       // a volume Docker cannot be asked about
 	dockerOff bool
@@ -62,6 +63,11 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 			t.Fatal(err)
 		}
 		if err := c.st.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.pending {
+		if err := state.SavePending(state.Pending{Target: "vps", SecretsRevision: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -524,5 +530,55 @@ func TestStateDirErrorEndsWithTheCommand(t *testing.T) {
 	}
 	if strings.Contains(msg, "docker") {
 		t.Errorf("a raw docker command in the message: %s", msg)
+	}
+}
+
+// The customer's path after a failed first `configure vps`: a plain uninstall
+// leaves the note of the unfinished install (no record, OpenBao's volume kept),
+// so the next configure resumes instead of refusing with unknown-state.
+func TestUninstallKeepsTheNoteOfAnUnfinishedFirstInstall(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{volumes: allVol, pending: true, yes: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	note, err := state.LoadPending()
+	if err != nil || note == nil || note.Target != "vps" {
+		t.Fatalf("the note is gone after uninstall: %v, %v", note, err)
+	}
+	if _, err := state.Load(); !errors.Is(err, state.ErrNotConfigured) {
+		t.Errorf("uninstall left something that reads as a deployment: %v", err)
+	}
+	if !r.volumes[obVol] {
+		t.Errorf("OpenBao's volume must stay on vps: %v", r.calls)
+	}
+	if !strings.Contains(r.out, "Kept: the note of the unfinished first install") {
+		t.Errorf("the customer is not told:\n%s", r.out)
+	}
+}
+
+// A note beside a record is what a finished install leaves when removing it
+// failed: a live deployment must read as unknown once its record is lost, so
+// uninstall removes the note with the record.
+func TestUninstallDropsTheNoteOfAFinishedInstall(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, pending: true, yes: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if note, err := state.LoadPending(); err != nil || note != nil {
+		t.Errorf("the note outlived a recorded install: %v, %v", note, err)
+	}
+	if strings.Contains(r.out, "Kept: the note") {
+		t.Errorf("says it kept a note it dropped:\n%s", r.out)
+	}
+}
+
+// --purge is a fresh start: nothing of the unfinished install stays.
+func TestUninstallPurgeDropsTheNote(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{volumes: allVol, files: true, pending: true, answer: "vps\n", purge: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if note, err := state.LoadPending(); err != nil || note != nil {
+		t.Errorf("the note survived --purge: %v, %v", note, err)
 	}
 }

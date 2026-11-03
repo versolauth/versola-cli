@@ -625,7 +625,7 @@ Typical problems:
 | `lost` | a first-install-only secret is missing though the deployment exists | restore it from a backup; a new one would make existing data unreadable |
 | `group-partial` | part of a key group (e.g. a JWT key pair) is present | restore the missing half, or use `--generate-missing` if the data is expendable |
 | `vault-empty-with-state` | this machine has a record, OpenBao is empty | check that you point at the right OpenBao; restore it |
-| `unknown-state` | OpenBao has secrets, this machine has no record | starting over after a failed attempt (usually a plain `uninstall` kept OpenBao's volume): `versola uninstall --purge`, then configure again. A server that ran Versola and lost `~/.versola`: do **not** purge, the keys protect live data; restore the missing secrets, or `--generate-missing` if they are gone for good. The plan prints both, once |
+| `unknown-state` | OpenBao has secrets, this machine has no record | starting over after a failed attempt (after a failed first install a plain `uninstall` keeps the note that lets `configure` resume it, so this is rarer than it was): `versola uninstall --purge`, then configure again. A server that ran Versola and lost `~/.versola`: do **not** purge, the keys protect live data; restore the missing secrets, or `--generate-missing` if they are gone for good. The plan prints both, once |
 | `external-missing` | a secret you must supply is absent | write it to OpenBao yourself |
 
 #### `--generate-missing NAME[,NAME...]`
@@ -1769,6 +1769,15 @@ If a deployment was recorded but Docker isn't reachable to confirm it's
 actually stopped, `~/.versola` is deliberately left in place rather than
 cleared — deleting it there would remove the only way to properly stop
 that deployment once Docker is reachable again.
+
+After a failed first install (`configure` began writing secrets and did not
+finish: no deployment record, only the note `secrets-pending.json`) a plain
+`uninstall` keeps that note, so `versola configure vps ...` afterwards resumes the
+install instead of refusing with `unknown-state`; `uninstall --purge` is for a
+real fresh start and removes the note with the rest. The note is kept only when
+this machine has no record at all: beside a record it is a leftover of a
+finished install and is removed, so a live server whose record is lost still
+reads as `unknown`.
 
 Removing `~/.versola/active` is the last step. If it fails on a permission
 error (Docker made a file there as root: a bundle written by an older version

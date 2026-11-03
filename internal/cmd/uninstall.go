@@ -282,10 +282,28 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	// (--postgres-host): the purge makes what Versola stored there unreadable,
 	// and says so even if a bundled volume from an earlier attempt is here too.
 	ownPostgres := false
-	if st, loadErr := state.Load(); loadErr == nil {
+	st, loadErr := state.Load()
+	if loadErr == nil {
 		target = st.Target
 		registry = st.ImageRegistry
 		ownPostgres = st.Target == "vps" && st.PostgresMode != deploy.PostgresModeBundled
+	}
+
+	// A first install that began writing secrets and never finished leaves a
+	// note (state.Pending) and no record: `configure` resumes it. The note lives
+	// in the directory removed below, so it is read now and put back after.
+	// Only when this machine has NO record at all (anything but "nothing
+	// configured" counts as one, an unreadable record included): a note beside a
+	// record is a leftover of a finished install, and a live deployment whose
+	// record is lost must read as `unknown`, not as an install to resume --
+	// configure only writes the note for a first install proper (see
+	// settleSecrets), never for a store of unknown origin. --purge starts over,
+	// so it keeps nothing.
+	var unfinished *state.Pending
+	if !uninstallPurge && errors.Is(loadErr, state.ErrNotConfigured) {
+		if note, err := state.LoadPending(); err == nil && note != nil {
+			unfinished = note
+		}
 	}
 
 	// --purge is about vps only. With no record at all it still applies: the
@@ -421,6 +439,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  - (keeping %s — Docker isn't reachable, so there's no way to confirm the stack is actually stopped)\n", stateDir)
 		} else {
 			fmt.Printf("  - %s\n", stateDir)
+			if unfinished != nil {
+				fmt.Println("    (except the note of an unfinished first install, so that `versola configure` can resume it)")
+			}
 		}
 	}
 	if uninstallPurge {
@@ -562,9 +583,21 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 
 	if dirExists && !keepDirForLaterCleanup {
 		fmt.Printf("Removing %s...\n", stateDir)
-		if err := os.RemoveAll(stateDir); err != nil {
+		rmErr := os.RemoveAll(stateDir)
+		keptNote := false
+		if unfinished != nil {
+			if err := state.SavePending(*unfinished); err != nil {
+				fmt.Printf("(couldn't keep the note of the unfinished install: %v -- `versola uninstall --purge` starts over from scratch)\n", err)
+			} else {
+				keptNote = true
+			}
+		}
+		if rmErr != nil {
 			printKeptVolumes(kept)
-			return stateDirError(stateDir, err)
+			return stateDirError(stateDir, rmErr)
+		}
+		if keptNote {
+			fmt.Println("\nKept: the note of the unfinished first install. `versola configure vps ...` resumes it; `versola uninstall --purge` starts over from scratch.")
 		}
 	}
 

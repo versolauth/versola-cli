@@ -35,8 +35,14 @@ func Run(args []string, stderr io.Writer) int {
 	prepareExit()
 	args = rewriteHelpAll(args)
 	rootCmd.SetArgs(args)
+	pendingUpdateCheck = nil
 	called, err := rootCmd.ExecuteC()
 	if err == nil {
+		// After the command's own output, on success only (see updatenotice.go).
+		if pendingUpdateCheck != nil {
+			pendingUpdateCheck.finish(stderr)
+			pendingUpdateCheck = nil
+		}
 		return exitcode.OK
 	}
 	_, _, findErr := rootCmd.Find(args)

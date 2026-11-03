@@ -1768,11 +1768,67 @@ so you can remove it yourself.
 
 ### `upgrade`
 
-Checks the latest versola-cli release on GitHub and, if it's different
-from this binary's version, downloads it — verified against that
-release's published `checksums.txt`, the same way install.sh/install.ps1
-verify their own downloads — and replaces the running executable in
-place. Prompts for confirmation first — pass `-y`/`--yes` to skip that.
+```
+versola upgrade                  # update to the latest release
+versola upgrade --check          # only say whether a newer release exists
+versola upgrade --check --json   # the same for scripts
+versola upgrade --version 0.3.3  # install exactly this release
+```
+
+Checks the latest versola-cli release on GitHub and, if it's newer than
+this binary's version, downloads it — verified against that release's
+published `checksums.txt`, the same way install.sh/install.ps1 verify
+their own downloads — and replaces the running executable in place.
+Prompts for confirmation first — pass `-y`/`--yes` to skip that. A binary
+that is already ahead of the latest release (a pre-release, say) is not
+offered a "downgrade": it says so and stops.
+
+`--check` changes nothing. It prints `versola-cli 0.3.3 is available (you
+have 0.3.2): run versola upgrade`, or `versola-cli 0.3.2 is current`, and
+exits 0 in both cases (a script reads the answer, not the code); it exits 1
+only when GitHub can't be reached. With `--json` it prints one object on
+stdout, `{"current": "0.3.2", "latest": "0.3.3", "upToDate": false}`;
+`--json` goes with `--check` only (exit code 2 otherwise). On a `dev`
+build `upToDate` is always `false`.
+
+`--version <release>` installs exactly that release instead of the latest
+(`0.3.3`; a leading `v` is accepted and dropped). It takes the same
+download, checksum check and confirmation as a plain `upgrade`, without
+asking GitHub which release is the latest. A pre-release (`0.4.0-rc1`) is
+installed too, with a warning. A release older than the running binary is
+installed after a warning that a newer versola-cli may have written
+deployment state (`~/.versola/active`) an older one can't read (it stops
+with a "newer schema" error, see "Upgrading the CLI" above). What isn't a
+version (`latest`, a path, anything but `X.Y.Z` or `X.Y.Z-pre`) is refused
+with exit code 2 before anything is downloaded; a release that doesn't exist says so and points at the
+releases page. `--check` and `--version` don't go together (exit code 2).
+There is no channel flag: builds of the team's staging are installed with
+`--version`.
+
+#### The daily notice
+
+Once a day, any command run in a terminal asks GitHub (one request, 2
+seconds at most) whether a newer versola-cli exists, and if one does, prints
+one line to **stderr**, after the command's own output and only if the
+command succeeded:
+
+```
+A newer versola-cli is available: 0.3.3 (you have 0.3.2). Run versola upgrade.
+```
+
+It never replaces the binary: only `versola upgrade` does. It is never
+printed, and GitHub is never asked, for `version`, `upgrade`, `help`,
+`completion`, `uninstall` (`--purge` removes `~/.versola`, which the cache would recreate), `--json` output, a `dev` build, when stdout or stderr is not a
+terminal, or when `CI` is set. `VERSOLA_NO_UPDATE_NOTIFIER` set to any value
+(even empty) turns it off. The lookup starts before the command runs, so a
+long command such as `bootstrap` has the answer by its end and a short one
+waits for it at most to the 2-second budget; a lookup that fails (no
+internet, GitHub down) is silent, doesn't fail the command, and counts as
+done for the day, so a server without outbound access loses the 2 seconds
+once a day, not on every command. The line is shown at most once every 24
+hours, not on every command until you upgrade. The cache is
+`~/.versola/update-check.json` (`checkedAt`, `latest`, `notifiedAt`; no
+secrets, mode 0600); deleting it only means one more lookup.
 
 Deliberately implemented with no new dependencies: it reuses the same
 GitHub API endpoint and checksums.txt convention the install scripts

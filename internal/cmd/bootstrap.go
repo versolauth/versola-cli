@@ -215,7 +215,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 		// An error, not nil: the deployment isn't up yet, and a script
 		// running bootstrap must be able to tell that from its exit code.
 		if res.PostgresRoleScript == "" {
-			return fmt.Errorf("stopped before migrate: set the Postgres role's password as said above (or let `versola postgres init` create the role, the database and the schemas), then run `versola migrate` and `versola up`")
+			return fmt.Errorf("stopped before migrate: the Postgres role does not have the password configure just generated (see above). With a Postgres in a container, `versola uninstall --purge` starts over from scratch; with your own (--postgres-host), `versola postgres init` creates the role, the database and the schemas. Then run `versola bootstrap` again, or `versola migrate` and `versola up`")
 		}
 		return fmt.Errorf("stopped before migrate: set the Postgres role's password by feeding %s to psql as the Postgres superuser (see above), or let `versola postgres init` create the role, the database and the schemas, then run `versola migrate` and `versola up`", res.PostgresRoleScript)
 	}

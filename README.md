@@ -704,8 +704,10 @@ stops the container from starting). Nothing in this mode is done by hand:
   `uninstall` and a redeploy leave it alone, and `configure` and `up`
   create it if it is missing. If the volume already holds a Postgres from an
   earlier deployment and this `configure` generated a new password (a new
-  OpenBao), it says so and how to give the role the new one: the database
-  keeps the password it was created with.
+  OpenBao), it says so and ends with the command that starts over,
+  `versola uninstall --purge`: the database keeps the password it was
+  created with, and what it holds was encrypted with the keys of the OpenBao
+  that is gone. No `docker` command is asked of you.
 - **Where the data is** is in `versola status`: the volume
   `versola-postgres-data-vps` and where Docker keeps it on the server
   (`Postgres: in a container of this deployment, ...; data in the Docker volume ...`).
@@ -1727,13 +1729,20 @@ On top of the above it destroys, after listing them by name:
 - the bundled Postgres volume: the database (users, clients, sessions);
 - this machine's OpenBao files for vps in `~/.versola/openbao`: `vps.json`
   (AppRole), `vps-admin.json` (root token and unseal key),
-  `vps-postgres-role.sql`, `vps-postgres-init.sql`. Other targets' files stay.
+  `vps-postgres-role.sql`, `vps-postgres-init.sql`. Other targets' files stay;
+- any `.tmp-*` file in that directory: what a write cut off before its rename
+  leaves, possibly a partial copy of a credentials file (named, never read).
 
-The list also names Versola's vps OpenBao and Postgres containers, which are
-removed first, running or stopped (a stopped one still holds its volume). If
-one is running and this machine has no deployment record, it warns before
-the question: that is also what a live server whose `~/.versola` was lost
-looks like. If Docker cannot say whether a volume exists, nothing is removed.
+The list also names Versola's vps containers, which are removed first,
+running or stopped (a stopped one still holds its volume): OpenBao's and
+Postgres', and every container of the vps compose project (`versola-vps`:
+auth, central, the proxy). The latter matter when a plain `uninstall` already
+removed the deployment record: with no compose file to `down` them, the
+services of the earlier run would stay up and hold the ports the next `up`
+needs. If one is running and this machine has no deployment record, it warns
+before the question: that is also what a live server whose `~/.versola` was
+lost looks like. If Docker cannot say whether a volume or a container exists,
+nothing is removed.
 
 Only what exists is listed and removed. It asks you to **type `vps`**; any other
 answer aborts with an error (exit code 4) and removes nothing, and `--yes` does not answer
@@ -1760,6 +1769,12 @@ If a deployment was recorded but Docker isn't reachable to confirm it's
 actually stopped, `~/.versola` is deliberately left in place rather than
 cleared — deleting it there would remove the only way to properly stop
 that deployment once Docker is reachable again.
+
+Removing `~/.versola/active` is the last step. If it fails on a permission
+error (Docker made a file there as root: a bundle written by an older version
+mounted a file that did not exist yet, and Docker made a directory of it), the
+error says the stack, volumes and images are already removed and ends with
+`sudo rm -rf '<path>'`, the one command that finishes it.
 
 Does **not** remove the `versola` binary itself or its PATH entry;
 safely deleting a program's own running executable isn't portable across

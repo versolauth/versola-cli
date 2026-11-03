@@ -3,8 +3,10 @@ package cmd
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,6 +26,8 @@ type uninstallCase struct {
 	files     bool         // create the vps files in ~/.versola/openbao
 	running   []string     // containers IsRunning reports as running
 	stopped   []string     // containers that exist but are not running
+	project   []string     // containers of the vps compose project (running if also in running)
+	tmpFiles  bool         // leave a cut-off atomic write (.tmp-*) in ~/.versola/openbao
 	rmFails   string       // a volume whose `docker volume rm` fails
 	volumeErr string       // a volume Docker cannot be asked about
 	dockerOff bool
@@ -73,6 +77,16 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 		}
 	}
 
+	if c.tmpFiles {
+		dir := filepath.Join(home, ".versola", "openbao")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".tmp-123456"), []byte(fileSecret), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	res := uninstallResult{volumes: map[string]bool{}, home: home}
 	for _, v := range c.volumes {
 		res.volumes[v] = true
@@ -82,6 +96,9 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 		running[r], exists[r] = true, true
 	}
 	for _, r := range c.stopped {
+		exists[r] = true
+	}
+	for _, r := range c.project {
 		exists[r] = true
 	}
 
@@ -102,7 +119,7 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 	}()
 
 	oldIn, oldOut := os.Stdin, os.Stdout
-	oldUp, oldDocker, oldImages, oldRunning, oldVol, oldExists := uninstallDockerUp, uninstallDocker, uninstallImages, uninstallIsRunning, uninstallVolumeExists, uninstallContainerExists
+	oldUp, oldDocker, oldImages, oldRunning, oldVol, oldExists, oldProject := uninstallDockerUp, uninstallDocker, uninstallImages, uninstallIsRunning, uninstallVolumeExists, uninstallContainerExists, uninstallProjectContainers
 	oldYes, oldPurge := assumeYes, uninstallPurge
 	os.Stdin, os.Stdout = r, outW
 	uninstallDockerUp = func() bool { return !c.dockerOff }
@@ -115,6 +132,18 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 		return res.volumes[name], nil
 	}
 	uninstallContainerExists = func(name string) (bool, error) { return exists[name], nil }
+	uninstallProjectContainers = func(project string) ([]string, error) {
+		if project != deploy.VpsComposeProject {
+			t.Errorf("asked for the containers of project %q", project)
+		}
+		var out []string
+		for _, n := range c.project {
+			if exists[n] {
+				out = append(out, n)
+			}
+		}
+		return out, nil
+	}
 	uninstallDocker = func(args ...string) error {
 		res.calls = append(res.calls, args)
 		if len(args) == 3 && args[0] == "rm" && args[1] == "-f" {
@@ -132,7 +161,7 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 	assumeYes, uninstallPurge = c.yes, c.purge
 	defer func() {
 		os.Stdin, os.Stdout = oldIn, oldOut
-		uninstallDockerUp, uninstallDocker, uninstallImages, uninstallIsRunning, uninstallVolumeExists, uninstallContainerExists = oldUp, oldDocker, oldImages, oldRunning, oldVol, oldExists
+		uninstallDockerUp, uninstallDocker, uninstallImages, uninstallIsRunning, uninstallVolumeExists, uninstallContainerExists, uninstallProjectContainers = oldUp, oldDocker, oldImages, oldRunning, oldVol, oldExists, oldProject
 		assumeYes, uninstallPurge = oldYes, oldPurge
 		r.Close()
 	}()
@@ -415,5 +444,85 @@ func TestUninstallRefusalExitsAbortedWithoutRemovingAnything(t *testing.T) {
 				t.Error("refusal removed credentials")
 			}
 		})
+	}
+}
+
+// A plain uninstall already removed the record, but the services of the run
+// before it are still up and hold the ports: with no compose file to `down`
+// them, the purge finds them by the project label, lists them in the question
+// and removes them before the volumes they use.
+func TestUninstallPurgeStopsServicesOfAnEarlierRunWithoutRecord(t *testing.T) {
+	auth, proxyC := "versola-auth-1", "versola-proxy"
+	r := runUninstallCase(t, uninstallCase{volumes: allVol, running: []string{auth, proxyC}, project: []string{auth, proxyC}, answer: "vps\n", purge: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	q := strings.Index(r.out, "Type \"vps\"")
+	for _, c := range []string{auth, proxyC} {
+		if i := strings.Index(r.out, "container "+c+" (RUNNING"); i < 0 || i > q {
+			t.Errorf("%s not named before the question:\n%s", c, r.out)
+		}
+		rm, vol := r.callIndex("rm", "-f", c), r.callIndex("volume", "rm", obVol)
+		if rm < 0 || vol < 0 || rm > vol {
+			t.Errorf("%s not removed before the volumes: %v", c, r.calls)
+		}
+	}
+}
+
+// Only the purge looks for them: a plain uninstall of a vps record leaves
+// containers it has no business with alone.
+func TestUninstallWithoutPurgeDoesNotTouchProjectContainers(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{volumes: allVol, running: []string{"versola-auth-1"}, project: []string{"versola-auth-1"}, yes: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if r.callIndex("rm", "-f", "versola-auth-1") >= 0 {
+		t.Errorf("a plain uninstall removed a container: %v", r.calls)
+	}
+}
+
+// A write cut off before its rename leaves .tmp-* beside the credentials, maybe
+// a partial copy of one: the purge lists it by name, removes it, and never
+// prints what is in it (runUninstallCase fails on that).
+func TestUninstallPurgeRemovesCutOffWrites(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{volumes: allVol, files: true, tmpFiles: true, answer: "vps\n", purge: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if !strings.Contains(r.out, ".tmp-123456") {
+		t.Errorf("the leftover is not named:\n%s", r.out)
+	}
+	if r.fileExists(".tmp-123456") {
+		t.Error("the leftover is still there")
+	}
+	if !r.fileExists("local.json") {
+		t.Error("another target's file was removed")
+	}
+}
+
+// A leftover alone is something to purge: it is not "nothing more to destroy".
+func TestUninstallPurgeCountsCutOffWritesAsSomethingToRemove(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{tmpFiles: true, answer: "vps\n", purge: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if r.fileExists(".tmp-123456") {
+		t.Error("the leftover is still there")
+	}
+}
+
+// What is left of ~/.versola/active after the rest is done: the customer gets
+// the one command that finishes it, and is told nothing else remains.
+func TestStateDirErrorEndsWithTheCommand(t *testing.T) {
+	err := stateDirError("/home/u/.versola/active", &os.PathError{Op: "unlinkat", Path: "/home/u/.versola/active/bundle-1/x.sh", Err: fs.ErrPermission})
+	msg := err.Error()
+	if !strings.Contains(msg, "already removed") {
+		t.Errorf("does not say the rest is done: %s", msg)
+	}
+	if runtime.GOOS != "windows" && !strings.Contains(msg, "sudo rm -rf '/home/u/.versola/active'") {
+		t.Errorf("does not end with the command: %s", msg)
+	}
+	if strings.Contains(msg, "docker") {
+		t.Errorf("a raw docker command in the message: %s", msg)
 	}
 }

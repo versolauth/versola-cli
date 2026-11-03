@@ -98,6 +98,14 @@ func OpenbaoVolumeName(target string) string {
 	return "versola-openbao-file-local"
 }
 
+// VpsComposeProject is the compose project name of versola-tools' vps file
+// (its `name:`, docker/versola-tools/compose.fragment.vps.yml.template in the
+// versola repository; the topology fixture compose-vps.json has it too), the label every Versola vps container carries
+// (com.docker.compose.project), the proxy's included. `uninstall --purge` finds
+// containers of an earlier run by it when this machine has no record of the
+// deployment to `down`.
+const VpsComposeProject = "versola-vps"
+
 // OpenbaoContainerName returns the target-specific container_name of
 // versola-tools' openbao service (see compose.fragment.yml.template's
 // own comment on why -- same "shared name across targets" risk

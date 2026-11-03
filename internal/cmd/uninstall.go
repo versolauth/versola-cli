@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -34,6 +36,22 @@ var (
 	uninstallContainerExists = func(name string) (bool, error) {
 		_, found, err := docker.Inspect(name, "{{.Name}}")
 		return found, err
+	}
+	// uninstallProjectContainers lists every container (running or not) of a
+	// compose project by its label. An error is Docker failing to answer, which
+	// the purge must not read as "no containers".
+	uninstallProjectContainers = func(project string) ([]string, error) {
+		out, err := docker.Output("ps", "--all", "--filter", "label=com.docker.compose.project="+project, "--format", "{{.Names}}")
+		if err != nil {
+			return nil, fmt.Errorf("couldn't ask Docker for the containers of the project %s: %w", project, err)
+		}
+		var names []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if name := strings.TrimSpace(line); name != "" {
+				names = append(names, name)
+			}
+		}
+		return names, nil
 	}
 	// uninstallVolumeExists lists volumes by name rather than inspecting one:
 	// an empty answer is "no such volume", and an error is only ever Docker
@@ -121,7 +139,30 @@ type purgeSet struct {
 }
 
 func (p purgeSet) empty() bool {
-	return !p.openbaoVolume && !p.postgresVolume && len(p.files) == 0
+	return !p.openbaoVolume && !p.postgresVolume && len(p.files) == 0 && len(p.containers) == 0
+}
+
+// vpsContainers lists Versola's vps containers that may hold what the purge
+// destroys or the ports the next `up` needs, running or not: those of the vps
+// compose project (auth, central, the proxy, ...: with no deployment record
+// there is no compose file to `down` them with) and the OpenBao and Postgres
+// containers, which may exist without the project (OpenBao is started before
+// the first configure finishes). Services come first: they use the others.
+func vpsContainers() ([]string, error) {
+	names, err := uninstallProjectContainers(deploy.VpsComposeProject)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{deploy.OpenbaoContainerName("vps"), deploy.PostgresContainerName()} {
+		exists, err := uninstallContainerExists(name)
+		if err != nil {
+			return nil, err
+		}
+		if exists && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func findPurgeSet() (purgeSet, error) {
@@ -135,15 +176,10 @@ func findPurgeSet() (purgeSet, error) {
 	if p.postgresVolume, err = uninstallVolumeExists(deploy.PostgresVolumeName()); err != nil {
 		return p, fmt.Errorf("%w\nNothing was removed", err)
 	}
-	for _, name := range []string{deploy.OpenbaoContainerName("vps"), deploy.PostgresContainerName()} {
-		exists, err := uninstallContainerExists(name)
-		if err != nil {
-			return p, fmt.Errorf("%w\nNothing was removed", err)
-		}
-		if !exists {
-			continue
-		}
-		p.containers = append(p.containers, name)
+	if p.containers, err = vpsContainers(); err != nil {
+		return p, fmt.Errorf("%w\nNothing was removed", err)
+	}
+	for _, name := range p.containers {
 		if running, err := uninstallIsRunning(name); err == nil && running {
 			p.running = append(p.running, name)
 		}
@@ -165,6 +201,13 @@ func findPurgeSet() (purgeSet, error) {
 			return p, fmt.Errorf("couldn't check %s: %w", f, err)
 		}
 	}
+	// What a write cut off before its rename left beside them: possibly a
+	// partial copy of a credentials file. Listed by name like the rest.
+	leftovers, err := openbao.LeftoverTempFiles()
+	if err != nil {
+		return p, fmt.Errorf("%w\nNothing was removed", err)
+	}
+	p.files = append(p.files, leftovers...)
 	return p, nil
 }
 
@@ -520,7 +563,8 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	if dirExists && !keepDirForLaterCleanup {
 		fmt.Printf("Removing %s...\n", stateDir)
 		if err := os.RemoveAll(stateDir); err != nil {
-			return fmt.Errorf("couldn't remove %s: %w", stateDir, err)
+			printKeptVolumes(kept)
+			return stateDirError(stateDir, err)
 		}
 	}
 
@@ -535,6 +579,18 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// stateDirError is the failure of removing ~/.versola/active, which is the
+// last step: everything else is already done by then. A permission error there
+// is what files Docker made as root leave (a bind-mount source that did not
+// exist when the stack started, in a bundle of an older version): the customer
+// is told the one command that finishes it, not left with a bare error.
+func stateDirError(dir string, err error) error {
+	if errors.Is(err, fs.ErrPermission) && runtime.GOOS != "windows" {
+		return fmt.Errorf("couldn't remove %s: %w\nThe stack, its volumes and images are already removed; only this directory is left. Some of its files belong to root (Docker created them). Remove it with:\n  sudo rm -rf '%s'", dir, err, strings.ReplaceAll(dir, "'", `'\''`))
+	}
+	return fmt.Errorf("couldn't remove %s: %w\nThe stack, its volumes and images are already removed; only this directory is left: remove it by hand", dir, err)
+}
+
 // runPurge destroys what p lists, in an order that never leaves OpenBao's
 // secrets without the credentials to open them: OpenBao's volume first, and
 // the credential files only once it is gone. A failure stops there with
@@ -543,17 +599,16 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 func runPurge(p purgeSet) error {
 	// A container holds its volume even when stopped (a reboot after a failed
 	// first attempt leaves OpenBao's like that), and `docker volume rm` then
-	// fails: the orphan loop above only removes running ones. Both of
-	// Versola's vps containers whose volumes are destroyed here go first,
-	// running or not; with nothing destroyed yet, a failure is safe to rerun.
-	for _, name := range []string{deploy.OpenbaoContainerName("vps"), deploy.PostgresContainerName()} {
-		exists, err := uninstallContainerExists(name)
-		if err != nil {
-			return fmt.Errorf("%w\nNothing was destroyed: run `versola uninstall --purge` again once Docker answers", err)
-		}
-		if !exists {
-			continue
-		}
+	// fails: the orphan loop above only removes running ones. All of Versola's
+	// vps containers go first, running or not (the services of an earlier run
+	// too, which hold the ports the next `up` needs); with nothing destroyed
+	// yet, a failure is safe to rerun. Looked at again: `down` may have removed
+	// some since the question.
+	names, err := vpsContainers()
+	if err != nil {
+		return fmt.Errorf("%w\nNothing was destroyed: run `versola uninstall --purge` again once Docker answers", err)
+	}
+	for _, name := range names {
 		fmt.Printf("Removing container %s...\n", name)
 		if err := uninstallDocker("rm", "-f", name); err != nil {
 			return fmt.Errorf("couldn't remove the container %s: %w\nNothing was destroyed: run `versola uninstall --purge` again", name, err)

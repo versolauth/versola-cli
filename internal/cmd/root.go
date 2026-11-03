@@ -30,6 +30,12 @@ released version of the Versola stack using Docker.`,
 	// for either, and a support question always starts with "what version
 	// are you on?".
 	Version: version,
+	// Starts the daily lookup behind the "a newer versola-cli is available"
+	// notice (updatenotice.go). No command defines a PersistentPreRun of its
+	// own, which would shadow this one.
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		pendingUpdateCheck = startUpdateCheck(cmd)
+	},
 }
 
 // Command groups of `versola --help`, in the order a new customer meets

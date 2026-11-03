@@ -3,6 +3,8 @@ package cmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/exitcode"
-	"github.com/versolauth/versola-cli/internal/release"
 )
 
 // upgradeRepo is versola-cli's own repository -- not to be confused with
@@ -23,16 +24,35 @@ import (
 // This command only ever touches the CLI binary itself.
 const upgradeRepo = "versolauth/versola-cli"
 
-var upgradeAssumeYes bool
+var (
+	upgradeAssumeYes bool
+	upgradeCheck     bool
+	upgradeJSON      bool
+	upgradeVersion   string
+)
+
+// upgradeDownloadHost is where release binaries are downloaded from; tests point it at an httptest server.
+var upgradeDownloadHost = "https://github.com"
 
 var upgradeCmd = &cobra.Command{
 	Use:     "upgrade",
 	GroupID: groupUpgrade,
-	Short:   "Update versola-cli to the latest release",
-	Long: `upgrade checks the latest versola-cli release on GitHub, and if it's
-different from this binary's version, downloads it (verified against
-that release's published checksums.txt, same as install.sh/install.ps1
-do) and replaces the running executable in place.
+	Short:   "Update versola-cli to the latest (or a given) release",
+	Long: `upgrade checks the latest versola-cli release on GitHub, and if this
+binary is older, downloads it (verified against that release's published
+checksums.txt, same as install.sh/install.ps1 do) and replaces the running
+executable in place. It never runs by itself: the only thing that happens
+without you asking is a one-line notice, at most once a day, that a newer
+release exists.
+
+  versola upgrade                  update to the latest release
+  versola upgrade --check          only say whether a newer release exists
+  versola upgrade --check --json   the same for scripts: {current, latest, upToDate}
+  versola upgrade --version 0.3.3  install exactly this release (a pre-release too)
+
+The notice is printed to stderr after a command that succeeded, only in a
+terminal, never with --json, and is turned off by setting
+VERSOLA_NO_UPDATE_NOTIFIER to any value.
 
 Deliberately dependency-free: it reuses the exact same GitHub API
 endpoint and checksums.txt convention install.sh/install.ps1 already
@@ -41,14 +61,47 @@ use, rather than pulling in a self-update library for one command.
 Builds made straight from source ("versola version" reports "dev") aren't
 tied to any published release, so upgrade refuses to touch those --
 rebuild from source instead.`,
+	Args: cobra.NoArgs,
 	RunE: runUpgrade,
 }
 
 func init() {
 	upgradeCmd.Flags().BoolVarP(&upgradeAssumeYes, "yes", "y", false, "don't prompt for confirmation")
+	upgradeCmd.Flags().BoolVar(&upgradeCheck, "check", false, "only report whether a newer release exists (exit 0 either way, 1 if GitHub can't be reached)")
+	upgradeCmd.Flags().BoolVar(&upgradeJSON, "json", false, "with --check: print {current, latest, upToDate} on stdout")
+	upgradeCmd.Flags().StringVar(&upgradeVersion, "version", "", "install exactly this release (e.g. 0.3.3, or a pre-release such as 0.4.0-rc1)")
 }
 
+// httpStatusError is a download that GitHub answered with a status other than
+// 200; the code is kept so "no such release" can be told from a broken network.
+type httpStatusError struct {
+	Code   int
+	Status string
+}
+
+func (e *httpStatusError) Error() string { return "server returned " + e.Status }
+
 func runUpgrade(cmd *cobra.Command, args []string) error {
+	pinned := cmd.Flags().Changed("version")
+	if upgradeJSON && !upgradeCheck {
+		return exitcode.With(exitcode.Usage, fmt.Errorf("--json goes with --check"))
+	}
+	if upgradeCheck && pinned {
+		return exitcode.With(exitcode.Usage, fmt.Errorf("--check and --version don't go together: --check only reports, --version installs"))
+	}
+	if upgradeCheck {
+		return runUpgradeCheck(os.Stdout)
+	}
+	var pinnedTag string
+	if pinned {
+		// Before anything is touched: the tag ends up in a download URL.
+		tag, err := normalizeReleaseTag(upgradeVersion)
+		if err != nil {
+			return exitcode.With(exitcode.Usage, err)
+		}
+		pinnedTag = tag
+	}
+
 	// A "dev" build didn't come from a release, so there's no meaningful
 	// version to compare against and no guarantee it's even safe to
 	// overwrite (e.g. it might not be at the path a normal install would
@@ -82,32 +135,53 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	downloadClient := &http.Client{}
 
-	latestTag, err := (&release.Client{HTTP: client, BaseURL: release.GitHubAPI, UserAgent: userAgent()}).Latest(upgradeRepo)
-	if err != nil {
-		return fmt.Errorf("couldn't check the latest release: %w", err)
-	}
-
-	// GitHub's "latest release" endpoint already excludes pre-releases
-	// and always returns the newest non-pre-release tag, so a plain
-	// inequality is enough here -- no need to pull in a semver library
-	// just to answer "is there something to install".
-	if latestTag == version {
-		fmt.Printf("Already on the latest version (%s).\n", version)
-		return nil
+	tag := pinnedTag
+	question := "Install now?"
+	if pinned {
+		if tag == version {
+			fmt.Printf("Already on %s.\n", version)
+			return nil
+		}
+		warnAboutPinnedVersion(os.Stdout, tag, version)
+		fmt.Printf("Installing versola-cli %s (you have %s).\n", tag, version)
+	} else {
+		latestTag, err := releaseClient(latestTimeout).Latest(upgradeRepo)
+		if err != nil {
+			return fmt.Errorf("couldn't check the latest release: %w", err)
+		}
+		// "Is there something to install" is "is it newer", not "is it
+		// different": someone on a pre-release newer than the latest stable
+		// release must not be offered a downgrade. A version that doesn't
+		// parse (never a published tag) falls back to plain inequality.
+		if cmp, ok := compareVersions(latestTag, version); latestTag == version || (ok && cmp <= 0) {
+			if latestTag == version {
+				fmt.Printf("Already on the latest version (%s).\n", version)
+			} else {
+				fmt.Printf("This build (%s) is newer than the latest release (%s) -- nothing to update. To install a specific release: versola upgrade --version <tag>.\n", version, latestTag)
+			}
+			return nil
+		}
+		tag = latestTag
+		question = "Update now?"
+		fmt.Printf("versola-cli %s is available (you have %s).\n", tag, version)
 	}
 
 	assetName, err := releaseAssetName()
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("versola-cli %s is available (you have %s).\n", latestTag, version)
-	if !upgradeAssumeYes && !confirm("Update now?") {
+	if !upgradeAssumeYes && !confirm(question) {
 		fmt.Println("Aborted.")
 		return exitcode.Reported(exitcode.Aborted, fmt.Errorf("aborted"))
 	}
+	return installRelease(client, downloadClient, exe, tag, assetName, pinned)
+}
 
-	baseURL := fmt.Sprintf("https://github.com/%s/releases/download/%s", upgradeRepo, latestTag)
+// installRelease downloads tag's binary next to exe, verifies it and swaps it
+// in. pinned only changes what a 404 means: for a tag the customer typed, "no
+// such release", not a network problem.
+func installRelease(client, downloadClient *http.Client, exe, tag, assetName string, pinned bool) error {
+	baseURL := fmt.Sprintf("%s/%s/releases/download/%s", upgradeDownloadHost, upgradeRepo, tag)
 
 	fmt.Printf("Downloading %s...\n", assetName)
 	// Download into the same directory as the target executable, not a
@@ -119,6 +193,10 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	defer os.Remove(newPath) // no-op once the rename below has moved it away
 	newBytes, err := downloadToFile(downloadClient, baseURL+"/"+assetName, newPath)
 	if err != nil {
+		var se *httpStatusError
+		if pinned && errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return fmt.Errorf("there is no versola-cli release %s with a %s binary -- the releases are listed at https://github.com/%s/releases (or run: versola upgrade --check)", tag, assetName, upgradeRepo)
+		}
 		return fmt.Errorf("couldn't download %s: %w", assetName, err)
 	}
 
@@ -137,8 +215,65 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("update failed (the previous binary should still be intact): %w", err)
 	}
 
-	fmt.Printf("Updated to %s.\n", latestTag)
+	fmt.Printf("Updated to %s.\n", tag)
 	return nil
+}
+
+// upgradeCheckReport is the --json form of "upgrade --check".
+type upgradeCheckReport struct {
+	Current  string `json:"current"`
+	Latest   string `json:"latest"`
+	UpToDate bool   `json:"upToDate"`
+}
+
+// runUpgradeCheck says whether a newer release exists, and changes nothing.
+// Exit 0 whether or not there is one (a script reads the answer, not the
+// code); 1 only when GitHub can't be asked.
+func runUpgradeCheck(w io.Writer) error {
+	latest, err := releaseClient(latestTimeout).Latest(upgradeRepo)
+	if err != nil {
+		return fmt.Errorf("couldn't check the latest release: %w", err)
+	}
+	cmp, ok := compareVersions(latest, version)
+	// A "dev" build is never up to date: it isn't any release.
+	upToDate := version != "dev" && (latest == version || (ok && cmp <= 0))
+	if upgradeJSON {
+		return json.NewEncoder(w).Encode(upgradeCheckReport{Current: version, Latest: latest, UpToDate: upToDate})
+	}
+	switch {
+	case version == "dev":
+		fmt.Fprintf(w, "versola-cli %s is the latest release; this is a \"dev\" build, which versola upgrade does not replace.\n", latest)
+	case upToDate:
+		fmt.Fprintf(w, "versola-cli %s is current\n", version)
+	default:
+		fmt.Fprintf(w, "versola-cli %s is available (you have %s): run versola upgrade\n", latest, version)
+	}
+	return nil
+}
+
+// normalizeReleaseTag turns what was typed after --version into a release
+// tag: one leading "v" is dropped (tags have none, but it is the natural way
+// to write a version), and the rest must be a version (0.3.3, 0.4.0-rc1).
+// Nothing else reaches the download URL.
+func normalizeReleaseTag(s string) (string, error) {
+	tag := strings.TrimPrefix(strings.TrimSpace(s), "v")
+	if _, _, ok := parseVersion(tag); !ok || strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("%q is not a versola-cli version: give a release such as 0.3.3 or 0.4.0-rc1 (they are listed at https://github.com/%s/releases)", s, upgradeRepo)
+	}
+	return tag, nil
+}
+
+// warnAboutPinnedVersion says what is unusual about the release the customer
+// asked for: a pre-release, or one older than the binary they run, since a
+// newer CLI may have written state (~/.versola/active) that an older one
+// cannot read. Neither is refused: both are things someone does on purpose.
+func warnAboutPinnedVersion(w io.Writer, tag, current string) {
+	if _, pre, ok := parseVersion(tag); ok && len(pre) > 0 {
+		fmt.Fprintf(w, "Warning: %s is a pre-release.\n", tag)
+	}
+	if cmp, ok := compareVersions(tag, current); ok && cmp < 0 {
+		fmt.Fprintf(w, "Warning: %s is older than this binary (%s). A newer versola-cli may have written deployment state (~/.versola/active) that an older one cannot read; if a command then reports an unreadable state layout, install the newer release again.\n", tag, current)
+	}
 }
 
 // executablePath returns the real, symlink-resolved path to the running
@@ -204,7 +339,7 @@ func downloadToFile(client *http.Client, url, path string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %s", resp.Status)
+		return nil, &httpStatusError{Code: resp.StatusCode, Status: resp.Status}
 	}
 
 	f, err := os.Create(path)

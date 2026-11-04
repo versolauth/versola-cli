@@ -17,6 +17,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/manifest"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -41,6 +42,11 @@ type RolloutOptions struct {
 	// under way, and the other way round should it be aborted. Pre-1.0
 	// releases do not promise it (see RequireCompatible).
 	AssumeCompatible bool
+	// Compat is what the new release's own manifest says about an upgrade from
+	// the running version (RolloutCompatibility). The zero value is Unknown:
+	// no manifest, no entry, or nothing stated -- the operator's
+	// --assume-compatible is then asked for, as before manifests existed.
+	Compat manifest.Result
 }
 
 // readyTimeout bounds the wait for one container to report ready -- in
@@ -143,13 +149,93 @@ func CheckRollout(st *state.State, version string, o RolloutOptions) (done bool,
 // needs a fresh database). Nothing in a release says so yet, so the operator
 // has to, having read its notes. Continuing a rollout under way needs no
 // confirmation: it was given when it started.
+//
+// Since versola-tools ships a manifest (o.Compat, from RolloutCompatibility)
+// the release can say so itself: a release that lists the running version in
+// its rollingFrom needs no flag, one that lists it in freshDatabaseFrom is
+// refused whatever the flag says (a flag cannot make an in-place upgrade exist),
+// and for everything else -- an older release without a manifest, a version
+// it does not mention, a downgrade -- the operator confirms, as before.
 func RequireCompatible(st *state.State, version string, o RolloutOptions) error {
-	if st.RolloutUnderway() || o.AssumeCompatible {
+	if st.RolloutUnderway() {
 		return nil
 	}
-	return fmt.Errorf("a rolling upgrade runs %s and %s side by side on the database as %s migrates it, and Versola releases before 1.0 don't promise that works (some, like 0.7.0, need a fresh database) -- "+
+	switch o.Compat.Verdict {
+	case manifest.FreshDatabase:
+		return freshDatabaseError(o.Compat, true)
+	case manifest.Rolling:
+		return nil
+	}
+	if o.AssumeCompatible {
+		return nil
+	}
+	why := ""
+	if r := o.Compat.Reason; r != "" {
+		why = strings.ToUpper(r[:1]) + r[1:] + ". "
+	}
+	return fmt.Errorf("%sA rolling upgrade runs %s and %s side by side on the database as %s migrates it, and Versola releases before 1.0 don't promise that works (some, like 0.7.0, need a fresh database) -- "+
 		"read the release notes of %s; if its migrations are additive and %s runs on its schema, run again with --assume-compatible. Otherwise deploy it with `versola configure`, `migrate` and `up` (a short stop; back the database up first)",
-		st.Version, version, version, version, st.Version)
+		why, st.Version, version, version, version, st.Version)
+}
+
+// freshDatabaseError is the refusal of an upgrade the release says has no
+// in-place way. rollout says what to do instead; configure also names the flag
+// for someone who already has a new database.
+func freshDatabaseError(r manifest.Result, rollout bool) error {
+	notes := ""
+	if r.Notes != "" {
+		notes = " (release notes: " + r.Notes + ")"
+	}
+	way := fmt.Sprintf("Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall --purge` (it asks first and removes this deployment's data and secrets) and `versola bootstrap vps %s ...` (with your own Postgres, name an empty database).", r.To)
+	if !rollout {
+		way += fmt.Sprintf(" Already on a new, empty database? Run `versola configure vps %s ... --allow-fresh-database`, then `versola migrate` and `versola up`.", r.To)
+	}
+	return fmt.Errorf("version %s cannot be upgraded in place from %s: the release says it needs a fresh database%s, so neither a rollout nor `configure` followed by `migrate` can work. %s", r.To, r.From, notes, way)
+}
+
+// RolloutCompatibility asks the release being deployed what it says about an
+// upgrade from the version that runs: it runs that release's versola-tools
+// into a temporary directory (the same run `--dry-run` and `secrets plan`
+// make), reads its manifest and drops the directory, which also holds secret
+// candidates that are never used. Nothing in the deployment changes. An
+// unreadable manifest (an unknown schemaVersion, broken JSON) is an error, not
+// "unknown": it may declare what this CLI cannot read.
+func RolloutCompatibility(st *state.State, version string) (manifest.Result, error) {
+	if daemon := checks.DockerDaemon(); !daemon.OK {
+		return manifest.Result{}, fmt.Errorf("%s -- `rollout` runs versola-tools %s to learn what that release says about upgrading from %s", daemon.String(), version, st.Version)
+	}
+	dir, cleanup, err := scratchDir("rollout-compat-")
+	if err != nil {
+		return manifest.Result{}, err
+	}
+	defer cleanup(os.Stdout)
+	defer removeOnSignal(os.Stdout, cleanup)()
+
+	fmt.Printf("Asking Versola %s whether %s can be upgraded to it (versola-tools, a temporary directory)...\n", version, st.Version)
+	if err := runToolsOf(st, version, dir); err != nil {
+		return manifest.Result{}, err
+	}
+	m, err := manifest.Load(dir)
+	if err != nil {
+		return manifest.Result{}, fmt.Errorf("versola-tools %s: %w", version, err)
+	}
+	return m.Check(st.Version, version), nil
+}
+
+// runToolsOf runs versola-tools of version for st's deployment into dir, and
+// says in words what went wrong when it cannot.
+func runToolsOf(st *state.State, version, dir string) error {
+	toolsImage := ToolsImage(st.ImageRegistry, version)
+	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Est: st.EstEnabled}); err != nil {
+		if problem := registryProblem(err, toolsImage, st.ImageRegistry); problem != nil {
+			return problem
+		}
+		if isManifestUnknown(err) {
+			return fmt.Errorf("version %q of Versola doesn't exist (no versola-tools image published for it)", version)
+		}
+		return fmt.Errorf("versola-tools failed: %w", err)
+	}
+	return nil
 }
 
 // CheckAbort is everything about `rollout --abort` that can be refused on
@@ -249,13 +335,27 @@ func RolloutPlan(st *state.State, version string, o RolloutOptions) string {
 		b.WriteString(", OpenBao set up by hand")
 	}
 	b.WriteString("\n")
+	notes := ""
+	if o.Compat.Notes != "" {
+		notes = "; release notes: " + o.Compat.Notes
+	}
 	switch {
 	case st.RolloutUnderway():
+	case o.Compat.Verdict == manifest.Rolling:
+		fmt.Fprintf(&b, "  Compatibility: declared by the release (%s -> %s is a rolling upgrade%s)\n", o.Compat.From, o.Compat.To, notes)
+	case o.Compat.Verdict == manifest.FreshDatabase:
+		fmt.Fprintf(&b, "  Compatibility: the release says %s needs a fresh database -- the rollout refuses, with or without --assume-compatible%s\n", version, notes)
 	case o.AssumeCompatible:
 		b.WriteString("  Compatibility: confirmed by you (--assume-compatible) -- releases before 1.0 don't promise it\n")
+		if o.Compat.Reason != "" {
+			fmt.Fprintf(&b, "  (%s)\n", o.Compat.Reason)
+		}
 	default:
 		b.WriteString("  Compatibility: NOT confirmed -- the rollout refuses without --assume-compatible (releases before 1.0\n" +
 			"  don't promise the running version works on the new schema; read the release notes)\n")
+		if o.Compat.Reason != "" {
+			fmt.Fprintf(&b, "  (%s)\n", o.Compat.Reason)
+		}
 	}
 	b.WriteString("\n  Steps:\n")
 	done := func(ok bool) string {
@@ -465,7 +565,7 @@ func prepareStaged(st *state.State, version string, o RolloutOptions, staged *st
 		fmt.Printf("Warning: this deployment records --central-url %s from an earlier version, which derived it as central.<domain> and routed it. The proxy no longer routes it: a local edge reaches central on the loopback, an edge elsewhere needs --central-mtls-domain (README, \"Public names\"). Re-run `versola configure` with the flag.\n", st.CentralURL)
 	}
 	proxyOpts := ProxyOptions{Mode: st.ProxyMode, ACMEStaging: usesACMEStaging(dir), CentralURL: st.CentralURL, Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Est: st.EstEnabled}
-	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, st.ImageRegistry, staged); err != nil {
+	if _, err := configure(st.Target, version, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), openbaoSetUpByHand(st.Target), proxyOpts, o.Secrets, st.ImageRegistry, false, staged); err != nil {
 		return nil, err
 	}
 	return state.Load()
@@ -819,6 +919,11 @@ func watchInterrupts() (interrupted func() bool, stop func()) {
 func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 	fmt.Print(RolloutPlan(st, version, o))
 	fmt.Println()
+	if o.Compat.Verdict == manifest.FreshDatabase && !st.RolloutUnderway() {
+		err := freshDatabaseError(o.Compat, true)
+		fmt.Printf("Would stop before changing anything: %v\n", err)
+		return err
+	}
 	if err := rolloutPreflight(st, o, false, false); err != nil {
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
@@ -908,15 +1013,8 @@ func previewVersion(st *state.State, version string, secretOpts SecretOptions) e
 	defer removeOnSignal(os.Stdout, cleanup)()
 
 	fmt.Printf("Running versola-tools %s into a temporary directory...\n", version)
-	toolsImage := ToolsImage(st.ImageRegistry, version)
-	if err := pullAndRunTools(dir, toolsImage, st.Target, st.AuthURL, st.PostgresHost, postgresOptionsOf(st), toolsExtras{Registry: st.ImageRegistry, GenEnvArgs: centralGenEnvArgs(st.CentralURL), Public: PublicDomainsOf(st), CertDays: st.CertLifetimeDays, Est: st.EstEnabled}); err != nil {
-		if problem := registryProblem(err, toolsImage, st.ImageRegistry); problem != nil {
-			return problem
-		}
-		if isManifestUnknown(err) {
-			return fmt.Errorf("version %q of Versola doesn't exist (no versola-tools image published for it)", version)
-		}
-		return fmt.Errorf("versola-tools failed: %w", err)
+	if err := runToolsOf(st, version, dir); err != nil {
+		return err
 	}
 	if err := requireRegistryImages(filepath.Join(dir, "compose.fragment.yml"), st.ImageRegistry, version); err != nil {
 		return err

@@ -130,8 +130,10 @@ traffic starts `run.sh --real` runs `mtls-client.sh`, written from versola's
 client (`tls_client_auth`, EST enrolment) in central through the admin API,
 creates an enrolment token, enrols with a key and a CSR made here
 (`/.well-known/est/simpleenroll` through the proxy), and asks `/token` once
-over 8083 with the certificate (retrying 10 x 3 s: auth learns of the client
-by a sync). The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
+over 8083 with the certificate. auth learns of a new client by a refresh of its
+cache, every five minutes by default: until then `/token` answers 401
+`invalid_client`, so it is polled every 5 s for up to `E2E_SYNC_WAIT_SECONDS`
+(420; 275 s on the stand run below). The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
 own deployment, read from its `central.secrets.env` in the isolated `E2E_HOME`
 the way `versola edge add` does; it goes to curl on stdin and is never printed.
 The client is left in the throwaway deployment (`clean` removes its database).
@@ -145,16 +147,28 @@ ones (edge keeps a pool, and a request has to be in flight when the proxy
 closes the connection for a cut to show). 200 is expected; cuts are reported
 and reconnects counted as for the stubs (the known limitation above).
 
+EST is off in auth unless the deployment was configured with `--est`
+(versola-tools then writes auth's `est` block; without it `simpleenroll` and
+`cacerts` answer an empty 404), and only a versola-tools of 0.8.0 or later knows it
+(an older one ignores the flag, with the same 404): FROM of a `--real` run with
+the 8083 client has to be that new, else use `--no-mtls`. `run.sh --real` passes
+`--est` to `configure` unless `--no-mtls` is given, which is also what an
+operator who wants EST on a vps does.
+
+Seen on a stand (Ubuntu 24.04, 4 vCPU, 8 GB, two test tags of one commit of
+`versola` main, `--replicas 1 --assume-compatible --rps 30`, 2026-11-04): the
+`default` tenant accepts the client, enrolment answers 200, auth knows the
+client after about 275 s and answers `/token` 200 on 8083; the rollout ran 398 s
+with 35 226 requests, 0 failures, 0 cuts and 18 reconnects (what the known
+8083 limitation predicts: a proxy reload ends edge-style pooled connections;
+how many reloads there were, and how the reconnects split, was not counted),
+and the memory available fell by up to 755 MiB. Not seen: 3 replicas, `--no-surge`, `--abort-at`, a real migration
+between two commits.
+
 Not covered yet, so a clean `--real` run is **not** a pass of #84: the
 authorization code flow (it needs a user, and a stock vps install runs with
 `ENV_NAME=prod`: no fixed OTP, no password-set endpoint; see #84), central's
-admin console, the refusal of a release that needs a fresh database. Not run:
-this was written without a Docker daemon, and it needs published FROM and TO
-tools with the bundled Postgres (versola#849). Unverified against a real
-stand: that the default tenant accepts this client (an EST client needs the
-tenant's `mtlsCertificateHeader` set, and the tenant's security
-profile defaults to `fapi2`), the shape of the EST answer, and that 200 is what
-auth answers to the grant.
+admin console, the refusal of a release that needs a fresh database.
 
 ## Run (only on a throwaway machine)
 

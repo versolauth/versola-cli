@@ -282,7 +282,10 @@ $found"
   say "deploying $([ -n "$real" ] && echo "real" || echo "stub") $A with $replicas auth and $replicas edge replicas"
   # Real: no --postgres-host, so the bundled Postgres, as a new customer gets it.
   local pg=(--postgres-host "$PG_HOST"); [ -z "$real" ] || pg=()
-  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} --proxy external
+  # The mutual-TLS client of a real run gets its certificate from auth's EST (RFC 7030), which is off unless
+  # configure is told --est (versola-tools then writes auth's `est` block); a customer who wants EST does the same.
+  local est=(); [ -z "$real" ] || [ -n "$no_mtls" ] || est=(--est)
+  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} ${est[@]+"${est[@]}"} --proxy external
   printf 'y\n' | "$cli" migrate
   printf 'y\n' | "$cli" up --no-browser
   if [ "$replicas" -gt 1 ]; then

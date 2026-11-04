@@ -19,6 +19,7 @@
 #                     `versola edge add` reaches it (internal/deploy/edge.go).
 #   E2E_TENANT        tenant the client is made in            (default)
 #   E2E_SCOPE         scope it may be granted                 (openid)
+#   E2E_SYNC_WAIT_SECONDS  how long to wait for auth to learn of the client (420)
 #
 # The secret is read into a shell variable, handed to curl on its stdin and
 # never printed, put on a command line or written anywhere. No token, key or
@@ -107,7 +108,7 @@ openssl req -new -key "$work/k.ec.pem" -subj "$SUBJ" -outform DER 2>/dev/null | 
 code="$(curl -sS --max-time 20 -X POST "$AUTH/.well-known/est/simpleenroll" -H "Host: $AUTH_HOST" -H 'Content-Type: application/pkcs10' \
   --config <(printf 'user = "%s:%s"\n' "$CLIENT_ID" "$(json_get "$work/token.json" token)") \
   --data-binary @"$work/k.csr.b64" -o "$work/enrol.b64" -w '%{http_code}')" || code=error
-[ "$code" = 200 ] || fail "simpleenroll answered HTTP $code: $(why "$work/enrol.b64")"
+[ "$code" = 200 ] || fail "simpleenroll answered HTTP $code: $(why "$work/enrol.b64") (an empty 404 means EST is off in auth: the deployment needs \`configure --est\` and a versola-tools of 0.8.0 or later)"
 # The leaf of a certs-only PKCS#7 answer, whatever order it lists its certificates in.
 openssl base64 -d -in "$work/enrol.b64" -out "$work/enrol.der" 2>/dev/null || fail "the enrolment answer is not base64"
 openssl pkcs7 -inform DER -in "$work/enrol.der" -print_certs 2>/dev/null >"$work/enrol.all" || fail "the enrolment answer is not a PKCS#7"
@@ -123,16 +124,26 @@ sys.exit(1)
 PY
 note "3. enrolled (HTTP $code)"
 
-# 4. /token over 8083 with the certificate. auth learns of a client by a sync,
-# which may lag the registration by a few seconds (est-smoke.sh retries 10 x 3 s).
+# 4. /token over 8083 with the certificate. auth learns of a client by a sync of
+# its cache, every five minutes by default (README.md "Short outages"), so it may
+# answer 401 invalid_client for that long after the registration (est-smoke.sh
+# retries 10 x 3 s, enough only against a stand with a short refresh). Polled
+# every 5 s for E2E_SYNC_WAIT_SECONDS (default 420).
+SYNC_WAIT="${E2E_SYNC_WAIT_SECONDS:-420}"
+[[ "$SYNC_WAIT" =~ ^[0-9]+$ ]] || fail "E2E_SYNC_WAIT_SECONDS must be a number of seconds"
 code=000
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+waited=0
+while :; do
   code="$(curl -sSk --max-time 20 --cert "$work/client.crt" --key "$work/client.key" -X POST "https://$MTLS/token" \
     --data-urlencode grant_type=client_credentials --data-urlencode "client_id=$CLIENT_ID" --data-urlencode "scope=$SCOPE" \
     -o "$work/token.out" -w '%{http_code}' 2>/dev/null)" || code=error
   [ "$code" = 200 ] && break
-  sleep 3
+  [ "$waited" -lt "$SYNC_WAIT" ] || break
+  [ "$waited" -ne 30 ] || note "4. auth does not know the client yet (HTTP $code); waiting for its cache refresh, up to ${SYNC_WAIT} s"
+  sleep 5
+  waited=$((waited + 5))
 done
+[ "$code" != 200 ] || note "4. auth knew the client after ${waited} s"
 [ "$code" = 200 ] || fail "/token over $MTLS with the certificate answered HTTP $code: $(why "$work/token.out")"
 note "4. /token over $MTLS with the certificate (HTTP $code)"
 

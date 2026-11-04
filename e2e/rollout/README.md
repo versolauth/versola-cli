@@ -101,13 +101,31 @@ What differs from the stub run:
   FROM and TO (it knows only the stub tags): `docker rmi` them by hand if the
   stand runs short of disk.
 
+### Load and numbers (`--rps N`)
+
+`--rps 30` sends the plain targets at 30 requests per second in all, at that
+pace whatever the server does: a server that stalls does not slow the client
+down, requests pile up (at most 256 under way per target) and past that each
+unsent request is a failure (with the plain targets at 30 requests per second
+the cap is not reached: it matters above about 25 requests per second per
+target). Without `--rps` every target has one request at
+a time, 50 ms apart, as before. The pooled 8083 targets (stubs only) stay one
+request at a time on their one connection. After the run the report holds:
+
+- failures and cuts per 5 s window (counted when the request ended: a stalled
+  request lands up to 10 s after it was sent), with the clock the `===` step lines of the
+  script carry, so a burst can be laid against "rolling out", "aborting" or
+  "rollout phase over";
+- how long the rollout phase took;
+- the lowest `MemAvailable` seen meanwhile against the value before it (the
+  host's, so the stand's other load is in it: run on an idle stand). On a
+  12 GB stand it says nothing about a 4 GB VPS beyond the sum it shows.
+
 Not covered yet, so a clean `--real` run is **not** a pass of #84: auth's
 mutual-TLS port 8083 (a client certificate), the token flow (an OAuth client and
 a user), central's admin console, the refusal of a release that needs a fresh
-database, measured load (the client sends about one request per 50 ms per
-target, not 20-50 requests per second), memory peak, per-step failure windows.
-These are the next PR. Not run: this was written without a Docker daemon, and
-it needs published FROM and TO tools with the bundled Postgres (versola#849).
+database. Not run: this was written without a Docker daemon, and it needs
+published FROM and TO tools with the bundled Postgres (versola#849).
 
 ## Run (only on a throwaway machine)
 
@@ -118,6 +136,7 @@ it needs published FROM and TO tools with the bundled Postgres (versola#849).
 ./run.sh run /path/to/versola --slow-central 40   # central B needs 40 s to become ready
 ./run.sh run /path/to/versola --manifest declared  # B's release.json lists A in rollingFrom: no --assume-compatible
 ./run.sh run /path/to/versola --manifest fresh     # B says it needs a fresh database: refused, A keeps serving
+./run.sh run /path/to/versola --real 0.7.5 0.7.6 --rps 30   # with 30 requests per second; see "Load and numbers"
 ./run.sh run /path/to/versola --real 0.7.5 0.7.6   # real images and the bundled Postgres, see "Real images" (the versions are examples)
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```

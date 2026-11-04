@@ -453,3 +453,76 @@ func TestRealTargetsPinned(t *testing.T) {
 		}
 	}
 }
+
+// The open loop sends at its rate, not at the server's pace: 10 ms period for
+// 400 ms against a server that answers in 30 ms still sends about 40 requests
+// (a closed loop with the same server would send about 13).
+func TestOpenLoopKeepsItsRateWhenTheServerIsSlow(t *testing.T) {
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&n, 1)
+		time.Sleep(30 * time.Millisecond)
+	}))
+	defer srv.Close()
+	tg := target{name: "slow", method: "GET", url: srv.URL, want: 200, client: plainClient()}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	st := newStats()
+	go func() { openLoop(st, tg, 10*time.Millisecond, 100, stop); close(done) }()
+	time.Sleep(400 * time.Millisecond)
+	close(stop)
+	<-done
+	if got := atomic.LoadInt64(&n); got < 20 || got > 50 {
+		t.Fatalf("sent %d requests in 400 ms at a 10 ms period, want about 40", got)
+	}
+	if st.failed["slow"] != 0 {
+		t.Fatalf("failures: %v", st.fails)
+	}
+}
+
+// A stalled server fills the loop's room; every request past it is a failure
+// of the target, and the loop still stops on stop.
+func TestOpenLoopCountsWhatItCannotSendAsFailures(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer srv.Close()
+	tg := target{name: "stalled", method: "GET", url: srv.URL, want: 200, client: plainClient()}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	st := newStats()
+	go func() { openLoop(st, tg, 5*time.Millisecond, 2, stop); close(done) }()
+	time.Sleep(400 * time.Millisecond)
+	close(stop)
+	close(release) // let the two requests under way finish
+	<-done
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.failed["stalled"] < 5 {
+		t.Fatalf("failed %d, want many once 2 requests are stuck", st.failed["stalled"])
+	}
+	if len(st.fails) == 0 || !strings.Contains(st.fails[0].Error, "not sent") {
+		t.Fatalf("failures: %v", st.fails)
+	}
+}
+
+// Failures and cuts are counted per window, apart from each other and past the
+// cap of the detail lines.
+func TestRecordCountsWindows(t *testing.T) {
+	st := newStats()
+	for i := 0; i < 150; i++ {
+		st.record("a", outcomeFail, false, "x")
+	}
+	st.record("b", outcomeCut, true, "y")
+	sum := func(m map[string]int) (n int) {
+		for _, v := range m {
+			n += v
+		}
+		return
+	}
+	if sum(st.failWin) != 150 || sum(st.cutWin) != 1 {
+		t.Fatalf("failWin %v, cutWin %v", st.failWin, st.cutWin)
+	}
+	if len(st.fails) != 101 {
+		t.Fatalf("detail lines %d, want 100 failures + 1 cut", len(st.fails))
+	}
+}

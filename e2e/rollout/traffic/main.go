@@ -117,10 +117,53 @@ type stats struct {
 	fails      []failure
 	keptFails  int // failures kept in fails; cuts have a cap of their own
 	keptCuts   int
+	// failWin and cutWin count failures and cuts per window of windowSize
+	// (key: the window's start, 15:04:05), uncapped, so that a rollout's
+	// trouble can be laid against the steps the script printed with the same
+	// clock. fails above keeps only the first hundred of each kind.
+	failWin map[string]int
+	cutWin  map[string]int
 }
 
+// windowSize is the width of the windows failures and cuts are counted in.
+const windowSize = 5 * time.Second
+
 func newStats() *stats {
-	return &stats{sent: map[string]int{}, failed: map[string]int{}, cut: map[string]int{}, reconnects: map[string]int{}, versions: map[string]map[string]int{}}
+	return &stats{sent: map[string]int{}, failed: map[string]int{}, cut: map[string]int{}, reconnects: map[string]int{}, versions: map[string]map[string]int{}, failWin: map[string]int{}, cutWin: map[string]int{}}
+}
+
+// maxInFlight caps the requests an open loop has under way per target.
+const maxInFlight = 256
+
+// openLoop sends t every period whatever the server answers, up to inflight
+// requests at once, until stop closes, and returns when the ones under way have
+// ended. A server that stalls does not slow the client down (the closed loop's
+// way of hiding the stall): requests pile up, and past inflight each new one is
+// counted a failure -- the client has no room, which is the server's doing.
+func openLoop(st *stats, t target, period time.Duration, inflight int, stop <-chan struct{}) {
+	slots := make(chan struct{}, inflight)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+		select {
+		case slots <- struct{}{}:
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-slots }()
+				one(st, t)
+			}()
+		default:
+			st.record(t.name, outcomeFail, false, fmt.Sprintf("not sent: %d requests of this target are still under way", inflight))
+		}
+	}
 }
 
 func (s *stats) ok(t, version string) {
@@ -138,11 +181,14 @@ func (s *stats) record(t string, kind outcome, reused bool, err string) {
 	defer s.mu.Unlock()
 	s.sent[t]++
 	name := "fail"
+	win := time.Now().Truncate(windowSize).Format("15:04:05")
 	if kind == outcomeCut {
 		s.cut[t]++
+		s.cutWin[win]++
 		name = "cut"
 	} else {
 		s.failed[t]++
+		s.failWin[win]++
 	}
 	// A broken target must not use up the room the cuts' detail lines need.
 	kept := &s.keptFails
@@ -224,6 +270,7 @@ func main() {
 		asJSON     = flag.Bool("json", false, "print the summary as JSON")
 		expect     = flag.String("expect-versions", "", "comma-separated versions every target must have been served by at least once (e.g. 1.0.0-e2e,1.0.1-e2e): proves traffic ran on both sides of the rollout")
 		strict     = flag.Bool("strict", false, "count cuts of the pooled 8083 connections (the known limitation) as failures")
+		rps        = flag.Float64("rps", 0, "total requests per second over the plain (not pooled) targets, sent at that rate whatever the server does (an open model); 0 keeps one request at a time per target with -interval between them")
 		realMode   = flag.Bool("real", false, "send the requests for real Versola images instead of the stub's (no 8083: it needs a client certificate); every status below 500 counts as an answer")
 	)
 	flag.Parse()
@@ -291,8 +338,34 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+	// With -rps the plain targets are sent at a fixed total rate whatever the
+	// server does (see openLoop); pooled targets stay one request at a time on
+	// their one connection.
+	if *rps < 0 || *rps > 1e6 {
+		fmt.Fprintln(os.Stderr, "traffic: -rps must be 0 (off) or a rate the clock can keep (at most a million a second)")
+		os.Exit(2)
+	}
+	var period time.Duration
+	if *rps > 0 {
+		open := 0
+		for _, t := range targets {
+			if !t.pooled() {
+				open++
+			}
+		}
+		if open > 0 {
+			period = time.Duration(float64(time.Second) * float64(open) / *rps)
+		}
+	}
 	for _, t := range targets {
 		wg.Add(1)
+		if period > 0 && !t.pooled() {
+			go func(t target) {
+				defer wg.Done()
+				openLoop(st, t, period, maxInFlight, stop)
+			}(t)
+			continue
+		}
 		go func(t target) {
 			defer wg.Done()
 			owed := 0 // see reconnects
@@ -500,6 +573,7 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"seconds": took.Seconds(), "sent": st.sent, "failed": st.failed, "cut": st.cut,
 			"reconnects": st.reconnects, "versions": st.versions, "failures": st.fails,
+			"failureWindows": st.failWin, "cutWindows": st.cutWin,
 		})
 		return
 	}
@@ -518,6 +592,8 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		fmt.Printf("  %-44s sent %6d  failed %4d  cut %4d  reconnects %4d  served by %v\n", n, st.sent[n], st.failed[n], st.cut[n], st.reconnects[n], st.versions[n])
 	}
 	fmt.Printf("TOTAL sent %d, failed %d, cut %d (pooled 8083, known limitation), reconnects %d (harmless)\n", total, bad, cut, re)
+	printWindows("failures", st.failWin)
+	printWindows("cuts", st.cutWin)
 	for _, f := range st.fails {
 		label := "FAIL"
 		if f.Kind == "cut" {
@@ -525,4 +601,23 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		}
 		fmt.Printf("  %s %s  %s  reused=%v  %s\n", label, f.At, f.Target, f.Reused, f.Error)
 	}
+}
+
+// printWindows prints the windows (see stats.failWin) that have something in
+// them, in time order, on one line: the clock is the one the run's script
+// stamps its steps with.
+func printWindows(what string, w map[string]int) {
+	if len(w) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(w))
+	for k := range w {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", k, w[k]))
+	}
+	fmt.Printf("%s per %s window (start time, count; counted when the request ended, up to 10 s after it was sent): %s\n", what, windowSize, strings.Join(parts, ", "))
 }

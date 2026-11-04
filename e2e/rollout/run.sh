@@ -6,7 +6,20 @@
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 #                  [--abort-at prepared|central|standin|midway] [--strict]
 #                  [--slow-central SECONDS] [--manifest declared|fresh]
+#   ./run.sh run   /path/to/versola --real FROM TO [--replicas 3] [--no-surge]
+#                  [--abort-at ...] [--assume-compatible]
 #   ./run.sh clean
+#
+# --real FROM TO deploys the REAL released versola images FROM, with the bundled
+# Postgres, and rolls out to TO, under the traffic client's -real requests (no
+# credentials needed: public metadata, edge's session probe, 8082, central's
+# front). The stubs are not built. Which version runs is read from the
+# containers (docker ps) before and after, not from the answers. NOT covered
+# yet, so a clean run is not a pass of versola-cli#84: auth's mutual-TLS port
+# 8083 (needs a client certificate), the token flow, central's console. Needs
+# FROM and TO published, with FROM's tools new enough for the bundled Postgres;
+# the rollout runs without --assume-compatible unless asked (TO's release.json
+# decides). --manifest and --slow-central are for stubs only.
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
 # it reaches that phase, then runs `versola rollout --abort` under the same
@@ -37,8 +50,10 @@
 # named versola-*, a real OpenBao and the proxy on 127.0.0.1:2821/8082/8083,
 # and refuses to start if anything named versola-* is already there. The CLI's
 # own state lives in an isolated HOME (E2E_HOME), not in the real ~/.versola.
-# Postgres is not needed: the stub tools make `migrate` a no-op and the stub
-# services do not connect to anything. Nothing here prints a secret.
+# Postgres is not needed with stubs: the stub tools make `migrate` a no-op and
+# the stub services do not connect to anything. With --real the deployment has
+# its own bundled Postgres (volume versola-postgres-data-vps, port 5432 must be
+# free). Nothing here prints a secret.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -53,8 +68,24 @@ die() { echo "e2e: $*" >&2; exit 1; }
 # Central sits behind the proxy's front: 8090 is nginx's and balances over the
 # central replicas, which listen on 28090/28091. Answers on both mean the front
 # is up with central behind it; the front must answer with central's version.
+#
+# With real images (REAL=yes) central answers whatever it answers at "/": what
+# is checked is that something below 500 answers on both ports, and that every
+# central/auth/edge container runs the wanted version (the images' tag), since
+# real answers carry no version.
 check_central() {
   local want="$1" out
+  if [ -n "${REAL:-}" ]; then
+    local code port
+    for port in 8090 28090; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$port/" 2>/dev/null || true)"
+      [[ "$code" =~ ^[1-4][0-9][0-9]$ ]] || { echo "e2e: 127.0.0.1:$port answered '$code', not a status below 500" >&2; return 1; }
+    done
+    local stray
+    stray="$(docker ps --format '{{.Names}} {{.Image}}' | grep -E '^versola-(central|auth|edge)' | grep -v ":$want\$" || true)"
+    [ -z "$stray" ] || { echo "e2e: not all on $want:" >&2; echo "$stray" >&2; return 1; }
+    return 0
+  fi
   out="$(curl -fsSi --max-time 5 http://127.0.0.1:8090/ 2>&1)" || { echo "e2e: central's front (127.0.0.1:8090) does not answer: $out" >&2; return 1; }
   grep -q "central" <<<"$out" || { echo "e2e: 127.0.0.1:8090 is not answered by central: $out" >&2; return 1; }
   [ -z "$want" ] || grep -qF "$want" <<<"$out" || { echo "e2e: central behind 8090 is not $want: $out" >&2; return 1; }
@@ -81,7 +112,16 @@ clean() {
     # shellcheck disable=SC2086
     docker rm -f $names >/dev/null
   fi
+  # The bundled Postgres of a --real run (its data: only on the throwaway stand,
+  # and only with the same confirmation as the containers above). Asked before
+  # any volume goes, so a refusal leaves nothing half removed.
+  local pgvol=""
+  if docker volume inspect versola-postgres-data-vps >/dev/null 2>&1; then
+    [ "${E2E_CONFIRM_CLEAN:-}" = "yes" ] || die "volume versola-postgres-data-vps exists: set E2E_CONFIRM_CLEAN=yes to remove it (its data is lost)"
+    pgvol=yes
+  fi
   docker volume rm versola-openbao-file-vps >/dev/null 2>&1 || true
+  [ -z "$pgvol" ] || { echo "this removes the volume versola-postgres-data-vps (the bundled Postgres' data)"; docker volume rm versola-postgres-data-vps >/dev/null; }
   for v in "$A" "$B"; do
     for s in central auth edge; do docker rmi "versola-e2e/$s:$v" >/dev/null 2>&1 || true; done
     docker rmi "ghcr.io/versolauth/versola-tools:$v" >/dev/null 2>&1 || true
@@ -122,9 +162,11 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest="" real="" force_assume=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --real) [ $# -ge 3 ] || die "--real needs two versions: FROM TO"; real=yes; A="$2"; B="$3"; shift 3 ;;
+      --assume-compatible) force_assume=yes; shift ;;
       --abort-at) abort_at="$2"; shift 2 ;;
       --replicas) replicas="$2"; shift 2 ;;
       --no-surge) surge="--no-surge"; shift ;;
@@ -157,12 +199,31 @@ run() {
   esac
   local assume="--assume-compatible"
   [ "$manifest" != declared ] || assume=""
+  # Secrets of a deployment older than the plan: stubs only. A real first
+  # install has none, and a customer would not pass the flag.
+  local legacy="--allow-legacy-secrets"
+  if [ -n "$real" ]; then
+    REAL=yes
+    legacy=""
+    # The release's own manifest decides, as for a customer.
+    assume=""; [ -z "$force_assume" ] || assume="--assume-compatible"
+    [ -z "$slow_central" ] && [ -z "$manifest" ] || die "--manifest and --slow-central are for stubs, not --real"
+    local v
+    for v in "$A" "$B"; do
+      [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]] || die "version $v does not look like a Versola release (e.g. 0.7.5, no leading v)"
+    done
+    [ "$A" != "$B" ] || die "--real: FROM and TO are the same version"
+    echo "e2e: --real covers no 8083 (mutual TLS), no token flow and no central console: a clean run is not yet a pass of versola-cli#84" >&2
+  elif [ -n "$force_assume" ]; then
+    die "--assume-compatible is for --real; stubs pass it themselves"
+  fi
   command -v docker >/dev/null || die "no docker"
 
   local found; found="$(existing)"
   [ -z "$found" ] || die "containers named versola* already exist here, refusing to touch them:
 $found"
   docker volume inspect versola-openbao-file-vps >/dev/null 2>&1 && die "volume versola-openbao-file-vps exists, refusing to use it"
+  [ -z "$real" ] || ! docker volume inspect versola-postgres-data-vps >/dev/null 2>&1 || die "volume versola-postgres-data-vps exists, refusing to use it"
   [ ! -e "$E2E_HOME/.versola" ] || die "$E2E_HOME/.versola is left from an earlier run: run.sh clean first"
   [ "$(uname -s)" = "Linux" ] || die "Linux only (network_mode: host, /proc/meminfo)"
   # The CLI's own prerequisite checks (internal/checks): at least 3.25 GiB of
@@ -170,12 +231,14 @@ $found"
   local kb; kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
   [ "${kb:-0}" -ge $((3584 * 1024)) ] || die "only $((${kb:-0} / 1024)) MiB of memory available; the CLI wants more than 3.25 GiB free for a first configure"
   [ "$(df -Pk "$PWD" | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ] || die "less than 4 GiB of free disk in $PWD"
-  for p in 2821 8082 8083 8090 8200 28090 28091 28190 28191; do
+  local ports="2821 8082 8083 8090 8200 28090 28091 28190 28191"
+  [ -z "$real" ] || ports="$ports 5432"
+  for p in $ports; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then die "port $p is already in use"; fi
   done
 
   [ -z "$slow_central" ] || [[ "$slow_central" =~ ^[0-9]+$ ]] || die "--slow-central: a number of seconds"
-  build "$base" "$slow_central" "$manifest"
+  [ -n "$real" ] || build "$base" "$slow_central" "$manifest"
 
   # The CLI keeps its state under $HOME; the docker CLI's own config stays where it is.
   export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
@@ -183,8 +246,10 @@ $found"
   export HOME="$E2E_HOME"
   local work="$E2E_HOME/run"; mkdir -p "$work"
 
-  say "deploying stub $A with $replicas auth and $replicas edge replicas"
-  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" --postgres-host "$PG_HOST" --proxy external
+  say "deploying $([ -n "$real" ] && echo "real" || echo "stub") $A with $replicas auth and $replicas edge replicas"
+  # Real: no --postgres-host, so the bundled Postgres, as a new customer gets it.
+  local pg=(--postgres-host "$PG_HOST"); [ -z "$real" ] || pg=()
+  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} --proxy external
   printf 'y\n' | "$cli" migrate
   printf 'y\n' | "$cli" up --no-browser
   if [ "$replicas" -gt 1 ]; then
@@ -205,7 +270,10 @@ $found"
   # the zero-failure promise then.
   local central_target="127.0.0.1:8090"
   [ -z "$surge" ] || central_target=""
-  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" -expect-versions "$versions" ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
+  # Stubs tell their version in every answer; real services do not (-real),
+  # so there the versions are read from the containers, see check_central.
+  local texp=(-expect-versions "$versions"); [ -z "$real" ] || texp=(-real)
+  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" ${texp[@]+"${texp[@]}"} ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
   rpid=""
   # A killed or failed script must not leave the client hammering the proxy,
@@ -237,11 +305,11 @@ $found"
     if "$cli" status 2>&1 | grep -q "under way"; then echo "e2e: status reports a rollout under way after a refusal" >&2; rrc=1; fi
   elif [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes ${assume:+$assume} --allow-legacy-secrets $surge || rrc=$?
+    "$cli" rollout "$B" --yes ${assume:+$assume} ${legacy:+$legacy} $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes ${assume:+$assume} --allow-legacy-secrets $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes ${assume:+$assume} ${legacy:+$legacy} $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
@@ -259,7 +327,7 @@ $found"
     "$cli" status || true
     sleep 5
     say "aborting ${surge}"
-    "$cli" rollout --abort --yes --allow-legacy-secrets $surge | tee "$work/abort.txt" || arc=$?
+    "$cli" rollout --abort --yes ${legacy:+$legacy} $surge | tee "$work/abort.txt" || arc=$?
     if [ "$abort_at" = prepared ] && ! grep -q "nothing running was touched" "$work/abort.txt"; then
       echo "e2e: an abort before migrate must only restore the previous configuration" >&2; arc=1
     fi
@@ -298,7 +366,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--real FROM TO] [--assume-compatible] [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

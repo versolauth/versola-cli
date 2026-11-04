@@ -150,3 +150,28 @@ func TestLoadRefusesAnOversizedFile(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestLoadRefusesWhatIsNotARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	// A directory in the manifest's place needs no privileges to make.
+	if err := os.Mkdir(filepath.Join(dir, FileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("a directory: got %v", err)
+	}
+
+	// A symlink to a valid manifest is refused too (skipped where symlinks
+	// need a privilege the test does not have).
+	link := t.TempDir()
+	target := filepath.Join(link, "real.json")
+	if err := os.WriteFile(target, []byte(sample), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(link, FileName)); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if _, err := Load(link); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("a symlink: got %v", err)
+	}
+}

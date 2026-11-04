@@ -67,11 +67,22 @@ func Parse(data []byte) (*Manifest, error) {
 // Load reads the manifest in dir, a versola-tools output directory. A missing
 // file is (nil, nil): the release predates the manifest.
 func Load(dir string) (*Manifest, error) {
-	f, err := os.Open(filepath.Join(dir, FileName))
+	path := filepath.Join(dir, FileName)
+	// Lstat, not Stat: the directory is written by a container, and a symlink
+	// there would make this read whatever it points at. Only a regular file is
+	// the manifest.
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("couldn't read %s: %w", FileName, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", FileName)
+	}
+	f, err := os.Open(path)
+	if err != nil {
 		return nil, fmt.Errorf("couldn't read %s: %w", FileName, err)
 	}
 	defer f.Close()

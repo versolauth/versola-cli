@@ -15,6 +15,7 @@ traffic/  GET+POST client for the proxy's public port (127.0.0.1:2821),
           8090 (left out with --no-surge: central restarts in place); counts every
           transport error and unexpected status, and on the long-lived 8083
           connections tells cuts and reconnects apart (below)
+mtls-client.sh  --real only: a client and its EST certificate for 8083 (below)
 run.sh    builds the images, deploys version A, rolls out version B under
           traffic, prints the report
 ```
@@ -86,7 +87,7 @@ What differs from the stub run:
   behind the proxy), `POST /token` with no credentials, 8082 and central's
   front 8090. For the last three any status below 500 is an answer; 5xx and
   transport errors are failures everywhere. Their exact status was not seen on
-  a real run, so it is not asserted.
+  a real run, so it is not asserted. 8083 is added below.
 - Real answers carry no version, so the version is read from the containers:
   after `up` every central/auth/edge container must run FROM, at the end TO
   (FROM again after an abort). The client does not prove that traffic ran on
@@ -118,11 +119,39 @@ request at a time on their one connection. After the run the report holds:
   host's, so the stand's other load is in it: run on an idle stand). On a
   12 GB stand it says nothing about a 4 GB VPS beyond the sum it shows.
 
-Not covered yet, so a clean `--real` run is **not** a pass of #84: auth's
-mutual-TLS port 8083 (a client certificate), the token flow (an OAuth client and
-a user), central's admin console, the refusal of a release that needs a fresh
-database. Not run: this was written without a Docker daemon, and it needs
-published FROM and TO tools with the bundled Postgres (versola#849).
+### The 8083 client (`mtls-client.sh`)
+
+A real 8083 needs a client certificate, which the stubs did not. Before the
+traffic starts `run.sh --real` runs `mtls-client.sh`, written from versola's
+`scripts/est-smoke.sh` (steps 1-4; read its header): it registers a service
+client (`tls_client_auth`, EST enrolment) in central through the admin API,
+creates an enrolment token, enrols with a key and a CSR made here
+(`/.well-known/est/simpleenroll` through the proxy), and asks `/token` once
+over 8083 with the certificate (retrying 10 x 3 s: auth learns of the client
+by a sync). The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
+own deployment, read from its `central.secrets.env` in the isolated `E2E_HOME`
+the way `versola edge add` does; it goes to curl on stdin and is never printed.
+The client is left in the throwaway deployment (`clean` removes its database).
+If this step fails the run stops before any traffic; `--no-mtls` runs without
+8083 and is then not a pass. Needs `curl`, `openssl` and `python3` on the
+stand.
+
+The client then sends, to 8083 with the certificate, `POST /token` with the
+`client_credentials` grant: on a new connection each time and on 3 long-lived
+ones (edge keeps a pool, and a request has to be in flight when the proxy
+closes the connection for a cut to show). 200 is expected; cuts are reported
+and reconnects counted as for the stubs (the known limitation above).
+
+Not covered yet, so a clean `--real` run is **not** a pass of #84: the
+authorization code flow (it needs a user, and a stock vps install runs with
+`ENV_NAME=prod`: no fixed OTP, no password-set endpoint; see #84), central's
+admin console, the refusal of a release that needs a fresh database. Not run:
+this was written without a Docker daemon, and it needs published FROM and TO
+tools with the bundled Postgres (versola#849). Unverified against a real
+stand: that the default tenant accepts this client (an EST client needs the
+tenant's `mtlsCertificateHeader` set, and the tenant's security
+profile defaults to `fapi2`), the shape of the EST answer, and that 200 is what
+auth answers to the grant.
 
 ## Run (only on a throwaway machine)
 
@@ -134,6 +163,7 @@ published FROM and TO tools with the bundled Postgres (versola#849).
 ./run.sh run /path/to/versola --manifest declared  # B's release.json lists A in rollingFrom: no --assume-compatible
 ./run.sh run /path/to/versola --manifest fresh     # B says it needs a fresh database: refused, A keeps serving
 ./run.sh run /path/to/versola --real 0.7.5 0.7.6 --rps 30   # with 30 requests per second; see "Load and numbers"
+./run.sh run /path/to/versola --real 0.7.5 0.7.6 --no-mtls   # without the 8083 client (not a pass)
 ./run.sh run /path/to/versola --real 0.7.5 0.7.6   # real images and the bundled Postgres, see "Real images" (the versions are examples)
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```

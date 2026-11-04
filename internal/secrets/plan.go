@@ -1,6 +1,10 @@
 package secrets
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/versolauth/versola-cli/internal/manifest"
+)
 
 // Values holds secret values by service, then by name: Values["auth"]["PASSWORDS_SECRET"].
 // It is how candidates (what versola-tools just generated) and existing values
@@ -165,6 +169,10 @@ type Result struct {
 	DeployedRevision int       `json:"deployedRevision,omitempty"`
 	Actions          []Action  `json:"actions"`
 	Problems         []Problem `json:"problems"`
+	// Compatibility is what the release being planned says about an upgrade from
+	// the version recorded on this machine (vps), when there is one and the release
+	// has a manifest (see internal/manifest). It carries versions and a link only.
+	Compatibility *manifest.Report `json:"compatibility,omitempty"`
 }
 
 // OK reports that nothing stops the plan.

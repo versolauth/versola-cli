@@ -5,7 +5,7 @@
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 #                  [--abort-at prepared|central|standin|midway] [--strict]
-#                  [--slow-central SECONDS]
+#                  [--slow-central SECONDS] [--manifest declared|fresh]
 #   ./run.sh clean
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -21,6 +21,13 @@
 # --slow-central makes central of version B answer /readiness with 503 for that
 # many seconds after it starts (default 2), to see the rollout wait for it and
 # report how long central was unavailable; auth and edge must keep serving.
+#
+# --manifest makes version B's versola-tools carry a release.json (what a real
+# release ships, versola-cli#83): `declared` lists A in rollingFrom, and the
+# rollout then runs WITHOUT --assume-compatible and must be accepted; `fresh`
+# lists A in freshDatabaseFrom, and the rollout -- with --assume-compatible --
+# must be refused before anything changes: A keeps running, no rollout under way.
+# Without it B has no manifest and --assume-compatible is passed, as before.
 #
 # Cuts of the long-lived 8083 connections (nginx closes a retired worker's
 # connections 30 s after each reload) are the known limitation: reported, not
@@ -88,7 +95,7 @@ clean() {
 }
 
 build() {
-  local base="$1" slow_central="${2:-}"
+  local base="$1" slow_central="${2:-}" manifest="${3:-}"
   say "building stub images ($A, $B) and the wrapped versola-tools (base $base)"
   for v in "$A" "$B"; do
     for s in central auth edge; do
@@ -97,8 +104,11 @@ build() {
       docker build -q --platform linux/amd64 --build-arg ROLE="$s" --build-arg VERSION="$v" \
         ${delay[@]+"${delay[@]}"} -t "versola-e2e/$s:$v" "$HERE/stub" >/dev/null
     done
+    # Only B carries a manifest, and it speaks about an upgrade from A.
+    local mf=()
+    [ "$v" = "$B" ] && [ -n "$manifest" ] && mf=(--build-arg MANIFEST="$manifest" --build-arg MANIFEST_FROM="$A")
     docker build -q --platform linux/amd64 --build-arg BASE="ghcr.io/versolauth/versola-tools:$base" \
-      --build-arg VERSION="$v" -t "ghcr.io/versolauth/versola-tools:$v" "$HERE/tools" >/dev/null
+      ${mf[@]+"${mf[@]}"} --build-arg VERSION="$v" -t "ghcr.io/versolauth/versola-tools:$v" "$HERE/tools" >/dev/null
   done
   # `versola rollout` pulls the new version's images first; the stubs are only
   # in the local store, so compose must skip them (pull_policy: never). Check
@@ -112,7 +122,7 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --abort-at) abort_at="$2"; shift 2 ;;
@@ -121,6 +131,7 @@ run() {
       --base-tools) base="$2"; shift 2 ;;
       --strict) strict=yes; shift ;;
       --slow-central) slow_central="$2"; shift 2 ;;
+      --manifest) manifest="$2"; shift 2 ;;
       *) die "unknown argument $1" ;;
     esac
   done
@@ -139,6 +150,13 @@ run() {
   # traffic client can only be asked for A. What the abort must achieve (every
   # container on A, the front on A, no rollout under way) is checked after it.
   [ -z "$abort_at" ] || versions="$A"
+  case "$manifest" in
+    "" | declared) ;;
+    fresh) versions="$A"; [ -z "$abort_at" ] || die "--manifest fresh refuses the rollout: there is nothing to abort" ;;
+    *) die "--manifest: declared or fresh" ;;
+  esac
+  local assume="--assume-compatible"
+  [ "$manifest" != declared ] || assume=""
   command -v docker >/dev/null || die "no docker"
 
   local found; found="$(existing)"
@@ -157,7 +175,7 @@ $found"
   done
 
   [ -z "$slow_central" ] || [[ "$slow_central" =~ ^[0-9]+$ ]] || die "--slow-central: a number of seconds"
-  build "$base" "$slow_central"
+  build "$base" "$slow_central" "$manifest"
 
   # The CLI keeps its state under $HOME; the docker CLI's own config stays where it is.
   export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
@@ -200,13 +218,30 @@ $found"
   # from the previous configuration.
   local idsA=""
   [ "$abort_at" != central ] || idsA="$(docker ps --no-trunc --format '{{.Names}} {{.ID}}' | grep -E '^versola-(auth|edge)' | sort)"
-  if [ -z "$abort_at" ]; then
+  if [ "$manifest" = fresh ]; then
+    # B says it needs a fresh database from A: the rollout must be refused,
+    # --assume-compatible or not, before anything changes -- A keeps serving
+    # (the traffic client expects only A), nothing is under way, central's
+    # front is still A's.
+    say "rolling out $B, whose release says it needs a fresh database: must be refused"
+    local out
+    if out="$("$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge 2>&1)"; then
+      echo "e2e: the rollout of a fresh-database release was accepted" >&2; rrc=1
+    elif ! grep -q "needs a fresh database" <<<"$out"; then
+      echo "e2e: the rollout was refused, but not for the fresh database:" >&2; echo "$out" >&2; rrc=1
+    fi
+    echo "$out"
+    local stray
+    stray="$(docker ps --format '{{.Names}} {{.Image}}' | grep -E '^versola-(central|auth|edge)' | grep -v ":$A\$" || true)"
+    if [ -n "$stray" ]; then echo "e2e: something left $A although the rollout was refused:" >&2; echo "$stray" >&2; rrc=1; fi
+    if "$cli" status 2>&1 | grep -q "under way"; then echo "e2e: status reports a rollout under way after a refusal" >&2; rrc=1; fi
+  elif [ -z "$abort_at" ]; then
     say "rolling out $B ${surge}"
-    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge || rrc=$?
+    "$cli" rollout "$B" --yes ${assume:+$assume} --allow-legacy-secrets $surge || rrc=$?
   else
     say "rolling out $B ${surge}, stopping it at '$abort_at'"
     local log="$work/rollout.txt"
-    "$cli" rollout "$B" --yes --assume-compatible --allow-legacy-secrets $surge >"$log" 2>&1 &
+    "$cli" rollout "$B" --yes ${assume:+$assume} --allow-legacy-secrets $surge >"$log" 2>&1 &
     rpid=$!
     local sent=""
     while kill -0 "$rpid" 2>/dev/null; do
@@ -247,8 +282,8 @@ $found"
   wait "$tpid" || trc=$?
 
   local crc=0
-  # Where the run ended: back on A after an abort, on B after a rollout.
-  if [ -n "$abort_at" ]; then check_central "$A" || crc=1; else check_central "$B" || crc=1; fi
+  # Where the run ended: back on A after an abort or a refused rollout, on B after a rollout.
+  if [ -n "$abort_at" ] || [ "$manifest" = fresh ]; then check_central "$A" || crc=1; else check_central "$B" || crc=1; fi
 
   say "traffic report"
   cat "$work/traffic.txt"
@@ -263,7 +298,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

@@ -427,6 +427,20 @@ the public names, `--cert-lifetime-days` and `--est` were remembered already;
 shows the recorded auth URL, the proxy mode (marked when the certificate comes
 from Let's Encrypt staging) and, when it was set up by hand, OpenBao.
 
+**A release that cannot be upgraded in place.** After versola-tools has
+written the new version's configs, and before any secret is written or the
+record replaced, `configure vps` reads the release's manifest (`release.json`,
+see `rollout`) and compares it with the version recorded here. If the release
+lists that version in `freshDatabaseFrom` (0.6.* to 0.7.0, say), `configure`
+stops with the release notes and the way on -- a backup, `uninstall --purge`,
+`bootstrap` -- instead of letting `migrate` fail later on a Flyway checksum.
+`--allow-fresh-database` (an advanced flag, `--help-all`) goes on anyway, for
+someone who has already put a new, empty database behind the deployment; it
+is refused on `local`. Anything else the manifest says, or no manifest at all
+(an older release), changes nothing here, and a first deployment has no
+version to upgrade from. `bootstrap` has no such flag: it is for a first
+deployment, and a refusal there tells you to run `configure --allow-fresh-database`, then `migrate` and `up`.
+
 `--auth-url`, `--proxy` and the Postgres are fields of `state.json`. Staging and
 "OpenBao set up by hand" are not: they are read the way `rollout` reads them,
 from the proxy configuration of the current deployment and from whether
@@ -606,7 +620,11 @@ versola secrets plan vps 0.7.1 --json
   `bootstrap` and `rollout` stop with the same code when their own secrets
   plan has problems.
 - `--json` prints the same report for scripts:
-  `{version, ok, target, state, schemaRevision, deployedRevision?, actions[], problems[]}`.
+  `{version, ok, target, state, schemaRevision, deployedRevision?, actions[], problems[], compatibility?}`.
+  On vps, with a recorded version and a release that has a manifest,
+  `compatibility` is `{from, rolling, freshDatabase, notes?}`: what that release says about an upgrade from the
+  recorded version (`rolling` is `true`, `false` for a fresh-database release, or `null` when it does not say).
+  A manifest this versola cannot read is left out here with a note on stderr, not an error: a plan is about secrets (rollout and configure do stop on it).
   Actions are `{service, name, action, source?, reason?}`; problems are
   `{kind, name?, service?, services?, group?, present?, missing?}`.
   It never contains a value. The other machine-readable outputs,
@@ -1161,7 +1179,7 @@ versola replica remove edge
 
 ### `rollout <version>` / `rollout --abort` (vps)
 
-`versola rollout <version> --assume-compatible` moves a running vps
+`versola rollout <version>` moves a running vps
 deployment to another Versola version without stopping it: the new
 version is prepared next to the running one (versola-tools, the secrets
 plan), the database is migrated, central is moved to the new version
@@ -1184,14 +1202,41 @@ replaces replicas without a stand-in (one fewer serves meanwhile; with one
 replica it needs `--allow-downtime`; central is restarted in place, as
 before stand-ins).
 
-**Compatibility is yours to confirm.** During a rollout the running
+**Compatibility is declared by the release.** During a rollout the running
 version works on the new version's schema, and an abort runs it there
-alone. Versola releases before 1.0 don't promise that ("compatibility
-between 0.x releases is not guaranteed"), so `rollout` refuses to start
-without `--assume-compatible`: read the release notes first (additive
-migrations; the running version works on the new schema). A release that
-is not compatible is deployed with `configure`, `migrate` and `up` (a
-short stop) after a database backup.
+alone. Every release's versola-tools carries a manifest, `release.json`,
+with one entry per release: from which running versions that release can
+be rolled to (`rollingFrom`) and from which no in-place upgrade exists
+(`freshDatabaseFrom`). Before anything changes, `rollout` (and `--dry-run`)
+runs the new release's versola-tools into a temporary directory and reads the entry
+of the version it deploys (`~/.versola/rollout-compat-*`, removed at once;
+it holds only unused secret candidates):
+
+- the running version is in `rollingFrom`: the plan says *declared by the
+  release* (with its notes link) and no flag is needed;
+- it is in `freshDatabaseFrom`: the rollout is refused, **with or without
+  `--assume-compatible`** -- no flag can make an in-place upgrade exist. The
+  message gives the release notes and the way on (a backup, then
+  `uninstall --purge` and `bootstrap`, with your own Postgres an empty
+  database), before `migrate` has run;
+- anything else -- a release from before the manifest, a version it does not
+  mention, a downgrade (a manifest only speaks about upgrades: the running
+  version has to be lower) -- keeps the old rule: `rollout` refuses without
+  `--assume-compatible`, and says why (*the release does not state
+  compatibility with 0.7.0*). Releases before 1.0 don't promise it ("compatibility
+  between 0.x releases is not guaranteed"): read the release notes first
+  (additive migrations; the running version works on the new schema). A release
+  that is not compatible is deployed with `configure`, `migrate` and `up` (a
+  short stop) after a database backup.
+
+A glob in `rollingFrom` (`0.7.*`) does not match a pre-release such as
+`0.7.9-rc1`; a glob in `freshDatabaseFrom` does. A manifest this versola
+cannot read (a newer `schemaVersion`) stops the command with a message that
+says so (`versola upgrade`): it may declare what this version cannot
+understand. A rollout that is already under way is continued without asking
+again. `rollout --abort` is not asked either; going back to an older version
+by rolling it out again needs `--assume-compatible`, since an older release
+cannot know a newer one.
 
 `versola rollout --abort` goes back to the version the unfinished rollout
 came from:
@@ -1305,14 +1350,17 @@ the renewal.
 
 1. Read the release notes of the new version: additive migrations, the
    running version working on the new schema. If not, this is a
-   `configure` / `migrate` / `up` deployment instead.
+   `configure` / `migrate` / `up` deployment instead. A release that declares
+   it in its manifest says so itself in step 3 (and a fresh-database release
+   is refused there).
 2. `versola backup create` -- migrations can't be rolled back -- and copy
    the archive off the server. Without the CLI: a `pg_dump -Fc` of the
    database and a copy of `~/.versola/active/state.json` (and OpenBao's data
    and `~/.versola/openbao/`, without which the dump can't be read).
 3. `versola rollout <version> --dry-run`: the plan, the checks, the
    secrets plan, the migrations it would apply. Nothing changes.
-4. `versola rollout <version> --assume-compatible`. Cut off, run the same
+4. `versola rollout <version>` (add `--assume-compatible` only when the plan
+   says the release does not state compatibility). Cut off, run the same
    command again; `versola status` shows where it stands.
 5. Check through the proxy (`curl -H 'Host: <your domain>'
    http://127.0.0.1:2821/.well-known/openid-configuration` and the admin

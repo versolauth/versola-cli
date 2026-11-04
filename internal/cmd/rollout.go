@@ -30,12 +30,14 @@ var rolloutCmd = &cobra.Command{
 keeps serving.
 
   versola rollout 0.8.1 --dry-run
-  versola rollout 0.8.1 --assume-compatible
+  versola rollout 0.8.1
   versola rollout --abort
 
 It prepares the new version next to the running one, migrates the database
 (back it up first: migrations can't be rolled back), replaces central, auth
 and edge one replica at a time behind a stand-in, then moves the proxy.
+A release says in its manifest which running versions it can be rolled to from;
+for one that says nothing (an older release, a version it does not mention)
 --assume-compatible says you read the release notes: the running version works
 on the new schema (releases before 1.0 don't promise it). Cut off -- an error,
 Ctrl-C, a dropped SSH session -- the same command continues where it stopped;
@@ -64,7 +66,7 @@ func init() {
 	rolloutCmd.Flags().StringSliceVar(&rolloutGenerateMissing, "generate-missing", nil, generateMissingUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAllowLegacy, "allow-legacy-secrets", false, allowLegacyUsage)
 	rolloutCmd.Flags().BoolVar(&rolloutAbort, "abort", false, "go back to the version the unfinished rollout came from (migrations and secrets stay; add --no-surge if memory or Postgres connections are short)")
-	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "you checked the release notes: the running version works on the new version's schema (releases before 1.0 don't promise it)")
+	rolloutCmd.Flags().BoolVar(&rolloutAssumeCompat, "assume-compatible", false, "only when the release does not state it: you checked the release notes, the running version works on the new version's schema (releases before 1.0 don't promise it). Never overrides a release that says it needs a fresh database")
 	// Recovery flags, for a secrets plan that stops: under --help-all.
 	hideFlags(rolloutCmd, "generate-missing", "allow-legacy-secrets")
 }
@@ -102,6 +104,17 @@ func runRollout(cmd *cobra.Command, args []string) error {
 	if done {
 		fmt.Printf("Versola %s is already what runs here -- nothing to roll out.\n", version)
 		return nil
+	}
+	// What the new release says about an upgrade from the running version is
+	// read from its own versola-tools (nothing is changed): it decides whether
+	// --assume-compatible is asked for, or the rollout refused outright. A
+	// rollout under way was confirmed when it started.
+	if st != nil && !st.RolloutUnderway() {
+		compat, err := deploy.RolloutCompatibility(st, version)
+		if err != nil {
+			return err
+		}
+		opts.Compat = compat
 	}
 	if rolloutDryRun {
 		return deploy.RolloutDryRun(st, version, opts)

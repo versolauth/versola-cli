@@ -59,8 +59,12 @@ import (
 // registry is --registry: the prefix the Versola images are pulled from
 // ("" for the default, DefaultRegistry). It is recorded, so that the
 // rolling upgrades that follow keep pulling from the same place.
-func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string) (ConfigureResult, error) {
-	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, registry, nil)
+//
+// allowFreshDatabase is --allow-fresh-database: the release being deployed says
+// no in-place upgrade exists from the version recorded here, and the operator
+// has already put a new, empty database behind it (see checkFreshDatabase).
+func Configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, allowFreshDatabase bool) (ConfigureResult, error) {
+	return configure(target, version, authURL, postgresHost, pg, setupOpenBaoByHand, proxyOpts, secretOpts, registry, allowFreshDatabase, nil)
 }
 
 // CheckTarget refuses a target other than "local" and "vps", as a usage
@@ -112,7 +116,7 @@ type stagedConfigure struct {
 // The secrets plan (0f) is applied here, before any container of the new
 // version starts: a secret new in that version is in OpenBao, and in the new
 // bundle's *.secrets.env, by the time the first one reads it.
-func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, staged *stagedConfigure) (ConfigureResult, error) {
+func configure(target, version, authURL, postgresHost string, pg PostgresOptions, setupOpenBaoByHand bool, proxyOpts ProxyOptions, secretOpts SecretOptions, registry string, allowFreshDatabase bool, staged *stagedConfigure) (ConfigureResult, error) {
 	if err := CheckTarget(target); err != nil {
 		return ConfigureResult{}, err
 	}
@@ -308,6 +312,17 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	// Both targets' proxies serve the admin console from the bundle.
 	if err := requireAdminConsole(dir, version); err != nil {
 		return ConfigureResult{}, err
+	}
+	// What this release says about an upgrade from the version recorded on
+	// this machine: one that needs a fresh database is refused here, before a
+	// secret is written or the record replaced (nothing has been touched yet),
+	// instead of by a Flyway checksum error at `migrate`. A rollout asked the
+	// same question before it got here (RolloutCompatibility), and is not asked
+	// again. A first deployment has no version to upgrade from.
+	if staged == nil && stored != nil {
+		if err := checkFreshDatabase(dir, stored.Version, version, allowFreshDatabase); err != nil {
+			return ConfigureResult{}, err
+		}
 	}
 
 	// OpenBao has to actually be up before secrets can be resolved against

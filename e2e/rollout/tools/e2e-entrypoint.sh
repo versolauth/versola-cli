@@ -20,6 +20,21 @@ done
 
 ./entrypoint.sh "$@"
 
+# The release manifest this version stands for, when the run asks for one
+# (E2E_MANIFEST): `declared` lists E2E_MANIFEST_FROM in rollingFrom, `fresh` in
+# freshDatabaseFrom. Without it the file is the real image's own, or absent.
+if [ -n "${E2E_MANIFEST:-}" ]; then
+  rolling=""; fresh=""
+  case "$E2E_MANIFEST" in
+    declared) rolling="\"$E2E_MANIFEST_FROM\"" ;;
+    fresh) fresh="\"$E2E_MANIFEST_FROM\"" ;;
+    *) echo "e2e stub: E2E_MANIFEST is declared or fresh" >&2; exit 1 ;;
+  esac
+  printf '{"schemaVersion":1,"releases":[{"version":"%s","rollingFrom":[%s],"freshDatabaseFrom":[%s],"notes":"https://example.com/releases/tag/%s"}]}\n' \
+    "$E2E_VERSION" "$rolling" "$fresh" "$E2E_VERSION" > /out/release.json
+  echo "e2e stub: release.json says $E2E_VERSION is $E2E_MANIFEST from $E2E_MANIFEST_FROM"
+fi
+
 f=/out/compose.fragment.yml
 [ -f "$f" ] || exit 0 # e.g. `secrets plan`: nothing to rewrite
 

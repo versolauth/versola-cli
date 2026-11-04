@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/versolauth/versola-cli/internal/manifest"
 )
 
 // marker is planted in EVERY value Plan is given -- stored and candidate alike --
@@ -99,7 +101,9 @@ func TestReportTypesHaveNoRoomForAValue(t *testing.T) {
 	}{
 		{Action{}, []string{"Kind", "Name", "Reason", "Service", "Source"}},
 		{Problem{}, []string{"Group", "Kind", "Missing", "Name", "Present", "Service", "Services"}},
-		{Result{}, []string{"Actions", "DeployedRevision", "Problems", "SchemaRevision", "State", "Target"}},
+		{Result{}, []string{"Actions", "Compatibility", "DeployedRevision", "Problems", "SchemaRevision", "State", "Target"}},
+		// Versions, a verdict and a link that only a plain https URL passes (manifest.safeLink).
+		{manifest.Report{}, []string{"FreshDatabase", "From", "Notes", "Rolling"}},
 		{jsonReport{}, []string{"OK", "Result", "Version"}},
 	} {
 		if got := fields(c.v); !reflect.DeepEqual(got, c.want) {
@@ -288,6 +292,44 @@ func TestRenderTextUnknownStateWayOut(t *testing.T) {
 		}
 		if strings.Contains(b.String(), "uninstall --purge") {
 			t.Errorf("%s/%s offers the purge:\n%s", other.Target, other.State, b.String())
+		}
+	}
+}
+
+func TestCompatibilityInReports(t *testing.T) {
+	r := scenarios(t)["lost"]
+	var plain bytes.Buffer
+	if err := RenderJSON(&plain, "0.7.6", r); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "compatibility") {
+		t.Errorf("a plan without a verdict mentions one:\n%s", plain.String())
+	}
+
+	yes := true
+	for name, c := range map[string]struct {
+		rep      manifest.Report
+		text     string
+		jsonPart string
+	}{
+		"fresh":   {manifest.Report{From: "0.6.2", FreshDatabase: true, Rolling: new(bool), Notes: "https://example.com/n"}, "Upgrade from 0.6.2: the release says it needs a fresh database (no rollout, no in-place upgrade); release notes: https://example.com/n", `"freshDatabase": true`},
+		"rolling": {manifest.Report{From: "0.7.5", Rolling: &yes}, "Upgrade from 0.7.5: the release says a rolling upgrade is supported", `"rolling": true`},
+		"unknown": {manifest.Report{From: "0.7.1"}, "Upgrade from 0.7.1: the release does not state it (rollout asks for --assume-compatible)", `"rolling": null`},
+	} {
+		with := r
+		with.Compatibility = &c.rep
+		var text, js bytes.Buffer
+		if err := RenderText(&text, "0.7.6", with); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(text.String(), c.text) {
+			t.Errorf("%s: the text report lacks %q:\n%s", name, c.text, text.String())
+		}
+		if err := RenderJSON(&js, "0.7.6", with); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(js.String(), `"compatibility"`) || !strings.Contains(js.String(), c.jsonPart) {
+			t.Errorf("%s: the JSON report lacks %s:\n%s", name, c.jsonPart, js.String())
 		}
 	}
 }

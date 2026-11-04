@@ -204,7 +204,7 @@ func runBootstrap(cmd *cobra.Command, args []string) error {
 	}
 	res, err := deploy.Configure(target, version, vf.AuthURL, vf.PostgresHost, pg, vf.SetupOpenBao,
 		deploy.ProxyOptions{Mode: vf.Proxy, ACMEStaging: vf.ACMEStaging, CentralURL: bootstrapCentralURL, Public: public, CertDays: days, Est: est},
-		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry)
+		deploy.SecretOptions{GenerateMissing: bootstrapGenerateMissing, AllowLegacy: bootstrapAllowLegacy}, registry, false)
 	if err != nil {
 		return explainMissingImage(err, choice, "bootstrap")
 	}

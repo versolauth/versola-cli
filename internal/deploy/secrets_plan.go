@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/manifest"
 	"github.com/versolauth/versola-cli/internal/openbao"
 	"github.com/versolauth/versola-cli/internal/secrets"
 	"github.com/versolauth/versola-cli/internal/state"
@@ -131,11 +132,37 @@ func PlanSecrets(ctx context.Context, target, version, registry string, generate
 	}
 
 	opts := SecretOptions{GenerateMissing: generateMissing}
-	return secrets.Plan(schema, candidates, existing, prev, secrets.Options{
+	result := secrets.Plan(schema, candidates, existing, prev, secrets.Options{
 		Target:            target,
 		GenerateMissing:   opts.generateSet(),
 		InstallInProgress: installing,
-	}), nil
+	})
+	result.Compatibility = planCompatibility(log, dir, target, version)
+	return result, nil
+}
+
+// planCompatibility is what the release being planned says about an upgrade
+// from the vps version recorded on this machine, for the report. Nothing of it
+// can stop a plan: a release without a manifest, a first deployment, an
+// unreadable manifest all leave it out (the last with a note on log).
+func planCompatibility(log io.Writer, dir, target, version string) *manifest.Report {
+	if target != "vps" {
+		return nil
+	}
+	st, err := state.Load()
+	if err != nil || st.Target != target || st.Version == "" {
+		return nil
+	}
+	m, err := manifest.Load(dir)
+	if err != nil {
+		fmt.Fprintf(log, "(not reporting compatibility: %v)\n", err)
+		return nil
+	}
+	if m == nil {
+		return nil
+	}
+	rep := m.Check(st.Version, version).Report()
+	return &rep
 }
 
 // loadPrevious is what this machine knows about the target's earlier
@@ -172,8 +199,9 @@ func planDir() (dir string, cleanup func(io.Writer), err error) {
 
 // scratchDirPrefixes are the temporary directories under ~/.versola that hold
 // versola-tools output with secret candidates: a plan's, and a rollout dry
-// run's (which also holds the env files it runs `migrate --dry-run` with).
-var scratchDirPrefixes = []string{"plan-", "rollout-dryrun-"}
+// run's (which also holds the env files it runs `migrate --dry-run` with), and the
+// one `rollout` reads the release manifest from.
+var scratchDirPrefixes = []string{"plan-", "rollout-dryrun-", "rollout-compat-"}
 
 // scratchDir is planDir for any of scratchDirPrefixes.
 func scratchDir(prefix string) (dir string, cleanup func(io.Writer), err error) {

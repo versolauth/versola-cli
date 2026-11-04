@@ -7,6 +7,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"unicode"
+
+	"github.com/versolauth/versola-cli/internal/manifest"
 )
 
 // The report is built from a Result's Actions and Problems, which are made of
@@ -58,6 +60,11 @@ func RenderText(w io.Writer, version string, r Result) error {
 		}
 	}
 
+	if c := r.Compatibility; c != nil {
+		// The versions come from state.json and the manifest's own entry; both are
+		// cleaned like everything else that reaches the terminal.
+		fmt.Fprintf(&b, "\nUpgrade from %s: %s\n", clean(c.From), describeCompatibility(*c))
+	}
 	if len(r.Problems) > 0 {
 		fmt.Fprintf(&b, "\nProblems (%d):\n", len(r.Problems))
 		for _, p := range r.Problems {
@@ -219,4 +226,22 @@ func cleanAll(in []string) []string {
 		out[i] = clean(s)
 	}
 	return out
+}
+
+// describeCompatibility says in a few words what the release states about an
+// upgrade from c.From.
+func describeCompatibility(c manifest.Report) string {
+	var s string
+	switch {
+	case c.FreshDatabase:
+		s = "the release says it needs a fresh database (no rollout, no in-place upgrade)"
+	case c.Rolling != nil && *c.Rolling:
+		s = "the release says a rolling upgrade is supported"
+	default:
+		s = "the release does not state it (rollout asks for --assume-compatible)"
+	}
+	if c.Notes != "" {
+		s += "; release notes: " + clean(c.Notes)
+	}
+	return s
 }

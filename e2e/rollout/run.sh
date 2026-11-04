@@ -239,7 +239,8 @@ run() {
     [ -z "$slow_central" ] && [ -z "$manifest" ] || die "--manifest and --slow-central are for stubs, not --real"
     local v
     for v in "$A" "$B"; do
-      [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]] || die "version $v does not look like a Versola release (e.g. 0.7.5, no leading v)"
+      # A release (0.7.5) or a test tag the CI published (test-rollout-a): it goes into image tags and paths, nothing odd.
+      [[ "$v" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] && [[ "$v" != *..* ]] || die "version $v is not a release or a plain test tag (letters, digits, . _ -; no leading v needed)"
     done
     [ "$A" != "$B" ] || die "--real: FROM and TO are the same version"
     echo "e2e: --real covers no authorization code flow (it needs a user) and no central console: a clean run is not yet a pass of versola-cli#84${no_mtls:+; --no-mtls also leaves out 8083}" >&2

@@ -72,7 +72,10 @@ The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
 The first step of versola-cli#84, "rollout by default only after a run on real
 images under load". `./run.sh run /path/to/versola --real 0.7.5 0.7.6` deploys
 the released images FROM with the bundled Postgres (no `--postgres-host`, as a
-new customer does), rolls out to TO and runs the traffic client with `-real`
+new customer does; FROM and TO are releases or test tags the `versola` CI
+publishes: its CI/CD workflow, run by hand with a `test_tag`, builds the images
+from a branch and pushes them under that tag, and two tags of one commit do for
+a run of the mechanics), rolls out to TO and runs the traffic client with `-real`
 meanwhile. The stubs are not built, `migrate` is the real one, and the rollout
 runs without `--allow-legacy-secrets` and without `--assume-compatible`: TO's
 own `release.json` decides (pass `--assume-compatible` to override it, the

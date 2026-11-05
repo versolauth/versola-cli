@@ -7,18 +7,22 @@
 #                  [--abort-at prepared|central|standin|midway] [--strict]
 #                  [--slow-central SECONDS] [--manifest declared|fresh] [--rps N]
 #   ./run.sh run   /path/to/versola --real FROM TO [--replicas 3] [--no-surge]
-#                  [--abort-at ...] [--assume-compatible]
+#                  [--abort-at ...] [--assume-compatible] [--no-mtls] [--rps N]
 #   ./run.sh clean
 #
 # --real FROM TO deploys the REAL released versola images FROM, with the bundled
-# Postgres, and rolls out to TO, under the traffic client's -real requests (no
-# credentials needed: public metadata, edge's session probe, 8082, central's
-# front). The stubs are not built. Which version runs is read from the
-# containers (docker ps) before and after, not from the answers. NOT covered
-# yet, so a clean run is not a pass of versola-cli#84: auth's mutual-TLS port
-# 8083 (needs a client certificate), the token flow, central's console. Needs
-# FROM and TO published, with FROM's tools new enough for the bundled Postgres;
-# the rollout runs without --assume-compatible unless asked (TO's release.json
+# Postgres, and rolls out to TO, under the traffic client's -real requests: the
+# public ones that need no credentials (metadata, edge's session probe, 8082,
+# central's front) and, from a client certificate made first by mtls-client.sh
+# (a service client registered in central with the deployment's own admin
+# secret, and an EST certificate), token requests to auth's 8083 on new and on
+# long-lived connections. --no-mtls leaves 8083 out. The stubs are not built.
+# Which version runs is read from the containers (docker ps) before and after,
+# not from the answers. NOT covered yet, so a clean run is not a pass of
+# versola-cli#84: the authorization code flow (needs a user: a stock vps
+# install is ENV_NAME=prod, with no fixed OTP), central's console. Needs FROM
+# and TO published, with FROM's tools new enough for the bundled Postgres; the
+# rollout runs without --assume-compatible unless asked (TO's release.json
 # decides). --manifest and --slow-central are for stubs only.
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -185,7 +189,7 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest="" real="" force_assume="" rps=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest="" real="" force_assume="" rps="" no_mtls=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --real) [ $# -ge 3 ] || die "--real needs two versions: FROM TO"; real=yes; A="$2"; B="$3"; shift 3 ;;
@@ -196,6 +200,7 @@ run() {
       --base-tools) base="$2"; shift 2 ;;
       --strict) strict=yes; shift ;;
       --rps) rps="$2"; shift 2 ;;
+      --no-mtls) no_mtls=yes; shift ;;
       --slow-central) slow_central="$2"; shift 2 ;;
       --manifest) manifest="$2"; shift 2 ;;
       *) die "unknown argument $1" ;;
@@ -238,9 +243,9 @@ run() {
       [[ "$v" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] && [[ "$v" != *..* ]] || die "version $v is not a release or a plain test tag (letters, digits, . _ -; no leading v needed)"
     done
     [ "$A" != "$B" ] || die "--real: FROM and TO are the same version"
-    echo "e2e: --real covers no 8083 (mutual TLS), no token flow and no central console: a clean run is not yet a pass of versola-cli#84" >&2
-  elif [ -n "$force_assume" ]; then
-    die "--assume-compatible is for --real; stubs pass it themselves"
+    echo "e2e: --real covers no authorization code flow (it needs a user) and no central console: a clean run is not yet a pass of versola-cli#84${no_mtls:+; --no-mtls also leaves out 8083}" >&2
+  elif [ -n "$force_assume" ] || [ -n "$no_mtls" ]; then
+    die "--assume-compatible and --no-mtls are for --real; stubs pass the first themselves and have no certificate to make"
   fi
   command -v docker >/dev/null || die "no docker"
 
@@ -277,7 +282,10 @@ $found"
   say "deploying $([ -n "$real" ] && echo "real" || echo "stub") $A with $replicas auth and $replicas edge replicas"
   # Real: no --postgres-host, so the bundled Postgres, as a new customer gets it.
   local pg=(--postgres-host "$PG_HOST"); [ -z "$real" ] || pg=()
-  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} --proxy external
+  # The mutual-TLS client of a real run gets its certificate from auth's EST (RFC 7030), which is off unless
+  # configure is told --est (versola-tools then writes auth's `est` block); a customer who wants EST does the same.
+  local est=(); [ -z "$real" ] || [ -n "$no_mtls" ] || est=(--est)
+  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} ${est[@]+"${est[@]}"} --proxy external
   printf 'y\n' | "$cli" migrate
   printf 'y\n' | "$cli" up --no-browser
   if [ "$replicas" -gt 1 ]; then
@@ -304,7 +312,20 @@ $found"
   # With --rps the plain targets are sent at that total rate whatever the
   # server does; without it the client keeps one request at a time per target.
   local trps=(); [ -z "$rps" ] || trps=(-rps "$rps")
-  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" ${texp[@]+"${texp[@]}"} ${trps[@]+"${trps[@]}"} ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
+  # Real images: a client certificate for 8083, made in central now (the run's
+  # own deployment, its own admin secret), proved with one /token before any
+  # traffic starts. Without it the run has no 8083 at all.
+  local tmtls=()
+  if [ -n "$real" ] && [ -z "$no_mtls" ]; then
+    say "making the mutual-TLS client for 8083"
+    local envfiles=()
+    while IFS= read -r f; do envfiles+=("$f"); done < <(find "$HOME/.versola/active" -name central.secrets.env -type f 2>/dev/null)
+    [ "${#envfiles[@]}" -eq 1 ] || die "expected one central.secrets.env under $HOME/.versola/active, found ${#envfiles[@]}: cannot make the mutual-TLS client (--no-mtls runs without it)"
+    E2E_SECRETS_ENV="${envfiles[0]}" E2E_AUTH_HOST=e2e.test bash "$HERE/mtls-client.sh" "$work/mtls" \
+      || die "could not make the mutual-TLS client (see above; --no-mtls runs without it, and is then not a pass)"
+    tmtls=(-mtls-cert "$work/mtls/client.crt" -mtls-key "$work/mtls/client.key" -mtls-client "$(cat "$work/mtls/client.id")")
+  fi
+  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" ${texp[@]+"${texp[@]}"} ${trps[@]+"${trps[@]}"} ${tmtls[@]+"${tmtls[@]}"} ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
   rpid=""; mpid=""
   # A killed or failed script must not leave the client hammering the proxy,
@@ -417,7 +438,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--real FROM TO] [--assume-compatible] [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh] [--rps N]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--real FROM TO] [--assume-compatible] [--no-mtls] [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh] [--rps N]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

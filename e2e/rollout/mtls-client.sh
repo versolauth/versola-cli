@@ -20,6 +20,7 @@
 #   E2E_TENANT        tenant the client is made in            (default)
 #   E2E_SCOPE         scope it may be granted                 (openid)
 #   E2E_SYNC_WAIT_SECONDS  how long to wait for auth to learn of the client (420)
+#   E2E_SYNC_STREAK   200s in a row that prove every replica knows it (30)
 #
 # The secret is read into a shell variable, handed to curl on its stdin and
 # never printed, put on a command line or written anywhere. No token, key or
@@ -131,13 +132,28 @@ note "3. enrolled (HTTP $code)"
 # every 5 s for E2E_SYNC_WAIT_SECONDS (default 420).
 SYNC_WAIT="${E2E_SYNC_WAIT_SECONDS:-420}"
 [[ "$SYNC_WAIT" =~ ^[0-9]+$ ]] || fail "E2E_SYNC_WAIT_SECONDS must be a number of seconds"
+#
+# Every auth replica refreshes on its own schedule, and the proxy spreads new
+# connections over them (round robin): one 200 proves only the replica that
+# answered. So the wait ends after SYNC_STREAK 200s in a row (default 30, ten
+# rounds of three replicas); any other answer starts the count again. A stand
+# run with 3 replicas saw 564 401s in the 20 s after a single 200.
+SYNC_STREAK="${E2E_SYNC_STREAK:-30}"
+[[ "$SYNC_STREAK" =~ ^[1-9][0-9]*$ ]] || fail "E2E_SYNC_STREAK must be a positive number"
 code=000
 waited=0
+streak=0
 while :; do
   code="$(curl -sSk --max-time 20 --cert "$work/client.crt" --key "$work/client.key" -X POST "https://$MTLS/token" \
     --data-urlencode grant_type=client_credentials --data-urlencode "client_id=$CLIENT_ID" --data-urlencode "scope=$SCOPE" \
     -o "$work/token.out" -w '%{http_code}' 2>/dev/null)" || code=error
-  [ "$code" = 200 ] && break
+  if [ "$code" = 200 ]; then
+    streak=$((streak + 1))
+    [ "$streak" -lt "$SYNC_STREAK" ] || break
+    sleep 0.2
+    continue
+  fi
+  streak=0
   [ "$waited" -lt "$SYNC_WAIT" ] || break
   [ "$waited" -ne 30 ] || note "4. auth does not know the client yet (HTTP $code); waiting for its cache refresh, up to ${SYNC_WAIT} s"
   sleep 5

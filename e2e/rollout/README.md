@@ -133,7 +133,7 @@ creates an enrolment token, enrols with a key and a CSR made here
 over 8083 with the certificate. auth learns of a new client by a refresh of its
 cache, every five minutes by default: until then `/token` answers 401
 `invalid_client`, so it is polled every 5 s for up to `E2E_SYNC_WAIT_SECONDS`
-(420; 275 s on the stand run below). The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
+(420; 250-275 s on the stand runs below), and the wait ends only after `E2E_SYNC_STREAK` (30) 200s in a row: each replica refreshes on its own schedule and one 200 proves only the one that answered. The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
 own deployment, read from its `central.secrets.env` in the isolated `E2E_HOME`
 the way `versola edge add` does; it goes to curl on stdin and is never printed.
 The client is left in the throwaway deployment (`clean` removes its database).
@@ -162,8 +162,23 @@ client after about 275 s and answers `/token` 200 on 8083; the rollout ran 398 s
 with 35 226 requests, 0 failures, 0 cuts and 18 reconnects (what the known
 8083 limitation predicts: a proxy reload ends edge-style pooled connections;
 how many reloads there were, and how the reconnects split, was not counted),
-and the memory available fell by up to 755 MiB. Not seen: 3 replicas, `--no-surge`, `--abort-at`, a real migration
-between two commits.
+and the memory available fell by up to 755 MiB.
+
+The same stand, 3 auth and 3 edge replicas (the default), 2026-11-05, same two
+tags, `--assume-compatible --rps 30`:
+
+| run | requests | failed | cuts | reconnects | phase | memory taken |
+|---|---|---|---|---|---|---|
+| `--no-surge` | 31 821 | 0 | 0 | 18 | 358 s | up to 137 MiB |
+| `--abort-at midway`, then `--abort` | 49 500 | 0 | 0 | 33 | 565 s | up to 1 386 MiB |
+
+With `--no-surge` central was unavailable about 19 s (auth and edge kept
+serving from their caches); after the abort every central/auth/edge container
+ran FROM again. A first `--no-surge` run counted 564 failures, all 401 on 8083
+in the 20 s around the start of the traffic, before the rollout: the wait
+ended on the first 200 while the other two auth replicas did not know the
+client yet. That is why the wait now needs a streak of 200s. Not seen:
+`--abort-at prepared|central|standin`, a real migration between two commits.
 
 Not covered yet, so a clean `--real` run is **not** a pass of #84: the
 authorization code flow (it needs a user, and a stock vps install runs with

@@ -299,6 +299,14 @@ built after the release is published, so for a short while the newest
 release has none yet: when `bootstrap local` picked that release itself, it
 says so -- retry in a few minutes, or pass the release before it.
 
+On vps, `up` ends with the admin's first login: when auth issued a one-time
+link at this start (a release that has them: versolauth/versola#824) it is
+printed, once, and nothing stores it -- open it and set the permanent password
+there. When there is none (auth is already running and issued its link at an
+earlier start, or the release has no links) `up` says which file holds
+`ADMIN_BOOTSTRAP_PASSWORD` (the path, never the value) and points at
+`versola admin reset-password`.
+
 Once auth and edge are ready, this opens the admin console in your
 default browser automatically. Pass `--no-browser` to skip that (e.g.
 running headless over SSH).
@@ -1728,6 +1736,47 @@ not. step-ca prints its administrative password on its first start, so
 `versola logs step-ca --tail all` shows it: do not paste that into a ticket or
 a chat. When `up` or `rollout` reports that a service never became ready,
 the error ends with the `versola logs` command to run.
+
+### `admin reset-password`
+
+```bash
+versola admin reset-password        # a new first-login link for the bootstrap admin
+versola admin reset-password --yes
+```
+
+For a first login link that was lost, opened by something else (a link preview
+counts) or has expired. It prints a new one-time link; open it in a browser and
+set the admin's permanent password. The link is shown once and stored nowhere:
+not in `state.json`, not in a file.
+
+It recreates auth's first replica twice -- first with `BOOTSTRAP_RESET=1`, which
+makes auth drop an unused temporary password and link and issue new ones, then
+without it, so that later starts do not reset again -- and reads auth's log for
+the link. A plain restart would change nothing: auth keeps a still-valid
+temporary password, and reads the variable from its container's environment,
+which `docker restart` does not renew. Sign-in is interrupted for a moment when
+auth has one replica; other replicas keep serving. On vps it asks for
+confirmation (`--yes` answers it).
+
+- **The admin already has a permanent password:** nothing is reset and the
+  command fails saying so; a forgotten permanent password is recovered through
+  the product's own account recovery.
+- **No link in auth's log** (a release without first-login links, a
+  deployment configured without one, or auth slower than 20 seconds): it says so,
+  names where `ADMIN_BOOTSTRAP_PASSWORD` is kept (the path, never the value) and
+  exits 0. Run it again if auth was only slow: the link of the run that missed
+  it is gone with the container.
+- **The second recreate fails** (or auth does not become ready after it): the
+  error says to run `versola up`, which also repairs an auth left with
+  `BOOTSTRAP_RESET` set (until then it resets again on every start); no link is
+  printed.
+- **Ctrl-C or a dropped SSH session** does not interrupt the sequence: the
+  command finishes restarting auth without the reset first.
+- **local:** the admin login is fixed (`admin / Admin1234!`); it is printed and
+  nothing is restarted.
+
+Not covered by tests: a run against real containers and a real auth release (the
+unit tests use a fake Docker); that needs a versola-tools release with versolauth/versola#904.
 
 ### `down`
 

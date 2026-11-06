@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/versolauth/versola-cli/internal/browser"
 	"github.com/versolauth/versola-cli/internal/docker"
@@ -167,6 +168,9 @@ func Up(opts UpOptions, st *state.State) error {
 	if err := state.MarkStarting(); err != nil {
 		return fmt.Errorf("couldn't record the deployment being started: %w", err)
 	}
+	// Auth logs the first-login link once, at the start that issues it: what
+	// it said before this `up` is not this deployment's link (it may be spent).
+	startedAt := time.Now().Add(-time.Second)
 
 	// Postgres and central go up first, on their own — auth/edge's own
 	// startup fails fatally if central isn't reachable yet, and confirmed
@@ -296,7 +300,12 @@ func Up(opts UpOptions, st *state.State) error {
 		// recorded) is needless repeated exposure for something that's
 		// already sitting in auth.secrets.env for whoever's actually
 		// authorized to read it.
-		fmt.Printf("Login: admin / (see ADMIN_BOOTSTRAP_PASSWORD in %s)\n", filepath.Join(dir, "auth.secrets.env"))
+		if link := firstLoginLinkSince(composePath, authReplicas, startedAt); link != "" {
+			fmt.Printf("\nFirst login (opens once; set the admin's permanent password there):\n%s\n", link)
+		} else {
+			fmt.Printf("Login: admin / (see ADMIN_BOOTSTRAP_PASSWORD in %s)\n", filepath.Join(dir, "auth.secrets.env"))
+			fmt.Println("Lost it or expired? `versola admin reset-password` issues a new first-login link.")
+		}
 		// No browser.Open here, unlike local below: this CLI runs on the
 		// VPS itself (typically over SSH), not on the operator's own
 		// desktop -- popping a browser window on the server wouldn't

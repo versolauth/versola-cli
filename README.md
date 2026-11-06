@@ -842,7 +842,10 @@ On `vps`, Versola is exposed through its own reverse proxy: the official
 by this CLI. `configure vps` writes it into the deployment next to
 versola-tools' files; `up` starts it last, once auth and edge are ready,
 and waits until a request through it actually reaches auth. It also
-serves the admin console at `/central/admin/`.
+serves the admin console at `/central/admin/`, with the security headers
+(`X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, a `frame-ancestors`
+Content-Security-Policy) and, when the browser used https, `Strict-Transport-Security`
+(with `--proxy external`, as `X-Forwarded-Proto` says).
 
 `--proxy` picks how it's exposed:
 

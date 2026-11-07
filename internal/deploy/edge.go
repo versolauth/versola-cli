@@ -579,6 +579,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 20s
     network_mode: host
+    # The image's own user is the unprivileged uid 10001, which can read neither the token (0600) nor
+    # the pins directory (0700), both the operator's, nor an edge-identity volume an earlier release
+    # created as root. Root keeps what this file always did.
+    user: "0:0"
     environment:
       PORT: 8095
       DPORT: 8096

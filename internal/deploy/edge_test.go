@@ -382,7 +382,7 @@ func TestEdgeBootstrapWritesTheEdgesDirectory(t *testing.T) {
 		}
 	}
 	compose := readFile(t, dir, "compose.yml")
-	for _, w := range []string{"image: ghcr.io/versolauth/versola-edge:0.8.0", "container_name: versola-edge-eu-central", "edge-identity:/var/lib/versola-edge", "./token:/etc/versola-edge/token:ro", "./pins:/etc/versola-edge/pins:ro"} {
+	for _, w := range []string{"image: ghcr.io/versolauth/versola-edge:0.8.0", "container_name: versola-edge-eu-central", "edge-identity:/var/lib/versola-edge", "./token:/etc/versola-edge/token:ro", "./pins:/etc/versola-edge/pins:ro", `user: "0:0"`} {
 		if !strings.Contains(compose, w) {
 			t.Errorf("compose.yml lacks %q:\n%s", w, compose)
 		}

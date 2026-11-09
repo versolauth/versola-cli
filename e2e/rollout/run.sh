@@ -5,20 +5,24 @@
 #
 #   ./run.sh run   /path/to/versola [--replicas 3] [--no-surge] [--base-tools 0.6.2]
 #                  [--abort-at prepared|central|standin|midway] [--strict]
-#                  [--slow-central SECONDS] [--manifest declared|fresh]
+#                  [--slow-central SECONDS] [--manifest declared|fresh] [--rps N]
 #   ./run.sh run   /path/to/versola --real FROM TO [--replicas 3] [--no-surge]
-#                  [--abort-at ...] [--assume-compatible]
+#                  [--abort-at ...] [--assume-compatible] [--no-mtls] [--rps N]
 #   ./run.sh clean
 #
 # --real FROM TO deploys the REAL released versola images FROM, with the bundled
-# Postgres, and rolls out to TO, under the traffic client's -real requests (no
-# credentials needed: public metadata, edge's session probe, 8082, central's
-# front). The stubs are not built. Which version runs is read from the
-# containers (docker ps) before and after, not from the answers. NOT covered
-# yet, so a clean run is not a pass of versola-cli#84: auth's mutual-TLS port
-# 8083 (needs a client certificate), the token flow, central's console. Needs
-# FROM and TO published, with FROM's tools new enough for the bundled Postgres;
-# the rollout runs without --assume-compatible unless asked (TO's release.json
+# Postgres, and rolls out to TO, under the traffic client's -real requests: the
+# public ones that need no credentials (metadata, edge's session probe, 8082,
+# central's front) and, from a client certificate made first by mtls-client.sh
+# (a service client registered in central with the deployment's own admin
+# secret, and an EST certificate), token requests to auth's 8083 on new and on
+# long-lived connections. --no-mtls leaves 8083 out. The stubs are not built.
+# Which version runs is read from the containers (docker ps) before and after,
+# not from the answers. NOT covered yet, so a clean run is not a pass of
+# versola-cli#84: the authorization code flow (needs a user: a stock vps
+# install is ENV_NAME=prod, with no fixed OTP), central's console. Needs FROM
+# and TO published, with FROM's tools new enough for the bundled Postgres; the
+# rollout runs without --assume-compatible unless asked (TO's release.json
 # decides). --manifest and --slow-central are for stubs only.
 #
 # --abort-at stops the rollout (SIGTERM: "stop after the step under way") once
@@ -41,6 +45,14 @@
 # lists A in freshDatabaseFrom, and the rollout -- with --assume-compatible --
 # must be refused before anything changes: A keeps running, no rollout under way.
 # Without it B has no manifest and --assume-compatible is passed, as before.
+#
+# --rps N sends the traffic client's plain targets (not the pooled 8083 ones)
+# at N requests per second in all, whatever the server does (an open model: a
+# stalled server does not slow the client down, requests past 256 under way per
+# target are counted as failures). Without it every target has one request at a
+# time, 50 ms apart. The report then also holds the failures and cuts per 5 s
+# window (the clock of the "===" lines), how long the rollout phase took, and
+# the lowest available memory seen on this host meanwhile.
 #
 # Cuts of the long-lived 8083 connections (nginx closes a retired worker's
 # connections 30 s after each reload) are the known limitation: reported, not
@@ -91,7 +103,22 @@ check_central() {
   [ -z "$want" ] || grep -qF "$want" <<<"$out" || { echo "e2e: central behind 8090 is not $want: $out" >&2; return 1; }
   curl -fsS --max-time 5 http://127.0.0.1:28090/ >/dev/null 2>&1 || { echo "e2e: central itself does not answer on its own port 28090" >&2; return 1; }
 }
-say() { printf '\n=== %s\n' "$*"; }
+# The clock is the one the traffic client stamps its failures with (its
+# failure windows), so a window can be laid against the step that was running.
+say() { printf '\n=== %s %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# Lowest MemAvailable (KiB) seen while the stop file does not exist, starting
+# from $3 (the value before the rollout, so never above it), rewritten
+# to $1 every 2 s: how much memory the rollout (stand-ins included) really took.
+watch_memory() {
+  local out="$1" stop="$2" min="$3" cur
+  while [ ! -e "$stop" ]; do
+    cur="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+    if [[ "$cur" =~ ^[0-9]+$ ]] && [ "$cur" -lt "$min" ]; then min="$cur"; fi
+    echo "$min" >"$out"
+    sleep 2
+  done
+}
 
 # A docker that cannot be asked is not "no containers".
 existing() {
@@ -162,7 +189,7 @@ build() {
 
 run() {
   local cli="$1"; shift
-  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest="" real="" force_assume=""
+  local replicas=3 surge="" base="0.6.2" abort_at="" strict="" slow_central="" manifest="" real="" force_assume="" rps="" no_mtls=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --real) [ $# -ge 3 ] || die "--real needs two versions: FROM TO"; real=yes; A="$2"; B="$3"; shift 3 ;;
@@ -172,6 +199,8 @@ run() {
       --no-surge) surge="--no-surge"; shift ;;
       --base-tools) base="$2"; shift 2 ;;
       --strict) strict=yes; shift ;;
+      --rps) rps="$2"; shift 2 ;;
+      --no-mtls) no_mtls=yes; shift ;;
       --slow-central) slow_central="$2"; shift 2 ;;
       --manifest) manifest="$2"; shift 2 ;;
       *) die "unknown argument $1" ;;
@@ -214,9 +243,9 @@ run() {
       [[ "$v" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] && [[ "$v" != *..* ]] || die "version $v is not a release or a plain test tag (letters, digits, . _ -; no leading v needed)"
     done
     [ "$A" != "$B" ] || die "--real: FROM and TO are the same version"
-    echo "e2e: --real covers no 8083 (mutual TLS), no token flow and no central console: a clean run is not yet a pass of versola-cli#84" >&2
-  elif [ -n "$force_assume" ]; then
-    die "--assume-compatible is for --real; stubs pass it themselves"
+    echo "e2e: --real covers no authorization code flow (it needs a user) and no central console: a clean run is not yet a pass of versola-cli#84${no_mtls:+; --no-mtls also leaves out 8083}" >&2
+  elif [ -n "$force_assume" ] || [ -n "$no_mtls" ]; then
+    die "--assume-compatible and --no-mtls are for --real; stubs pass the first themselves and have no certificate to make"
   fi
   command -v docker >/dev/null || die "no docker"
 
@@ -239,6 +268,9 @@ $found"
   done
 
   [ -z "$slow_central" ] || [[ "$slow_central" =~ ^[0-9]+$ ]] || die "--slow-central: a number of seconds"
+  if [ -n "$rps" ]; then
+    [[ "$rps" =~ ^[0-9]+$ ]] && [ "$rps" -ge 1 ] || die "--rps: a whole number of requests per second (1 or more)"
+  fi
   [ -n "$real" ] || build "$base" "$slow_central" "$manifest"
 
   # The CLI keeps its state under $HOME; the docker CLI's own config stays where it is.
@@ -250,7 +282,10 @@ $found"
   say "deploying $([ -n "$real" ] && echo "real" || echo "stub") $A with $replicas auth and $replicas edge replicas"
   # Real: no --postgres-host, so the bundled Postgres, as a new customer gets it.
   local pg=(--postgres-host "$PG_HOST"); [ -z "$real" ] || pg=()
-  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} --proxy external
+  # The mutual-TLS client of a real run gets its certificate from auth's EST (RFC 7030), which is off unless
+  # configure is told --est (versola-tools then writes auth's `est` block); a customer who wants EST does the same.
+  local est=(); [ -z "$real" ] || [ -n "$no_mtls" ] || est=(--est)
+  printf 'y\n' | "$cli" configure vps "$A" --auth-url "$AUTH_URL" ${pg[@]+"${pg[@]}"} ${est[@]+"${est[@]}"} --proxy external
   printf 'y\n' | "$cli" migrate
   printf 'y\n' | "$cli" up --no-browser
   if [ "$replicas" -gt 1 ]; then
@@ -274,13 +309,39 @@ $found"
   # Stubs tell their version in every answer; real services do not (-real),
   # so there the versions are read from the containers, see check_central.
   local texp=(-expect-versions "$versions"); [ -z "$real" ] || texp=(-real)
-  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" ${texp[@]+"${texp[@]}"} ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
+  # With --rps the plain targets are sent at that total rate whatever the
+  # server does; without it the client keeps one request at a time per target.
+  local trps=(); [ -z "$rps" ] || trps=(-rps "$rps")
+  # Real images: a client certificate for 8083, made in central now (the run's
+  # own deployment, its own admin secret), proved with one /token before any
+  # traffic starts. Without it the run has no 8083 at all.
+  local tmtls=()
+  if [ -n "$real" ] && [ -z "$no_mtls" ]; then
+    say "making the mutual-TLS client for 8083"
+    local envfiles=()
+    while IFS= read -r f; do envfiles+=("$f"); done < <(find "$HOME/.versola/active" -name central.secrets.env -type f 2>/dev/null)
+    [ "${#envfiles[@]}" -eq 1 ] || die "expected one central.secrets.env under $HOME/.versola/active, found ${#envfiles[@]}: cannot make the mutual-TLS client (--no-mtls runs without it)"
+    E2E_SECRETS_ENV="${envfiles[0]}" E2E_AUTH_HOST=e2e.test bash "$HERE/mtls-client.sh" "$work/mtls" \
+      || die "could not make the mutual-TLS client (see above; --no-mtls runs without it, and is then not a pass)"
+    tmtls=(-mtls-cert "$work/mtls/client.crt" -mtls-key "$work/mtls/client.key" -mtls-client "$(cat "$work/mtls/client.id")")
+  fi
+  "$work/traffic" -host e2e.test -central "$central_target" -stop-file "$stop" ${texp[@]+"${texp[@]}"} ${trps[@]+"${trps[@]}"} ${tmtls[@]+"${tmtls[@]}"} ${strict:+-strict} >"$work/traffic.txt" 2>&1 &
   tpid=$!
-  rpid=""
+  rpid=""; mpid=""
   # A killed or failed script must not leave the client hammering the proxy,
-  # nor a rollout running in the background.
-  trap 'touch "$stop"; kill "$tpid" ${rpid:-} 2>/dev/null || true' EXIT
+  # nor a rollout or the memory watcher running in the background. Installed
+  # right after the client starts: nothing below may fail before it.
+  trap 'touch "$stop"; kill "$tpid" ${mpid:-} ${rpid:-} 2>/dev/null || true' EXIT
+  local memfile="$work/mem.txt" mem_start_kb
+  mem_start_kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || true)"
+  rm -f "$memfile"
+  # No MemAvailable here (not Linux's /proc/meminfo): no memory line, nothing else changes.
+  if [[ "$mem_start_kb" =~ ^[0-9]+$ ]]; then
+    watch_memory "$memfile" "$stop" "$mem_start_kb" &
+    mpid=$!
+  fi
   sleep 8
+  local phase_start=$SECONDS
   local rrc=0 arc=0
   # An abort stopped at central's step has moved nothing else: the abort must
   # leave auth's and edge's containers (same IDs) alone, as they already run
@@ -345,10 +406,13 @@ $found"
     local st_out; st_out="$("$cli" status 2>&1 || true)"
     if grep -q "under way" <<<"$st_out"; then echo "e2e: status still reports a rollout under way" >&2; arc=1; fi
   fi
+  local phase_secs=$((SECONDS - phase_start))
+  say "rollout phase over after ${phase_secs} s"
   sleep 10
   touch "$stop"
   local trc=0
   wait "$tpid" || trc=$?
+  [ -z "${mpid:-}" ] || wait "$mpid" 2>/dev/null || true
 
   local crc=0
   # Where the run ended: back on A after an abort or a refused rollout, on B after a rollout.
@@ -356,6 +420,13 @@ $found"
 
   say "traffic report"
   cat "$work/traffic.txt"
+
+  say "numbers"
+  echo "rollout${abort_at:+ and abort} phase: ${phase_secs} s${rps:+, traffic at ${rps} requests per second (plain targets)}"
+  if [ -s "$memfile" ]; then
+    local mem_low_kb; mem_low_kb="$(cat "$memfile")"
+    echo "memory available: $((mem_start_kb / 1024)) MiB before the rollout, lowest $((mem_low_kb / 1024)) MiB (the rollout took up to $(((mem_start_kb - mem_low_kb) / 1024)) MiB more)"
+  fi
 
   say "what runs now"
   docker ps --format '{{.Names}}\t{{.Image}}' | grep -E '^versola' | sort || true
@@ -367,7 +438,7 @@ $found"
 }
 
 case "${1:-}" in
-  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--real FROM TO] [--assume-compatible] [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh]"; run "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: run.sh run /path/to/versola [--real FROM TO] [--assume-compatible] [--no-mtls] [--replicas N] [--no-surge] [--base-tools V] [--abort-at PHASE] [--strict] [--slow-central SECONDS] [--manifest declared|fresh] [--rps N]"; run "$@" ;;
   clean) clean ;;
   *) die "usage: run.sh run /path/to/versola [...] | run.sh clean" ;;
 esac

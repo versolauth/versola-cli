@@ -15,6 +15,7 @@ traffic/  GET+POST client for the proxy's public port (127.0.0.1:2821),
           8090 (left out with --no-surge: central restarts in place); counts every
           transport error and unexpected status, and on the long-lived 8083
           connections tells cuts and reconnects apart (below)
+mtls-client.sh  --real only: a client and its EST certificate for 8083 (below)
 run.sh    builds the images, deploys version A, rolls out version B under
           traffic, prints the report
 ```
@@ -89,7 +90,7 @@ What differs from the stub run:
   behind the proxy), `POST /token` with no credentials, 8082 and central's
   front 8090. For the last three any status below 500 is an answer; 5xx and
   transport errors are failures everywhere. Their exact status was not seen on
-  a real run, so it is not asserted.
+  a real run, so it is not asserted. 8083 is added below.
 - Real answers carry no version, so the version is read from the containers:
   after `up` every central/auth/edge container must run FROM, at the end TO
   (FROM again after an abort). The client does not prove that traffic ran on
@@ -101,13 +102,88 @@ What differs from the stub run:
   FROM and TO (it knows only the stub tags): `docker rmi` them by hand if the
   stand runs short of disk.
 
-Not covered yet, so a clean `--real` run is **not** a pass of #84: auth's
-mutual-TLS port 8083 (a client certificate), the token flow (an OAuth client and
-a user), central's admin console, the refusal of a release that needs a fresh
-database, measured load (the client sends about one request per 50 ms per
-target, not 20-50 requests per second), memory peak, per-step failure windows.
-These are the next PR. Not run: this was written without a Docker daemon, and
-it needs published FROM and TO tools with the bundled Postgres (versola#849).
+### Load and numbers (`--rps N`)
+
+`--rps 30` sends the plain targets at 30 requests per second in all, at that
+pace whatever the server does: a server that stalls does not slow the client
+down, requests pile up (at most 256 under way per target) and past that each
+unsent request is a failure (with the plain targets at 30 requests per second
+the cap is not reached: it matters above about 25 requests per second per
+target). Without `--rps` every target has one request at
+a time, 50 ms apart, as before. The pooled 8083 targets (stubs only) stay one
+request at a time on their one connection. After the run the report holds:
+
+- failures and cuts per 5 s window (counted when the request ended: a stalled
+  request lands up to 10 s after it was sent), with the clock the `===` step lines of the
+  script carry, so a burst can be laid against "rolling out", "aborting" or
+  "rollout phase over";
+- how long the rollout phase took;
+- the lowest `MemAvailable` seen meanwhile against the value before it (the
+  host's, so the stand's other load is in it: run on an idle stand). On a
+  12 GB stand it says nothing about a 4 GB VPS beyond the sum it shows.
+
+### The 8083 client (`mtls-client.sh`)
+
+A real 8083 needs a client certificate, which the stubs did not. Before the
+traffic starts `run.sh --real` runs `mtls-client.sh`, written from versola's
+`scripts/est-smoke.sh` (steps 1-4; read its header): it registers a service
+client (`tls_client_auth`, EST enrolment) in central through the admin API,
+creates an enrolment token, enrols with a key and a CSR made here
+(`/.well-known/est/simpleenroll` through the proxy), and asks `/token` once
+over 8083 with the certificate. auth learns of a new client by a refresh of its
+cache, every five minutes by default: until then `/token` answers 401
+`invalid_client`, so it is polled every 5 s for up to `E2E_SYNC_WAIT_SECONDS`
+(420; 250-275 s on the stand runs below), and the wait ends only after `E2E_SYNC_STREAK` (30) 200s in a row: each replica refreshes on its own schedule and one 200 proves only the one that answered. The admin credential is the `CENTRAL_RESOURCE_SECRET` of the run's
+own deployment, read from its `central.secrets.env` in the isolated `E2E_HOME`
+the way `versola edge add` does; it goes to curl on stdin and is never printed.
+The client is left in the throwaway deployment (`clean` removes its database).
+If this step fails the run stops before any traffic; `--no-mtls` runs without
+8083 and is then not a pass. Needs `curl`, `openssl` and `python3` on the
+stand.
+
+The client then sends, to 8083 with the certificate, `POST /token` with the
+`client_credentials` grant: on a new connection each time and on 3 long-lived
+ones (edge keeps a pool, and a request has to be in flight when the proxy
+closes the connection for a cut to show). 200 is expected; cuts are reported
+and reconnects counted as for the stubs (the known limitation above).
+
+EST is off in auth unless the deployment was configured with `--est`
+(versola-tools then writes auth's `est` block; without it `simpleenroll` and
+`cacerts` answer an empty 404), and only a versola-tools of 0.8.0 or later knows it
+(an older one ignores the flag, with the same 404): FROM of a `--real` run with
+the 8083 client has to be that new, else use `--no-mtls`. `run.sh --real` passes
+`--est` to `configure` unless `--no-mtls` is given, which is also what an
+operator who wants EST on a vps does.
+
+Seen on a stand (Ubuntu 24.04, 4 vCPU, 8 GB, two test tags of one commit of
+`versola` main, `--replicas 1 --assume-compatible --rps 30`, 2026-11-04): the
+`default` tenant accepts the client, enrolment answers 200, auth knows the
+client after about 275 s and answers `/token` 200 on 8083; the rollout ran 398 s
+with 35 226 requests, 0 failures, 0 cuts and 18 reconnects (what the known
+8083 limitation predicts: a proxy reload ends edge-style pooled connections;
+how many reloads there were, and how the reconnects split, was not counted),
+and the memory available fell by up to 755 MiB.
+
+The same stand, 3 auth and 3 edge replicas (the default), 2026-11-05, same two
+tags, `--assume-compatible --rps 30`:
+
+| run | requests | failed | cuts | reconnects | phase | memory taken |
+|---|---|---|---|---|---|---|
+| `--no-surge` | 31 821 | 0 | 0 | 18 | 358 s | up to 137 MiB |
+| `--abort-at midway`, then `--abort` | 49 500 | 0 | 0 | 33 | 565 s | up to 1 386 MiB |
+
+With `--no-surge` central was unavailable about 19 s (auth and edge kept
+serving from their caches); after the abort every central/auth/edge container
+ran FROM again. A first `--no-surge` run counted 564 failures, all 401 on 8083
+in the 20 s around the start of the traffic, before the rollout: the wait
+ended on the first 200 while the other two auth replicas did not know the
+client yet. That is why the wait now needs a streak of 200s. Not seen:
+`--abort-at prepared|central|standin`, a real migration between two commits.
+
+Not covered yet, so a clean `--real` run is **not** a pass of #84: the
+authorization code flow (it needs a user, and a stock vps install runs with
+`ENV_NAME=prod`: no fixed OTP, no password-set endpoint; see #84), central's
+admin console, the refusal of a release that needs a fresh database.
 
 ## Run (only on a throwaway machine)
 
@@ -118,6 +194,8 @@ it needs published FROM and TO tools with the bundled Postgres (versola#849).
 ./run.sh run /path/to/versola --slow-central 40   # central B needs 40 s to become ready
 ./run.sh run /path/to/versola --manifest declared  # B's release.json lists A in rollingFrom: no --assume-compatible
 ./run.sh run /path/to/versola --manifest fresh     # B says it needs a fresh database: refused, A keeps serving
+./run.sh run /path/to/versola --real 0.7.5 0.7.6 --rps 30   # with 30 requests per second; see "Load and numbers"
+./run.sh run /path/to/versola --real 0.7.5 0.7.6 --no-mtls   # without the 8083 client (not a pass)
 ./run.sh run /path/to/versola --real 0.7.5 0.7.6   # real images and the bundled Postgres, see "Real images" (the versions are examples)
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```

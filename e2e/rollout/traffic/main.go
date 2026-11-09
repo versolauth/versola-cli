@@ -41,6 +41,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -60,11 +61,16 @@ const wantAnswered = -1
 // metadata of auth, edge's session probe, auth's additional listener and
 // central's front. Which status the real services give to a request without
 // credentials is not asserted (wantAnswered), only that a 5xx or a transport
-// error never happens. Not covered, and so a run of these alone is not a pass
-// (see README.md): auth's mutual-TLS port 8083 (needs a client certificate),
-// the token flow (needs a client and a user), central's admin console.
-// central is left out with an empty address, as in the stub's.
-func realTargets(base, host, additional, central string, newClient func() *http.Client) []target {
+// error never happens. With mtls (a client the run made, see mtls-client.sh)
+// the requests of a native-app style client to auth's 8083 are added: POST
+// /token with the client_credentials grant and the client's certificate, on a
+// new connection each time and on mtlsPooled long-lived ones (the way edge
+// keeps its pool), the one thing an authenticated client does there without a
+// user. Not covered, and so a run of these alone is not a pass (see
+// README.md): the authorization code flow (needs a user), central's admin
+// console. central is left out with an empty address, as in the stub's, and
+// 8083 with a nil mtls.
+func realTargets(base, host, additional, central string, mtls *mtlsClient, newClient func() *http.Client) []target {
 	post := `{"e2e":"post"}`
 	ts := []target{
 		{"auth GET /.well-known/openid-configuration", "GET", base + "/.well-known/openid-configuration", host, 200, "", newClient(), false, nil},
@@ -76,7 +82,43 @@ func realTargets(base, host, additional, central string, newClient func() *http.
 	if central != "" {
 		ts = append(ts, target{"central GET :8090", "GET", "http://" + central + "/", "", wantAnswered, "", newClient(), false, nil})
 	}
+	if mtls != nil {
+		u := "https://" + mtls.addr + "/token"
+		form := "grant_type=client_credentials&client_id=" + url.QueryEscape(mtls.clientID) + "&scope=" + url.QueryEscape(mtls.scope)
+		ts = append(ts, target{"auth-mtls POST /token (new connection)", "POST", u, "", 200, form, freshClient(mtls.cfg), false, nil})
+		for i := 1; i <= mtlsPooled; i++ {
+			d := new(int64)
+			ts = append(ts, target{fmt.Sprintf("auth-mtls POST /token (pooled connection %d)", i), "POST", u, "", 200, form, pooledClient(mtls.cfg, d), false, d})
+		}
+	}
 	return ts
+}
+
+// mtlsPooled is how many long-lived connections the real run keeps to 8083: a
+// cut needs a request in flight when the proxy closes the connection, and a
+// token request is short, so several give more chances to see one.
+const mtlsPooled = 3
+
+// mtlsClient is the client certificate a real run presents on 8083 and what
+// it asks for.
+type mtlsClient struct {
+	addr     string      // auth's pass-through, host:port
+	cfg      *tls.Config // the certificate; the server's own is not checked (an internal CA)
+	clientID string
+	scope    string
+}
+
+// loadMTLS reads the certificate and key mtls-client.sh wrote.
+func loadMTLS(addr, certFile, keyFile, clientID, scope string) (*mtlsClient, error) {
+	if clientID == "" {
+		return nil, errors.New("-mtls-client (the client's id) is required with -mtls-cert")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("the client certificate: %w", err)
+	}
+	return &mtlsClient{addr: addr, clientID: clientID, scope: scope,
+		cfg: &tls.Config{Certificates: []tls.Certificate{cert}, InsecureSkipVerify: true}}, nil
 }
 
 type target struct {
@@ -117,10 +159,53 @@ type stats struct {
 	fails      []failure
 	keptFails  int // failures kept in fails; cuts have a cap of their own
 	keptCuts   int
+	// failWin and cutWin count failures and cuts per window of windowSize
+	// (key: the window's start, 15:04:05), uncapped, so that a rollout's
+	// trouble can be laid against the steps the script printed with the same
+	// clock. fails above keeps only the first hundred of each kind.
+	failWin map[string]int
+	cutWin  map[string]int
 }
 
+// windowSize is the width of the windows failures and cuts are counted in.
+const windowSize = 5 * time.Second
+
 func newStats() *stats {
-	return &stats{sent: map[string]int{}, failed: map[string]int{}, cut: map[string]int{}, reconnects: map[string]int{}, versions: map[string]map[string]int{}}
+	return &stats{sent: map[string]int{}, failed: map[string]int{}, cut: map[string]int{}, reconnects: map[string]int{}, versions: map[string]map[string]int{}, failWin: map[string]int{}, cutWin: map[string]int{}}
+}
+
+// maxInFlight caps the requests an open loop has under way per target.
+const maxInFlight = 256
+
+// openLoop sends t every period whatever the server answers, up to inflight
+// requests at once, until stop closes, and returns when the ones under way have
+// ended. A server that stalls does not slow the client down (the closed loop's
+// way of hiding the stall): requests pile up, and past inflight each new one is
+// counted a failure -- the client has no room, which is the server's doing.
+func openLoop(st *stats, t target, period time.Duration, inflight int, stop <-chan struct{}) {
+	slots := make(chan struct{}, inflight)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	tick := time.NewTicker(period)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+		select {
+		case slots <- struct{}{}:
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-slots }()
+				one(st, t)
+			}()
+		default:
+			st.record(t.name, outcomeFail, false, fmt.Sprintf("not sent: %d requests of this target are still under way", inflight))
+		}
+	}
 }
 
 func (s *stats) ok(t, version string) {
@@ -138,11 +223,14 @@ func (s *stats) record(t string, kind outcome, reused bool, err string) {
 	defer s.mu.Unlock()
 	s.sent[t]++
 	name := "fail"
+	win := time.Now().Truncate(windowSize).Format("15:04:05")
 	if kind == outcomeCut {
 		s.cut[t]++
+		s.cutWin[win]++
 		name = "cut"
 	} else {
 		s.failed[t]++
+		s.failWin[win]++
 	}
 	// A broken target must not use up the room the cuts' detail lines need.
 	kept := &s.keptFails
@@ -214,19 +302,28 @@ func classify(pooled bool, a attempt, problem string, transport, timeout bool) o
 
 func main() {
 	var (
-		base       = flag.String("base", "http://127.0.0.1:2821", "the proxy's public address")
-		host       = flag.String("host", "e2e.test", "Host header for -base (the deployment's auth-url host)")
-		additional = flag.String("additional", "127.0.0.1:8082", "auth's additional listener behind the proxy")
-		mtls       = flag.String("mtls", "127.0.0.1:8083", "auth's mutual-TLS pass-through behind the proxy")
-		central    = flag.String("central", "127.0.0.1:8090", "the proxy's front of central's PORT; empty to leave central out (a rollout that restarts central in place, --no-surge)")
-		interval   = flag.Duration("interval", 50*time.Millisecond, "pause between requests of one worker")
-		stopFile   = flag.String("stop-file", "", "stop when this file exists")
-		asJSON     = flag.Bool("json", false, "print the summary as JSON")
-		expect     = flag.String("expect-versions", "", "comma-separated versions every target must have been served by at least once (e.g. 1.0.0-e2e,1.0.1-e2e): proves traffic ran on both sides of the rollout")
-		strict     = flag.Bool("strict", false, "count cuts of the pooled 8083 connections (the known limitation) as failures")
-		realMode   = flag.Bool("real", false, "send the requests for real Versola images instead of the stub's (no 8083: it needs a client certificate); every status below 500 counts as an answer")
+		base         = flag.String("base", "http://127.0.0.1:2821", "the proxy's public address")
+		host         = flag.String("host", "e2e.test", "Host header for -base (the deployment's auth-url host)")
+		additional   = flag.String("additional", "127.0.0.1:8082", "auth's additional listener behind the proxy")
+		mtls         = flag.String("mtls", "127.0.0.1:8083", "auth's mutual-TLS pass-through behind the proxy")
+		central      = flag.String("central", "127.0.0.1:8090", "the proxy's front of central's PORT; empty to leave central out (a rollout that restarts central in place, --no-surge)")
+		interval     = flag.Duration("interval", 50*time.Millisecond, "pause between requests of one worker")
+		stopFile     = flag.String("stop-file", "", "stop when this file exists")
+		asJSON       = flag.Bool("json", false, "print the summary as JSON")
+		expect       = flag.String("expect-versions", "", "comma-separated versions every target must have been served by at least once (e.g. 1.0.0-e2e,1.0.1-e2e): proves traffic ran on both sides of the rollout")
+		strict       = flag.Bool("strict", false, "count cuts of the pooled 8083 connections (the known limitation) as failures")
+		rps          = flag.Float64("rps", 0, "total requests per second over the plain (not pooled) targets, sent at that rate whatever the server does (an open model); 0 keeps one request at a time per target with -interval between them")
+		realMode     = flag.Bool("real", false, "send the requests for real Versola images instead of the stub's; every status below 500 counts as an answer, 8083 only with -mtls-cert")
+		mtlsCert     = flag.String("mtls-cert", "", "with -real: the client certificate (PEM) to present on -mtls, from mtls-client.sh")
+		mtlsKey      = flag.String("mtls-key", "", "with -real: the key of -mtls-cert")
+		mtlsClientID = flag.String("mtls-client", "", "with -real: the id of the client the certificate is for")
+		mtlsScope    = flag.String("mtls-scope", "openid", "with -real: the scope asked for with the client_credentials grant")
 	)
 	flag.Parse()
+	if !*realMode && (*mtlsCert != "" || *mtlsKey != "" || *mtlsClientID != "") {
+		fmt.Fprintln(os.Stderr, "traffic: -mtls-cert, -mtls-key and -mtls-client go with -real (the stub's 8083 needs no certificate)")
+		os.Exit(2)
+	}
 
 	plain, fresh, pooled := plainClient, freshClient, pooledClient
 	insecure := &tls.Config{InsecureSkipVerify: true} // the stub's certificate is self-signed
@@ -262,8 +359,19 @@ func main() {
 			fmt.Fprintln(os.Stderr, "traffic: -real and -expect-versions cannot go together (real services do not tell their version)")
 			os.Exit(2)
 		}
-		targets = realTargets(*base, *host, *additional, *central, plain)
-		fmt.Fprintln(os.Stderr, "traffic: -real covers no 8083 (mutual TLS) and no token flow: a clean run is not yet a pass")
+		var client *mtlsClient
+		if *mtlsCert != "" || *mtlsKey != "" {
+			var err error
+			if client, err = loadMTLS(*mtls, *mtlsCert, *mtlsKey, *mtlsClientID, *mtlsScope); err != nil {
+				fmt.Fprintln(os.Stderr, "traffic:", err)
+				os.Exit(2)
+			}
+		}
+		targets = realTargets(*base, *host, *additional, *central, client, plain)
+		if client == nil {
+			fmt.Fprintln(os.Stderr, "traffic: -real without -mtls-cert covers no 8083 (mutual TLS): a clean run is not a pass")
+		}
+		fmt.Fprintln(os.Stderr, "traffic: -real covers no authorization code flow (it needs a user): a clean run is not yet a pass")
 	}
 
 	st := newStats()
@@ -291,8 +399,34 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
+	// With -rps the plain targets are sent at a fixed total rate whatever the
+	// server does (see openLoop); pooled targets stay one request at a time on
+	// their one connection.
+	if *rps < 0 || *rps > 1e6 {
+		fmt.Fprintln(os.Stderr, "traffic: -rps must be 0 (off) or a rate the clock can keep (at most a million a second)")
+		os.Exit(2)
+	}
+	var period time.Duration
+	if *rps > 0 {
+		open := 0
+		for _, t := range targets {
+			if !t.pooled() {
+				open++
+			}
+		}
+		if open > 0 {
+			period = time.Duration(float64(time.Second) * float64(open) / *rps)
+		}
+	}
 	for _, t := range targets {
 		wg.Add(1)
+		if period > 0 && !t.pooled() {
+			go func(t target) {
+				defer wg.Done()
+				openLoop(st, t, period, maxInFlight, stop)
+			}(t)
+			continue
+		}
 		go func(t target) {
 			defer wg.Done()
 			owed := 0 // see reconnects
@@ -418,7 +552,7 @@ func one(st *stats, t target) outcome {
 		req.Host = t.host
 	}
 	if t.body != "" {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", t.contentType())
 	}
 	req.Close = t.closeAfter
 	var a attempt
@@ -460,7 +594,7 @@ func one(st *stats, t target) outcome {
 	} else if resp.StatusCode != t.want {
 		return res(fmt.Sprintf("status %d, want %d", resp.StatusCode, t.want), false, false)
 	}
-	if t.body != "" && t.want == 200 && !strings.Contains(string(got), fmt.Sprintf("body=%d", len(t.body))) {
+	if t.body != "" && t.want == 200 && t.contentType() == "application/json" && !strings.Contains(string(got), fmt.Sprintf("body=%d", len(t.body))) {
 		return res("the POST body did not arrive whole: "+strings.TrimSpace(string(got)), false, false)
 	}
 	kind := res("", false, false)
@@ -500,6 +634,7 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"seconds": took.Seconds(), "sent": st.sent, "failed": st.failed, "cut": st.cut,
 			"reconnects": st.reconnects, "versions": st.versions, "failures": st.fails,
+			"failureWindows": st.failWin, "cutWindows": st.cutWin,
 		})
 		return
 	}
@@ -518,6 +653,8 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		fmt.Printf("  %-44s sent %6d  failed %4d  cut %4d  reconnects %4d  served by %v\n", n, st.sent[n], st.failed[n], st.cut[n], st.reconnects[n], st.versions[n])
 	}
 	fmt.Printf("TOTAL sent %d, failed %d, cut %d (pooled 8083, known limitation), reconnects %d (harmless)\n", total, bad, cut, re)
+	printWindows("failures", st.failWin)
+	printWindows("cuts", st.cutWin)
 	for _, f := range st.fails {
 		label := "FAIL"
 		if f.Kind == "cut" {
@@ -525,4 +662,32 @@ func report(st *stats, took time.Duration, asJSON bool) {
 		}
 		fmt.Printf("  %s %s  %s  reused=%v  %s\n", label, f.At, f.Target, f.Reused, f.Error)
 	}
+}
+
+// printWindows prints the windows (see stats.failWin) that have something in
+// them, in time order, on one line: the clock is the one the run's script
+// stamps its steps with.
+func printWindows(what string, w map[string]int) {
+	if len(w) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(w))
+	for k := range w {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", k, w[k]))
+	}
+	fmt.Printf("%s per %s window (start time, count; counted when the request ended, up to 10 s after it was sent): %s\n", what, windowSize, strings.Join(parts, ", "))
+}
+
+// contentType of t's body: a grant_type=... body is the form a real token
+// endpoint takes; the stub's (and the unauthenticated probe's) is JSON.
+func (t target) contentType() string {
+	if strings.HasPrefix(t.body, "grant_type=") {
+		return "application/x-www-form-urlencoded"
+	}
+	return "application/json"
 }

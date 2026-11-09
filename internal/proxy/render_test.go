@@ -240,6 +240,17 @@ func TestAccessLogHasNoQueryString(t *testing.T) {
 			if !strings.Contains(conf, `"$request_method $uri $server_protocol"`) {
 				t.Errorf("nginx.conf's log_format does not log method, $uri and protocol:\n%s", conf)
 			}
+			// The Referer is cut at the "?" by a map; pin it, or `.*` or a pass-through
+			// default would keep the format line unchanged and the test green.
+			for _, want := range []string{
+				"map $http_referer $versola_logged_referer {",
+				`"~^(?<versola_referer_path>[^?]*)" $versola_referer_path;`,
+				`"$versola_logged_referer"`,
+			} {
+				if !strings.Contains(conf, want) {
+					t.Errorf("nginx.conf lacks %q", want)
+				}
+			}
 			for _, bad := range []string{`$request"`, "$request_uri", "$args", "$query_string", "$is_args", `"$http_referer"`} {
 				if strings.Contains(conf, bad) {
 					t.Errorf("nginx.conf mentions %s, which carries the query string", bad)

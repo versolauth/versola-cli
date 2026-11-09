@@ -1826,9 +1826,21 @@ names it at the end with the `docker volume rm` command for it.
 On `vps`, OpenBao's data volume (`versola-openbao-file-vps`: every secret
 and signing key), the Postgres data volume (`versola-postgres-data-vps`, when
 Postgres runs in a container) and the TLS certificate volume
-(`versola-acme-vps`) are kept: they are a live server's data. `uninstall`
-names the ones it kept and ends with `To start over from scratch: versola
-uninstall --purge`, also when there is no deployment record any more. When
+(`versola-acme-vps`) are kept: they are a live server's data, and so is
+`~/.versola/openbao/vps-admin.json` (the root token and unseal key of that
+OpenBao: it opens every secret in it, so keep it private and in your backup).
+`uninstall` names the ones it kept (the file only if it exists, never its
+content) and ends with `To start over from scratch: versola uninstall
+--purge`, also when there is no deployment record any more.
+
+On `vps` it also removes the daily `certs renew` timer (`versola-certs-renew`
+in `~/.config/systemd/user`: `systemctl --user disable --now`, the two unit
+files deleted, `daemon-reload`), plain or with `--purge`, and lists it among
+what it will remove. A later `configure`/`bootstrap` installs it again. If
+systemd cannot be asked to stop it (no user session bus over plain ssh), the
+files are removed anyway and the output says so. A crontab line you added
+yourself is not touched. Not removed while Docker is unreachable: the stack
+may still be running, and the certificates it uses need the timer. When
 the deployment used a Postgres of your own, it also prints that Postgres's
 address and the flag that gives it back (`--postgres-host <host:port>`): the
 record that remembered it is removed.
@@ -1995,7 +2007,7 @@ Prints which versola-cli release this binary was built from, plus the Go
 version and target platform. `versola --version` does the same thing.
 
 This is the CLI's own version, independent of the Versola version it
-deploys — that one is whatever you pass to `bootstrap local <version>`
+deploys — that one is whatever you pass to `bootstrap local [<version>]`
 (see `versions` for those).
 Binaries built from source without release flags report `dev`.
 

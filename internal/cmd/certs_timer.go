@@ -19,6 +19,7 @@ var (
 		out, err := exec.Command(name, args...).Output()
 		return string(out), err
 	}
+	lookPath    = exec.LookPath
 	currentUser = func() string {
 		if u, err := user.Current(); err == nil {
 			return u.Username
@@ -104,4 +105,52 @@ func certsWarning(st *state.State) string {
 		return ""
 	}
 	return certsTimerWarning()
+}
+
+// certsTimerFiles are the timer's unit files that exist in the user's systemd
+// directory: what `certs renew --install-timer` wrote. A crontab line is not
+// among them: the CLI only ever prints that one, the customer adds it.
+func certsTimerFiles() []string {
+	dir, err := userUnitDir()
+	if err != nil {
+		return nil
+	}
+	var found []string
+	for _, name := range []string{deploy.CertsTimerUnit, deploy.CertsServiceUnit} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Lstat(path); err == nil {
+			found = append(found, path)
+		}
+	}
+	return found
+}
+
+// removeCertsTimer undoes the install of the daily renewal timer: stop and
+// disable it, delete the unit files, reload systemd. Used by `uninstall`: a
+// timer left behind keeps running `certs renew` for a deployment that is gone,
+// and a later configure installs it again (scheduleCertsRenewal). Stopping may
+// fail (no user bus over plain ssh, say); the files are removed anyway, so it
+// does not start again, and the output says it.
+func removeCertsTimer(w io.Writer) {
+	files := certsTimerFiles()
+	if len(files) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Removing the daily certificate renewal timer...")
+	stopped := true
+	if _, err := lookPath("systemctl"); err != nil {
+		stopped = false
+	} else if _, err := runOutput("systemctl", "--user", "disable", "--now", deploy.CertsTimerUnit); err != nil {
+		stopped = false
+	}
+	for _, f := range files {
+		if err := os.Remove(f); err != nil {
+			fmt.Fprintf(w, "  (couldn't remove %s: %v)\n", f, err)
+		}
+	}
+	if stopped {
+		_, _ = runOutput("systemctl", "--user", "daemon-reload")
+		return
+	}
+	fmt.Fprintln(w, "  (systemd could not be asked to stop it: the unit files are removed, so it does not start again, but a copy already loaded runs until you log out or `systemctl --user daemon-reload` is run)")
 }

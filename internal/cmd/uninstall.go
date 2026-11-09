@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -86,14 +87,16 @@ var uninstallCmd = &cobra.Command{
 	Use:     "uninstall",
 	GroupID: groupOperate,
 	Short:   "Stop the stack and remove its data, images, and local state",
-	Long: `uninstall stops the locally deployed Versola stack (including its
-Postgres data volume), removes the Docker images versola pulled, and
-clears ~/.versola/active.
+	Long: `uninstall stops the Versola stack deployed on this machine (on local
+including its Postgres data volume), removes the Docker images versola
+pulled, and clears ~/.versola/active. On vps it also removes the daily
+certificate renewal timer.
 
 On vps, OpenBao's data volume (every secret and signing key), the
-Postgres data volume when Postgres runs in a container, and the TLS
-certificate volume are kept: they are a live server's data. To start
-over from scratch, after a failed first attempt for example:
+Postgres data volume when Postgres runs in a container, the TLS
+certificate volume and ~/.versola/openbao/vps-admin.json (the root token
+and unseal key of that OpenBao) are kept: they are a live server's data.
+To start over from scratch, after a failed first attempt for example:
 
   versola uninstall --purge
 
@@ -223,6 +226,18 @@ func keptVpsVolumes() []string {
 	}
 	if volumeShown(proxy.ACMEVolume) {
 		kept = append(kept, proxy.ACMEVolume+" (TLS certificates)")
+	}
+	// Named, never read. A plain uninstall must keep it: it is what unseals the
+	// OpenBao volume kept above; only --purge removes both.
+	if files, err := openbao.TargetFiles("vps"); err == nil {
+		for _, f := range files {
+			if filepath.Base(f) != "vps-admin.json" {
+				continue
+			}
+			if _, err := os.Lstat(f); err == nil {
+				kept = append(kept, f+" (root token and unseal key of that OpenBao: opens every secret in it, so keep it private and in your backup)")
+			}
+		}
 	}
 	return kept
 }
@@ -416,7 +431,14 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		kept = keptVpsVolumes()
 	}
 
-	if !deployed && !dirExists && purge.empty() {
+	// vps only: the daily renewal timer that `certs renew --install-timer` (and
+	// every configure/bootstrap on vps) installed. Kept while Docker can't
+	// confirm that nothing is running: with a record that is
+	// keepDirForLaterCleanup, with no record (~/.versola lost on a server that
+	// may still serve) it is dockerUp.
+	removeTimer := target != "local" && dockerUp && !keepDirForLaterCleanup && len(certsTimerFiles()) > 0
+
+	if !deployed && !dirExists && purge.empty() && !removeTimer {
 		if imagesUnknown {
 			fmt.Println("No deployed stack and no local state, but Docker isn't reachable, so leftover versola images couldn't be checked.")
 			fmt.Println("Make sure Docker is running (see `versola doctor` if it isn't obvious why) and run `versola uninstall` again to check for those.")
@@ -462,6 +484,9 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 				fmt.Println("    (except the note of an unfinished first install, so that `versola configure` can resume it)")
 			}
 		}
+	}
+	if removeTimer {
+		fmt.Println("  - the daily certificate renewal timer (systemd user unit versola-certs-renew)")
 	}
 	if uninstallPurge {
 		// Names only: these are the files that hold the root token, the
@@ -604,6 +629,10 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		if err := runPurge(purge); err != nil {
 			return err
 		}
+	}
+
+	if removeTimer {
+		removeCertsTimer(os.Stdout)
 	}
 
 	for _, img := range images {

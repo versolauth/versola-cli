@@ -52,7 +52,7 @@ func writeStats(stdout, stderr io.Writer, asJSON bool) error {
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("nothing deployed on this machine yet -- run `versola bootstrap <local|vps> <version>` first")
+		return fmt.Errorf("nothing deployed on this machine yet -- run `versola bootstrap <local|vps> [<version>]` first")
 	}
 	st, err := state.Load()
 	if err != nil {

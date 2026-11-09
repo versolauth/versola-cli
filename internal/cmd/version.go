@@ -26,7 +26,7 @@ var versionCmd = &cobra.Command{
 along with the Go version and platform it was built for.
 
 This is the CLI's own version, not the version of Versola it deploys --
-that one is whatever you pass to "versola bootstrap local <version>".`,
+that one is whatever you pass to "versola bootstrap local [<version>]".`,
 	RunE: runVersion,
 }
 

@@ -36,11 +36,11 @@ var configureCmd = &cobra.Command{
 generates this release's configs and stores its secrets in OpenBao.
 
   versola configure local
-  versola configure local 0.1.1
-  versola configure vps 0.1.1 --auth-url https://id.example.com
-  versola configure vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
-  versola configure vps 0.1.1 --auth-url https://id.example.com --proxy external
-  versola configure vps 0.1.2      # later: the flags given before are remembered
+  versola configure local 0.7.5
+  versola configure vps 0.7.5 --auth-url https://id.example.com
+  versola configure vps 0.7.5 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  versola configure vps 0.7.5 --auth-url https://id.example.com --proxy external
+  versola configure vps 0.7.6      # later: the flags given before are remembered
 
 On local the version can be left out: the version already deployed on this
 machine is kept, otherwise the latest release (never a pre-release) is used,

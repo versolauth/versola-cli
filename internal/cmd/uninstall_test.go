@@ -35,10 +35,13 @@ type uninstallCase struct {
 	answer    string
 	yes       bool
 	purge     bool
+	timer     bool // the daily renewal timer's unit files are installed
 }
 
 type uninstallResult struct {
 	calls   [][]string // every Docker command, in order
+	systemd [][]string // every systemctl call, in order
+	units   string     // the user's systemd directory
 	volumes map[string]bool
 	home    string
 	out     string
@@ -54,6 +57,28 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	// The timer lives in the user's systemd directory, systemctl is recorded
+	// and never run.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	units := filepath.Join(home, ".config", "systemd", "user")
+	if c.timer {
+		if err := os.MkdirAll(units, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{deploy.CertsTimerUnit, deploy.CertsServiceUnit} {
+			if err := os.WriteFile(filepath.Join(units, f), []byte("[Unit]\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var systemd [][]string
+	oldRun, oldLook := runOutput, lookPath
+	runOutput = func(name string, args ...string) (string, error) {
+		systemd = append(systemd, append([]string{name}, args...))
+		return "", nil
+	}
+	lookPath = func(string) (string, error) { return "systemctl", nil }
+	t.Cleanup(func() { runOutput, lookPath = oldRun, oldLook })
 	if c.st != nil {
 		dir := filepath.Join(home, ".versola", "active", "bundle-1")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -175,6 +200,7 @@ func runUninstallCase(t *testing.T, c uninstallCase) uninstallResult {
 	res.err = runUninstall(uninstallCmd, nil)
 	outW.Close()
 	res.out = <-outDone
+	res.systemd, res.units = systemd, units
 	if strings.Contains(res.out, fileSecret) {
 		t.Errorf("a credentials file's content reached the output:\n%s", res.out)
 	}
@@ -360,6 +386,165 @@ func TestUninstallPlainVpsPointsAtPurge(t *testing.T) {
 				t.Errorf("prints a raw docker command:\n%s", r.out)
 			}
 		})
+	}
+}
+
+// The file that unseals the kept OpenBao stays after a plain uninstall, and
+// the customer is told so, in words and without its content.
+func TestUninstallPlainVpsNamesTheKeptAdminFile(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, files: true, answer: "y\n"})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if !r.fileExists("vps-admin.json") {
+		t.Errorf("a plain uninstall removed vps-admin.json")
+	}
+	if !strings.Contains(r.out, "vps-admin.json (root token and unseal key") {
+		t.Errorf("the kept list does not name vps-admin.json:\n%s", r.out)
+	}
+}
+
+func TestUninstallPlainVpsSaysNothingOfAdminFileThatIsNotThere(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, answer: "y\n"})
+	if strings.Contains(r.out, "vps-admin.json") {
+		t.Errorf("names a file that is not there:\n%s", r.out)
+	}
+}
+
+// --purge destroys the file with the volume, so it is not "kept".
+func TestUninstallPurgeDoesNotListTheAdminFileAsKept(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, files: true, answer: "vps\n", purge: true})
+	if strings.Contains(r.out, "vps-admin.json (root token and unseal key of that OpenBao: opens") {
+		t.Errorf("purge lists the file as kept:\n%s", r.out)
+	}
+	if r.fileExists("vps-admin.json") {
+		t.Errorf("purge left vps-admin.json")
+	}
+}
+
+// The daily timer would keep calling `certs renew` for a deployment that is
+// gone: uninstall on vps stops it, removes its units and is open about it.
+func TestUninstallVpsRemovesTheRenewalTimer(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		answer := "y\n"
+		if purge {
+			answer = "vps\n"
+		}
+		r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, files: true, timer: true, answer: answer, purge: purge})
+		if r.err != nil {
+			t.Fatalf("purge=%v: err %v\n%s", purge, r.err, r.out)
+		}
+		for _, f := range []string{deploy.CertsTimerUnit, deploy.CertsServiceUnit} {
+			if _, err := os.Stat(filepath.Join(r.units, f)); err == nil {
+				t.Errorf("purge=%v: %s was not removed", purge, f)
+			}
+		}
+		if len(r.systemd) != 2 || strings.Join(r.systemd[0], " ") != "systemctl --user disable --now "+deploy.CertsTimerUnit || strings.Join(r.systemd[1], " ") != "systemctl --user daemon-reload" {
+			t.Errorf("purge=%v: systemctl calls %v", purge, r.systemd)
+		}
+		if !strings.Contains(r.out, "the daily certificate renewal timer") {
+			t.Errorf("purge=%v: the timer is not named in the list of what is removed:\n%s", purge, r.out)
+		}
+	}
+}
+
+// With no deployment record the timer still goes: a plain uninstall earlier
+// removed the record, not the timer of a machine that is being given up.
+func TestUninstallRemovesTheRenewalTimerWithoutRecord(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{timer: true, answer: "y\n"})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if _, err := os.Stat(filepath.Join(r.units, deploy.CertsTimerUnit)); err == nil {
+		t.Errorf("the timer was not removed")
+	}
+}
+
+func TestUninstallRefusedKeepsTheRenewalTimer(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: allVol, timer: true, answer: "n\n"})
+	if r.err == nil {
+		t.Fatalf("no error on refusal:\n%s", r.out)
+	}
+	if _, err := os.Stat(filepath.Join(r.units, deploy.CertsTimerUnit)); err != nil || len(r.systemd) != 0 {
+		t.Errorf("a refused uninstall touched the timer: %v %v", err, r.systemd)
+	}
+}
+
+// Docker unreachable: the deployment record stays (it may still be running),
+// and so does its timer.
+func TestUninstallKeepsTheRenewalTimerWhileTheDeploymentIsKept(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), timer: true, dockerOff: true, answer: "y\n"})
+	if _, err := os.Stat(filepath.Join(r.units, deploy.CertsTimerUnit)); err != nil {
+		t.Errorf("the timer was removed while the deployment is kept: %v\n%s", err, r.out)
+	}
+}
+
+// No record and Docker unreachable: ~/.versola may be lost on a server that
+// still serves, so its timer stays too.
+func TestUninstallKeepsTheRenewalTimerWithoutRecordWhenDockerIsOff(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{timer: true, dockerOff: true, answer: "y\n"})
+	if _, err := os.Stat(filepath.Join(r.units, deploy.CertsTimerUnit)); err != nil || len(r.systemd) != 0 {
+		t.Errorf("the timer was touched: %v %v\n%s", err, r.systemd, r.out)
+	}
+}
+
+// systemd cannot be asked (no systemctl, or no user bus over plain ssh): the
+// units are removed anyway, daemon-reload is skipped, and the output says so.
+func TestUninstallRemovesTheRenewalTimerWhenSystemdCannotStopIt(t *testing.T) {
+	for _, name := range []string{"no systemctl", "disable fails"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			dir := filepath.Join(home, ".config", "systemd", "user")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{deploy.CertsTimerUnit, deploy.CertsServiceUnit} {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("[Unit]\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var calls []string
+			oldRun, oldLook := runOutput, lookPath
+			t.Cleanup(func() { runOutput, lookPath = oldRun, oldLook })
+			runOutput = func(n string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(append([]string{n}, args...), " "))
+				if name == "disable fails" {
+					return "", errors.New("Failed to connect to bus")
+				}
+				return "", nil
+			}
+			lookPath = func(string) (string, error) {
+				if name == "no systemctl" {
+					return "", errors.New("not found")
+				}
+				return "systemctl", nil
+			}
+			var out strings.Builder
+			removeCertsTimer(&out)
+			if files := certsTimerFiles(); len(files) != 0 {
+				t.Errorf("unit files left: %v", files)
+			}
+			for _, c := range calls {
+				if strings.Contains(c, "daemon-reload") {
+					t.Errorf("daemon-reload after a failed stop: %v", calls)
+				}
+			}
+			if !strings.Contains(out.String(), "systemd could not be asked to stop it") {
+				t.Errorf("the failure is not said:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// Local never had the timer; a unit of that name there is not this command's.
+func TestUninstallLocalDoesNotTouchTheRenewalTimer(t *testing.T) {
+	st := &state.State{Target: "local", Version: "0.7.2", BundleDir: "bundle-1"}
+	r := runUninstallCase(t, uninstallCase{st: st, timer: true, answer: "y\n"})
+	if _, err := os.Stat(filepath.Join(r.units, deploy.CertsTimerUnit)); err != nil {
+		t.Errorf("local uninstall removed the timer: %v\n%s", err, r.out)
 	}
 }
 

@@ -619,3 +619,67 @@ func TestUninstallSaysNothingAboutPostgresWhenThereIsNothingToForget(t *testing.
 		})
 	}
 }
+
+func localState() *state.State {
+	return &state.State{Target: "local", Version: "0.7.2", BundleDir: "bundle-1"}
+}
+
+// A record made before OpenBao's volume got a per-target name: the current
+// volume does not exist, the old shared one does. Nothing about the missing
+// volume is shown; the old one is kept and named, with the command to remove
+// it, even under --yes: it may hold a vps install's secrets.
+func TestUninstallLocalKeepsAndNamesLegacyOpenbaoVolume(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: localState(), volumes: []string{deploy.LegacyOpenbaoVolumeName}, yes: true})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if r.volumeRemoved(deploy.LegacyOpenbaoVolumeName) || r.volumeRemoved(deploy.OpenbaoVolumeName("local")) {
+		t.Errorf("a volume was removed: %v", r.calls)
+	}
+	if !strings.Contains(r.out, "docker volume rm "+deploy.LegacyOpenbaoVolumeName) {
+		t.Errorf("the kept volume and the command are not shown:\n%s", r.out)
+	}
+	if strings.Contains(r.out, "couldn't remove") || strings.Contains(r.out, "no such volume") || strings.Contains(r.out, "Removing OpenBao") {
+		t.Errorf("a missing volume is shown as a problem:\n%s", r.out)
+	}
+}
+
+// The current volume goes, the legacy one stays; with neither, nothing about
+// a volume is printed.
+func TestUninstallLocalOpenbaoVolumes(t *testing.T) {
+	cur := deploy.OpenbaoVolumeName("local")
+	r := runUninstallCase(t, uninstallCase{st: localState(), volumes: []string{cur, deploy.LegacyOpenbaoVolumeName}, yes: true})
+	if !r.volumeRemoved(cur) || r.volumeRemoved(deploy.LegacyOpenbaoVolumeName) {
+		t.Errorf("calls wrong: %v", r.calls)
+	}
+	r = runUninstallCase(t, uninstallCase{st: localState(), yes: true})
+	if r.err != nil || strings.Contains(r.out, "Removing OpenBao") || strings.Contains(r.out, "Kept the volume") || strings.Contains(r.out, "couldn't") {
+		t.Errorf("err %v, output mentions a volume that is not there:\n%s", r.err, r.out)
+	}
+}
+
+// Answering no removes nothing and does not talk about volumes.
+func TestUninstallLocalAbortedLeavesVolumes(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: localState(), volumes: []string{deploy.LegacyOpenbaoVolumeName, deploy.OpenbaoVolumeName("local")}, answer: "n\n"})
+	if r.volumeRemoved(deploy.LegacyOpenbaoVolumeName) || r.volumeRemoved(deploy.OpenbaoVolumeName("local")) {
+		t.Errorf("a volume was removed after no: %v", r.calls)
+	}
+}
+
+// vps keeps every OpenBao volume, the old name included, and does not
+// mention the legacy one: only --purge removes secrets.
+func TestUninstallVpsKeepsLegacyOpenbaoVolume(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: vpsState(), volumes: []string{deploy.LegacyOpenbaoVolumeName, obVol}, yes: true})
+	if r.volumeRemoved(deploy.LegacyOpenbaoVolumeName) || r.volumeRemoved(obVol) {
+		t.Errorf("a vps OpenBao volume was removed: %v", r.calls)
+	}
+}
+
+// Docker that cannot say whether the current volume exists is reported once;
+// the legacy one is still named.
+func TestUninstallLocalVolumeCheckFails(t *testing.T) {
+	r := runUninstallCase(t, uninstallCase{st: localState(), volumes: []string{deploy.LegacyOpenbaoVolumeName}, volumeErr: deploy.OpenbaoVolumeName("local"), yes: true})
+	if !strings.Contains(r.out, "permission denied") || !strings.Contains(r.out, "docker volume rm "+deploy.LegacyOpenbaoVolumeName) {
+		t.Errorf("output wrong: %v\n%s", r.calls, r.out)
+	}
+}

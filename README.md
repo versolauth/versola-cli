@@ -224,9 +224,11 @@ different memory checks, not just a different number:
   the right number there. The minimum is ~1 GiB if `versola-central`/`auth`/
   `edge` are already running (an in-place redeploy roughly nets out) or
   ~3 GiB if none of them are yet (starting three JVMs from cold), plus a
-  bit more if OpenBao also isn't running yet. These figures do not count
-  the Postgres container yet: they are to come from the release
-  (versolauth/versola#825), not from new constants here. This check
+  bit more if OpenBao also isn't running yet, and 256 MiB more when the
+  deployment runs the bundled Postgres container (a first install, or one
+  recorded as running it) and it is not running yet. That 256 MiB is an
+  estimate, to be replaced by the figure the release publishes
+  (versolauth/versola#825). This check
   only works run directly on the VPS itself over SSH — it fails outright
   (not a silent skip) if the Docker CLI is pointed at a remote host
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
@@ -787,8 +789,8 @@ with OpenBao's (see `uninstall`).
 
 `status` lists the container with the others, `stats` shows what it uses
 (its memory counts as used in the stand-in verdict), and `versola logs postgres`
-shows its output (see [`logs`](#logs)). Not done yet: `doctor`'s memory figures
-with it.
+shows its output (see [`logs`](#logs)). `doctor --target vps` counts it in the
+memory floor (a fixed 256 MiB until the release publishes a figure).
 
 ### Your own Postgres: `postgres init`
 

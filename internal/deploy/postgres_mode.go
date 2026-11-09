@@ -354,3 +354,22 @@ the Postgres container now would run Versola on an empty database: users and cli
   - The data is in a Postgres of your own: run the same command again with --postgres-host <host:port>.
   - You want to start over from scratch, which destroys OpenBao's secrets and keys: versola uninstall --purge`, bundledPostgresVolume)
 }
+
+// PostgresIsBundled: a `configure vps` given postgresHost ("" when the flag is
+// left out) would run its Postgres in a container, decided as configure and
+// PostgresCheck decide it (resolvePostgres, with the record of the deployment
+// on this machine). doctor's memory check uses it so that it budgets what
+// configure will start. false when configure would refuse or cannot tell (an
+// unreadable record, a refused flag): PostgresCheck already fails the run then.
+func PostgresIsBundled(postgresHost string) bool {
+	stored, err := storedVps()
+	if err != nil {
+		return false
+	}
+	return postgresIsBundled(postgresHost, stored)
+}
+
+func postgresIsBundled(postgresHost string, stored *state.State) bool {
+	mode, _, err := resolvePostgres("vps", postgresHost, stored, nil)
+	return err == nil && mode == PostgresModeBundled
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -246,5 +247,39 @@ func TestRefuseEmptyBundledPostgres(t *testing.T) {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// doctor's memory check budgets the Postgres container exactly when configure
+// would start one, which the record of the deployment decides, not the flag
+// alone.
+func TestPostgresIsBundled(t *testing.T) {
+	external := &state.State{Target: "vps", PostgresHost: "db.example.com:5432"}
+	bundled := &state.State{Target: "vps", PostgresHost: BundledPostgresHost, PostgresMode: PostgresModeBundled}
+	cases := []struct {
+		name   string
+		host   string
+		stored *state.State
+		want   bool
+	}{
+		{"first install, no flag", "", nil, true},
+		{"first install, own Postgres", "db.example.com:5432", nil, false},
+		{"recorded own Postgres, no flag", "", external, false},
+		{"recorded bundled, no flag", "", bundled, true},
+		{"recorded bundled, flag (configure refuses)", "db.example.com:5432", bundled, false},
+		{"old record that does not say", "", &state.State{Target: "vps"}, false},
+	}
+	for _, c := range cases {
+		if got := postgresIsBundled(c.host, c.stored); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// checks cannot import deploy, so it holds its own copy of the container's
+// name (the memory check looks for it): the two must not drift.
+func TestBundledPostgresContainerNameMatchesChecks(t *testing.T) {
+	if checks.BundledPostgresContainer != PostgresContainerName() {
+		t.Fatalf("checks has %q, deploy has %q", checks.BundledPostgresContainer, PostgresContainerName())
 	}
 }

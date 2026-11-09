@@ -281,9 +281,13 @@ func takesLoopback(host string) bool {
 // unconstrained JVM's -XX:MaxRAMPercentage=75.0 has a real ceiling to
 // work against instead of whatever's currently free) belongs in the
 // versola repo, follow-up.
-func DockerMemory(target string) Result {
+//
+// bundledPostgres (vps only; ignored on local, whose ~4 GiB already counts
+// its Postgres) says the deployment runs its own Postgres in a container, so
+// the floor also has to hold it (see VpsMemoryFloor).
+func DockerMemory(target string, bundledPostgres bool) Result {
 	if target == "vps" {
-		return dockerMemoryAvailableVps()
+		return dockerMemoryAvailableVps(bundledPostgres)
 	}
 	return dockerMemoryTotalLocal()
 }
@@ -324,7 +328,7 @@ func dockerMemoryTotalLocal() Result {
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB", gib)}
 }
 
-func dockerMemoryAvailableVps() Result {
+func dockerMemoryAvailableVps(bundledPostgres bool) Result {
 	const name = "Docker memory"
 	// Two different floors, not one: MemAvailable right now only tells you
 	// what's free BEFORE `configure`/`up` starts anything. On a machine
@@ -338,34 +342,8 @@ func dockerMemoryAvailableVps() Result {
 	// check and then overcommit the moment `up` actually starts them
 	// (flagged in review). isReplaceVps below tells the two cases apart.
 	//
-	// minAvailableReplaceBytes (~1 GiB) is deliberately well under the
-	// ~1.8 GiB MemAvailable this check's own history measured on a real,
-	// already-stable production VPS (3.9 GiB total, native Postgres + a
-	// separate observability stack + this exact three-JVM deployment all
-	// already running) -- margin for smaller boxes without chasing an
-	// exact number nothing here can derive precisely.
-	//
-	// minAvailableFreshBytes (~3 GiB) has no equivalent real-world
-	// measurement to lean on -- nothing has been observed starting three
-	// unconstrained JVMs from cold on a vps box yet -- so it falls back to
-	// local's own ~4 GiB estimate for "three JVMs" minus a rough GiB for
-	// the one thing vps genuinely doesn't containerize (Postgres), same
-	// reasoning as the very first version of this fix, just applied to
-	// the right measurement this time (available, not total).
-	const minAvailableReplaceBytes = 1 * 1024 * 1024 * 1024
-	const minAvailableFreshBytes = 3 * 1024 * 1024 * 1024
-	// Configure starts versola-openbao-<target> itself whenever it isn't
-	// already running (see deploy.Configure's own "Starting OpenBao..."
-	// step) -- independently of whether central/auth/edge are being
-	// replaced or started fresh. Our own real first-ever `configure vps`
-	// against this exact repo's target VPS is exactly that combination:
-	// all three JVMs already up (the cheap "replace" floor), OpenBao not
-	// running yet at all (flagged in review: the replace floor as written
-	// didn't budget for it). OpenBao is a small Go binary, not a JVM, so
-	// this is a flat, deliberately generous-for-its-size add-on rather
-	// than a third tier of floors -- added whenever it isn't already up,
-	// on top of whichever of the two floors above otherwise applies.
-	const openbaoOverheadBytes = 256 * 1024 * 1024
+	// The floors and the add-ons are in VpsMemoryFloor, with the reasoning
+	// for each figure.
 
 	// configure vps is only ever meant to run directly on the VPS itself
 	// (see develop.md's "the machine that will run `versola configure
@@ -404,16 +382,7 @@ func dockerMemoryAvailableVps() Result {
 		return Result{Name: name, OK: true, Detail: "skipped (couldn't read /proc/meminfo)"}
 	}
 
-	minBytes := int64(minAvailableFreshBytes)
-	situation := "a fresh deployment (no central/auth/edge running yet)"
-	if isReplaceVps() {
-		minBytes = minAvailableReplaceBytes
-		situation = "replacing the already-running central/auth/edge"
-	}
-	if !isRunningVps("versola-openbao-vps") {
-		minBytes += openbaoOverheadBytes
-		situation += ", plus starting OpenBao"
-	}
+	minBytes, situation := VpsMemoryFloor(isReplaceVps(), isRunningVps("versola-openbao-vps"), bundledPostgres, isRunningVps(BundledPostgresContainer))
 
 	gib := float64(available) / (1024 * 1024 * 1024)
 	minGib := float64(minBytes) / (1024 * 1024 * 1024)
@@ -421,10 +390,61 @@ func dockerMemoryAvailableVps() Result {
 		return Result{
 			Name:   name,
 			OK:     false,
-			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.1f GiB free right now for %s (native Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
+			Detail: fmt.Sprintf("%.1f GiB available — Versola needs ~%.1f GiB free right now for %s (Postgres, the OS, and anything else already on this host all compete for the same RAM here, unlike Docker Desktop's dedicated VM)", gib, minGib, situation),
 		}
 	}
 	return Result{Name: name, OK: true, Detail: fmt.Sprintf("%.1f GiB available", gib)}
+}
+
+// BundledPostgresContainer is the name of the bundled Postgres container on
+// vps (the same as deploy's own constant, which this package cannot import).
+const BundledPostgresContainer = "versola-postgres-vps"
+
+// VpsMemoryFloor is the MemAvailable `configure vps` needs right now, and a
+// short description of the situation for the message.
+//
+// Two floors, not one: MemAvailable only tells what is free BEFORE anything
+// starts. On a machine already running central/auth/edge (the in-place
+// replace this check's history was measured against), that number already
+// has the old containers' footprint baked in and the new ones swap in for
+// them. On a fresh vps the same "1 GiB free" says nothing about whether
+// three JVMs that do not exist yet will fit once they start.
+//
+// replaceFloor (~1 GiB) is well under the ~1.8 GiB MemAvailable measured on a
+// real, already-stable production VPS (3.9 GiB total, native Postgres, a
+// separate observability stack and this three-JVM deployment all running).
+// freshFloor (~3 GiB) has no such measurement: it is local's ~4 GiB estimate
+// minus a rough GiB for Postgres, which was not containerized on vps then.
+//
+// Add-ons, each only when the container is not already running (a running
+// one is already netted out of MemAvailable): OpenBao (a small Go binary,
+// flat 256 MiB) and, with a bundled Postgres, 256 MiB for it. The Postgres
+// figure is an estimate, not a measurement under load: its idle use was 142
+// MiB (local, 2026-11-09), and a larger number would refuse healthy 4 GB
+// servers, the minimum the product promises. Replace it with the published
+// figure of versolauth/versola#825 when there is one.
+func VpsMemoryFloor(replace, openbaoRunning, bundledPostgres, postgresRunning bool) (int64, string) {
+	const (
+		replaceFloor  = 1 * 1024 * 1024 * 1024
+		freshFloor    = 3 * 1024 * 1024 * 1024
+		openbaoExtra  = 256 * 1024 * 1024
+		postgresExtra = 256 * 1024 * 1024
+	)
+	min := int64(freshFloor)
+	situation := "a fresh deployment (no central/auth/edge running yet)"
+	if replace {
+		min = replaceFloor
+		situation = "replacing the already-running central/auth/edge"
+	}
+	if !openbaoRunning {
+		min += openbaoExtra
+		situation += ", plus starting OpenBao"
+	}
+	if bundledPostgres && !postgresRunning {
+		min += postgresExtra
+		situation += ", plus starting the Postgres container"
+	}
+	return min, situation
 }
 
 // isReplaceVps reports whether ALL THREE of vps's fixed container names

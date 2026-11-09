@@ -235,6 +235,13 @@ the proxy's ports, port 5432 for the Postgres container); the name of
 `--auth-url`, the registry and lingering are only checked here, so on a
 server run `doctor --target vps` with your flags first.
 
+On a server, when one of those checks fails, `configure`/`bootstrap` end with
+the `versola doctor --target vps` command for the flags of that run (bare
+`versola doctor` checks local). A taken port 5432 for the Postgres container
+says the way out instead: stop the Postgres that holds it, or pass
+`--postgres-host 127.0.0.1:5432` to use it as your own (on a deployment that already
+runs its own Postgres only the first: configure refuses `--postgres-host` there).
+
 If Docker isn't reachable, `doctor` tells the two possible reasons apart
 and reacts differently: already installed but not running just gets a
 "start it" hint (installing something wouldn't help); not installed at

@@ -631,6 +631,13 @@ type PostgresInitDeps struct {
 	Run     psqlRunner
 	// ScriptPath is where the file for an admin goes (0600).
 	ScriptPath func(target string) (string, error)
+	// ConfirmInteractive asks the question about setting the password of a
+	// role that exists: a yes/no like Confirm, but false when there is no
+	// terminal to answer on (a piped "y" is not an answer to it).
+	ConfirmInteractive func(prompt string) bool
+	// RoleScriptPath is where `configure` kept the SQL that sets the role's
+	// password (named in the message when the question is declined).
+	RoleScriptPath func(target string) (string, error)
 }
 
 // PostgresInit initialises the Postgres of the recorded vps deployment.
@@ -652,6 +659,9 @@ func PostgresInit(opts PostgresInitOptions, deps PostgresInitDeps) error {
 	}
 	if deps.ScriptPath == nil {
 		deps.ScriptPath = openbao.PostgresInitScriptPath
+	}
+	if deps.RoleScriptPath == nil {
+		deps.RoleScriptPath = openbao.PostgresRoleScriptPath
 	}
 	return runPostgresInit(st, dir, opts, deps)
 }
@@ -729,18 +739,28 @@ func runPostgresInit(st *state.State, dir string, opts PostgresInitOptions, deps
 		c := t.roleConn
 		c.db = "postgres"
 		if _, err := deps.Run(c, "SELECT 1;", nil); err != nil {
-			return fmt.Errorf("the role %q exists, but it could not log in (to the postgres database) with the password stored for the deployment: %v\nIf it is the password: this command never sets the password of a role that exists, set it to the POSTGRES_PASSWORD of the deployment's auth.secrets.env yourself. If it is not (the role may not be allowed to log in, or to connect to that database from here), fix that. Nothing was changed", t.role, err)
+			if err := fixRolePassword(out, t, admin, opts, deps, "postgres", err); err != nil {
+				return err
+			}
 		}
 	}
 	// The schemas, as the role, when it can ask: it exists and owns the database
 	// (with no admin, that is taken for granted and fails below if it is not so).
 	if admin == nil || (facts.probe.roleExists && facts.probe.dbExists && facts.probe.dbOwner == t.role) {
 		row, err := deps.Run(t.roleConn, schemasProbeSQL, nil)
+		if err != nil && admin != nil {
+			// The role exists and owns the database: the likeliest reason is a
+			// password that is not the deployment's (see fixRolePassword).
+			if err := fixRolePassword(out, t, admin, opts, deps, t.db, err); err != nil {
+				return err
+			}
+			row, err = deps.Run(t.roleConn, schemasProbeSQL, nil)
+		}
 		if err != nil {
 			if admin == nil {
-				return fmt.Errorf("couldn't log in as the role %q to %q: %v\nIf the role or the database does not exist yet, give an admin: --admin-url postgres://ADMIN@host:5432/postgres (its password in PGPASSWORD, --admin-password-file or at the prompt), or --sudo-postgres on this server", t.role, t.db, err)
+				return fmt.Errorf("couldn't log in as the role %q to %q: %v\nIf the role or the database does not exist yet, give an admin: --admin-url postgres://ADMIN@host:5432/postgres (its password in PGPASSWORD, --admin-password-file or at the prompt), or --sudo-postgres on this server. If the role exists with another password than the deployment's, the same admin flags let this command set it, after asking", t.role, t.db, err)
 			}
-			return fmt.Errorf("the role %q exists, but it could not log in to %q with the password stored for the deployment: %v\nThis command never sets the password of a role that exists: set it to the POSTGRES_PASSWORD of the deployment's auth.secrets.env yourself", t.role, t.db, err)
+			return fmt.Errorf("the role %q could not read the schemas of %q even after its password was set: %v", t.role, t.db, err)
 		}
 		facts.schemas = parseSchemas(row)
 	}
@@ -794,7 +814,7 @@ func runPostgresInit(st *state.State, dir string, opts PostgresInitOptions, deps
 	}
 	if len(roleSQL) > 0 {
 		if _, err := deps.Run(t.roleConn, strings.Join(roleSQL, "\n")+"\n", nil); err != nil {
-			return fmt.Errorf("couldn't create the schemas as the role %q: %v\nIf it is a password failure, the role has another password than the deployment's POSTGRES_PASSWORD (auth.secrets.env), which this command never changes on a role that exists: set it to that value, then run this again -- it continues with what is missing", t.role, err)
+			return fmt.Errorf("couldn't create the schemas as the role %q: %v\nIf it is a password failure, the role has another password than the deployment's POSTGRES_PASSWORD (auth.secrets.env), which this command sets only when it finds the mismatch before creating anything: run this command again, it asks before setting the password and then continues with what is missing", t.role, err)
 		}
 	}
 
@@ -811,6 +831,78 @@ func runPostgresInit(st *state.State, dir string, opts PostgresInitOptions, deps
 	}
 	fmt.Fprintf(out, "\nDone: the role %q, the database %q and the schemas %s are in place. `versola migrate` is next.\n", t.role, t.db, strings.Join(initSchemas, ", "))
 	return nil
+}
+
+// fixRolePassword is for a role that exists but could not log in (loginErr) to
+// db with the password stored for the deployment: after a purge, a new OpenBao
+// generated a new password while the role kept the old one. The admin is
+// already known to this command, so it offers to set the password itself
+// (ALTER ROLE ... PASSWORD <verifier>, over stdin like every statement here:
+// the password is neither printed nor on a command line), instead of asking
+// the customer to copy a secret out of auth.secrets.env.
+//
+// It changes the password of a role that exists, which another application
+// may share, so the question is always asked: --yes does not answer it, and
+// with no terminal to answer it nothing is changed (ConfirmInteractive: a
+// piped `y` is not an answer). It is offered only for a failure of the
+// password itself (Postgres's "password authentication failed"): a refused
+// connection, a TLS or pg_hba.conf failure or a role that may not log in
+// would otherwise end with the password of a shared role replaced for
+// nothing. A declined or unanswered question ends with the file `configure`
+// wrote for the same job and the command that runs it. The login is checked
+// again afterwards: a role that still cannot get in is not failing on its
+// password and the error says so.
+func fixRolePassword(out io.Writer, t initTarget, admin *pgConn, opts PostgresInitOptions, deps PostgresInitDeps, db string, loginErr error) error {
+	if !strings.Contains(loginErr.Error(), "password authentication failed") {
+		return fmt.Errorf("the role %q exists, but it could not log in to %q: %v\nThe password may be fine: check that Postgres is reachable from here and that the role may log in and connect to that database (pg_hba.conf, the role's LOGIN and CONNECT rights, the TLS settings). Nothing was changed", t.role, db, loginErr)
+	}
+	secret, shown, err := secretClause(t.secret)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "\nThe role %q exists, but it could not log in to %q with the password stored for the deployment: %v\n", t.role, db, loginErr)
+	fmt.Fprintf(out, "This sets the password to the deployment's (as the admin):\n\n-- set the password of the role that exists\nALTER ROLE %s PASSWORD %s;\n\n", quoteIdent(t.role), shown)
+	fmt.Fprintf(out, "Any other application that logs in as %q with its old password stops working. The change stays even if the rest of this command is then refused.\n", t.role)
+
+	byHand := rolePasswordByHand(t, deps)
+	if opts.DryRun {
+		fmt.Fprintln(out, "\nDry run: nothing was changed.")
+		return fmt.Errorf("not initialised: the role %q could not log in with the deployment's password.%s", t.role, byHand)
+	}
+	// Not opts.Yes: see above.
+	if deps.ConfirmInteractive == nil || !deps.ConfirmInteractive("Set the password of the role?") {
+		if opts.Yes {
+			fmt.Fprintln(out, "Nothing was changed (--yes does not answer this question).")
+		} else {
+			fmt.Fprintln(out, "Nothing was changed.")
+		}
+		return exitcode.With(exitcode.Aborted, fmt.Errorf("aborted: the password of the role %q was not set.%s", t.role, byHand))
+	}
+	sql := fmt.Sprintf("SET standard_conforming_strings = on;\nALTER ROLE %s PASSWORD %s;\n", quoteIdent(t.role), secret)
+	if _, err := deps.Run(*admin, sql, nil); err != nil {
+		return fmt.Errorf("couldn't set the password of the role %q: %v.%s", t.role, err, byHand)
+	}
+	c := t.roleConn
+	c.db = db
+	if _, err := deps.Run(c, "SELECT 1;", nil); err != nil {
+		return fmt.Errorf("the password of the role %q was set, but it still could not log in to %q: %v\nCheck that the role may connect to that database from here (pg_hba.conf) and that its password has not expired (ALTER ROLE ... VALID UNTIL 'infinity')", t.role, db, err)
+	}
+	fmt.Fprintf(out, "The password of the role %q is set.\n", t.role)
+	return nil
+}
+
+// rolePasswordByHand is the sentence that ends a declined question: the file
+// `configure` wrote (when it is still there) and the command that runs it.
+func rolePasswordByHand(t initTarget, deps PostgresInitDeps) string {
+	if deps.RoleScriptPath == nil {
+		return " Run this command again in a terminal and answer yes."
+	}
+	if path, err := deps.RoleScriptPath(t.target); err == nil {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Sprintf(" The SQL that sets it is in %s: run it as a Postgres admin, %s (Postgres on this server) or psql \"host=<host> user=<admin> dbname=postgres\" < %s (another one). Or run this command again in a terminal and answer yes.", path, postgresRoleCommand(path), shellQuote(path))
+		}
+	}
+	return " Run this command again in a terminal and answer yes."
 }
 
 // writeBlocked says what stops the run and, when rights are what is missing,

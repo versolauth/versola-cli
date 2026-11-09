@@ -401,6 +401,10 @@ func (f *fakeServer) run(c pgConn, sql string, vars map[string]string) (string, 
 		return strings.Join(out, "\n") + "\n", nil
 	}
 	f.mutating++
+	if strings.Contains(sql, "ALTER ROLE") {
+		// The password is the deployment's now: the role gets in.
+		f.roleLogin = nil
+	}
 	if strings.Contains(sql, "CREATE SCHEMA") {
 		for _, s := range initSchemas {
 			if strings.Contains(sql, `"`+s+`"`) {
@@ -426,12 +430,16 @@ func initFixture(t *testing.T) (st *state.State, dir string) {
 
 func initDeps(f *fakeServer, out *bytes.Buffer, scriptDir string, answer bool) PostgresInitDeps {
 	return PostgresInitDeps{
-		Out:        out,
-		PGPassword: "admin-password-1",
-		Prompt:     func() (string, error) { return "", errors.New("no terminal") },
-		Confirm:    func(string) bool { return answer },
-		Run:        f.run,
-		ScriptPath: func(target string) (string, error) { return filepath.Join(scriptDir, target+"-postgres-init.sql"), nil },
+		Out:                out,
+		PGPassword:         "admin-password-1",
+		Prompt:             func() (string, error) { return "", errors.New("no terminal") },
+		Confirm:            func(string) bool { return answer },
+		ConfirmInteractive: func(string) bool { return answer },
+		Run:                f.run,
+		ScriptPath:         func(target string) (string, error) { return filepath.Join(scriptDir, target+"-postgres-init.sql"), nil },
+		RoleScriptPath: func(target string) (string, error) {
+			return filepath.Join(scriptDir, target+"-postgres-role.sql"), nil
+		},
 	}
 }
 
@@ -628,16 +636,176 @@ func TestPostgresInitWithoutAdmin(t *testing.T) {
 	}
 }
 
-func TestPostgresInitNeverSetsThePasswordOfAnExistingRole(t *testing.T) {
+var errBadPassword = errors.New(`FATAL:  password authentication failed for user "versola_app"`)
+
+// A role that owns the database but has another password than the
+// deployment's (a purge made a new one): after a yes, the admin sets it, the
+// schemas are found and the run goes on. Neither password is printed or in a
+// statement as plain text.
+func TestPostgresInitSetsThePasswordOfAnExistingRoleAfterAYes(t *testing.T) {
 	st, dir := initFixture(t)
-	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errors.New(`FATAL:  password authentication failed for user "versola_app"`)}
+	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errBadPassword, schemas: map[string]bool{"auth": true, "central": true, "edge": true}}
 	var out bytes.Buffer
-	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, initDeps(f, &out, t.TempDir(), true))
-	if err == nil || !strings.Contains(err.Error(), "never sets the password of a role that exists") {
+	var asked []string
+	deps := initDeps(f, &out, t.TempDir(), true)
+	deps.ConfirmInteractive = func(p string) bool { asked = append(asked, p); return true }
+	if err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true}, deps); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(asked) != 1 || !strings.Contains(asked[0], "password") {
+		t.Errorf("the question about the password must be asked once: %v", asked)
+	}
+	if f.mutating != 1 {
+		t.Errorf("only the password is set, %d statements ran", f.mutating)
+	}
+	var alter *fakeCall
+	for i, c := range f.calls {
+		if strings.Contains(c.sql, "ALTER ROLE") {
+			alter = &f.calls[i]
+		}
+	}
+	if alter == nil || !alter.conn.sudo || !strings.Contains(alter.sql, `ALTER ROLE "versola_app" PASSWORD 'SCRAM-SHA-256$`) {
+		t.Fatalf("the admin must set the role's password as a verifier: %+v", alter)
+	}
+	assertNoSecrets(t, f, out.String())
+	if !strings.Contains(out.String(), "ALTER ROLE \"versola_app\" PASSWORD '<hidden") {
+		t.Errorf("the statement is shown with the password hidden:\n%s", out.String())
+	}
+}
+
+// --yes does not answer the question about the password of a role that
+// exists: with no terminal (Confirm says no) nothing changes, and the message
+// names the file configure wrote and the command that runs it.
+func TestPostgresInitYesDoesNotSetThePasswordOfAnExistingRole(t *testing.T) {
+	st, dir := initFixture(t)
+	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errBadPassword}
+	var out bytes.Buffer
+	scripts := t.TempDir()
+	role := filepath.Join(scripts, "vps-postgres-role.sql")
+	if err := os.WriteFile(role, []byte("-- role\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := initDeps(f, &out, scripts, false)
+	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, deps)
+	if err == nil || exitcode.Code(err) != exitcode.Aborted {
 		t.Fatalf("got %v", err)
+	}
+	for _, want := range []string{role, "sudo -u postgres psql < ", "terminal"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message lacks %q: %v", want, err)
+		}
 	}
 	if f.mutating != 0 {
 		t.Errorf("nothing may run, %d statements did", f.mutating)
+	}
+	assertNoSecrets(t, f, out.String()+err.Error())
+
+	// The file is gone (a second configure does not write it again): no path is named.
+	if err := os.Remove(role); err != nil {
+		t.Fatal(err)
+	}
+	err = runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, deps)
+	if err == nil || strings.Contains(err.Error(), "vps-postgres-role.sql") || !strings.Contains(err.Error(), "answer yes") {
+		t.Errorf("without the file: %v", err)
+	}
+}
+
+func TestPostgresInitDryRunDoesNotSetThePasswordOfAnExistingRole(t *testing.T) {
+	st, dir := initFixture(t)
+	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errBadPassword}
+	var out bytes.Buffer
+	asked := false
+	deps := initDeps(f, &out, t.TempDir(), true)
+	deps.ConfirmInteractive = func(string) bool { asked = true; return true }
+	if err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, DryRun: true}, deps); err == nil {
+		t.Fatal("a deployment whose role cannot log in is not initialised, even in a dry run")
+	}
+	if asked || f.mutating != 0 || !strings.Contains(out.String(), "Dry run: nothing was changed") {
+		t.Errorf("a dry run only prints (asked %v, %d statements):\n%s", asked, f.mutating, out.String())
+	}
+}
+
+// After the password is set the role still cannot get in: the message says
+// the password is not the reason.
+func TestPostgresInitRoleStillCannotLogInAfterThePassword(t *testing.T) {
+	st, dir := initFixture(t)
+	f := &fakeServer{probe: "t|t|t|t|f||f", roleLogin: errBadPassword}
+	var out bytes.Buffer
+	// The fake lets the role in after ALTER ROLE: put a failure of another kind
+	// back once the statement ran.
+	deps := initDeps(f, &out, t.TempDir(), true)
+	run := deps.Run
+	deps.Run = func(c pgConn, sql string, v map[string]string) (string, error) {
+		s, err := run(c, sql, v)
+		if strings.Contains(sql, "ALTER ROLE") {
+			f.roleLogin = errors.New(`FATAL:  no pg_hba.conf entry for host`)
+		}
+		return s, err
+	}
+	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true}, deps)
+	if err == nil || !strings.Contains(err.Error(), "pg_hba.conf") || !strings.Contains(err.Error(), "was set, but") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A login that fails for a reason other than the password (Postgres not
+// reachable, pg_hba.conf, a role that may not log in) is never offered the
+// change: the password of a shared role would be replaced for nothing.
+func TestPostgresInitOnlyAPasswordFailureOffersTheChange(t *testing.T) {
+	for _, loginErr := range []string{
+		`psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused`,
+		`FATAL:  no pg_hba.conf entry for host "127.0.0.1", user "versola_app"`,
+		`FATAL:  role "versola_app" is not permitted to log in`,
+	} {
+		for _, probe := range []string{"t|t|t|t|f||f", "t|t|t|t|t|versola_app|f"} {
+			st, dir := initFixture(t)
+			f := &fakeServer{probe: probe, roleLogin: errors.New(loginErr)}
+			var out bytes.Buffer
+			asked := false
+			deps := initDeps(f, &out, t.TempDir(), true)
+			deps.ConfirmInteractive = func(string) bool { asked = true; return true }
+			err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true}, deps)
+			if err == nil || !strings.Contains(err.Error(), "Nothing was changed") || !strings.Contains(err.Error(), "pg_hba.conf") {
+				t.Errorf("%q: got %v", loginErr, err)
+			}
+			if asked || f.mutating != 0 {
+				t.Errorf("%q: the change must not be offered (asked %v, %d statements)", loginErr, asked, f.mutating)
+			}
+		}
+	}
+}
+
+// No way to ask on a terminal (a piped answer, no ConfirmInteractive): nothing
+// is changed, even though Confirm would say yes.
+func TestPostgresInitWithoutATerminalDoesNotSetThePassword(t *testing.T) {
+	st, dir := initFixture(t)
+	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errBadPassword}
+	var out bytes.Buffer
+	deps := initDeps(f, &out, t.TempDir(), true)
+	deps.ConfirmInteractive = nil
+	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, deps)
+	if err == nil || exitcode.Code(err) != exitcode.Aborted || f.mutating != 0 {
+		t.Fatalf("got %v, %d statements", err, f.mutating)
+	}
+}
+
+// The admin says yes but cannot set the password (not enough rights): the
+// error ends with the way out.
+func TestPostgresInitFailedPasswordChangeEndsWithAWayOut(t *testing.T) {
+	st, dir := initFixture(t)
+	f := &fakeServer{probe: "t|t|t|t|t|versola_app|f", roleLogin: errBadPassword}
+	var out bytes.Buffer
+	deps := initDeps(f, &out, t.TempDir(), true)
+	run := deps.Run
+	deps.Run = func(c pgConn, sql string, v map[string]string) (string, error) {
+		if strings.Contains(sql, "ALTER ROLE") {
+			return "", errors.New("ERROR:  permission denied to alter role")
+		}
+		return run(c, sql, v)
+	}
+	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true}, deps)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), "answer yes") {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -673,8 +841,8 @@ func TestPostgresInitChecksTheRolesLoginBeforeCreatingItsDatabase(t *testing.T) 
 	// The role exists, the database does not, and the role cannot log in.
 	f := &fakeServer{probe: "t|t|t|t|f||f", roleLogin: errors.New(`FATAL:  password authentication failed for user "versola_app"`)}
 	var out bytes.Buffer
-	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, initDeps(f, &out, t.TempDir(), true))
-	if err == nil || !strings.Contains(err.Error(), "never sets the password of a role that exists") || !strings.Contains(err.Error(), "Nothing was changed") {
+	err := runPostgresInit(st, dir, PostgresInitOptions{SudoPostgres: true, Yes: true}, initDeps(f, &out, t.TempDir(), false))
+	if err == nil || !strings.Contains(err.Error(), "was not set") {
 		t.Fatalf("got %v", err)
 	}
 	if f.mutating != 0 {

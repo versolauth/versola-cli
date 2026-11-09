@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -117,8 +118,11 @@ func (e itEnv) deps(out *bytes.Buffer, adminPassword string) PostgresInitDeps {
 		PGPassword: adminPassword,
 		Prompt:     func() (string, error) { return "", errors.New("no terminal") },
 		Confirm:    func(string) bool { return true },
-		Run:        e.run,
-		ScriptPath: func(target string) (string, error) { return filepath.Join(e.scripts, target+"-postgres-init.sql"), nil },
+		// The question about the password of a role that exists, answered yes.
+		ConfirmInteractive: func(string) bool { return true },
+		Run:                e.run,
+		ScriptPath:         func(target string) (string, error) { return filepath.Join(e.scripts, target+"-postgres-init.sql"), nil },
+		RoleScriptPath:     func(target string) (string, error) { return filepath.Join(e.scripts, target+"-postgres-role.sql"), nil },
 	}
 }
 
@@ -272,16 +276,35 @@ func TestPostgresInitReal(t *testing.T) {
 				}
 			})
 
-			t.Run("a role that exists with another password: nothing is created", func(t *testing.T) {
+			t.Run("a role that exists with another password: set after a yes, then the rest is made", func(t *testing.T) {
 				e := e
 				e.t = t
 				e.super("postgres", "CREATE ROLE it_role4 LOGIN PASSWORD 'another-password';")
 				out, err := e.init("it_role4", "it_db4", "Generated-pw_4.ascii", PostgresInitOptions{AdminURL: "postgres://postgres@127.0.0.1/postgres?sslmode=disable"}, pgItSuperPassword)
-				if err == nil || !strings.Contains(err.Error(), "never sets the password of a role that exists") {
-					t.Fatalf("got %v\n%s", err, out)
+				if err != nil {
+					t.Fatalf("%v\n%s", err, out)
 				}
-				if n := e.super("postgres", "SELECT count(*) FROM pg_database WHERE datname = 'it_db4';"); n != "0" {
+				// The verifier sent over stdin works on a real server.
+				e.ready("it_role4", "it_db4", "Generated-pw_4.ascii")
+			})
+
+			t.Run("a role that exists with another password: declined, nothing changes", func(t *testing.T) {
+				e := e
+				e.t = t
+				e.super("postgres", "CREATE ROLE it_role11 LOGIN PASSWORD 'another-password';")
+				st, dir := itFixture(t, "it_role11", "it_db11", "Generated-pw_11.ascii")
+				var out bytes.Buffer
+				deps := e.deps(&out, pgItSuperPassword)
+				deps.ConfirmInteractive = func(string) bool { return false }
+				err := runPostgresInit(st, dir, PostgresInitOptions{AdminURL: "postgres://postgres@127.0.0.1/postgres?sslmode=disable", Yes: true}, deps)
+				if err == nil || exitcode.Code(err) != exitcode.Aborted {
+					t.Fatalf("got %v\n%s", err, out.String())
+				}
+				if n := e.super("postgres", "SELECT count(*) FROM pg_database WHERE datname = 'it_db11';"); n != "0" {
 					t.Errorf("the database was made although the role can't log in: %s", n)
+				}
+				if _, err := e.run(pgConn{user: "it_role11", password: "another-password", db: "postgres"}, "SELECT 1;", nil); err != nil {
+					t.Errorf("the role's own password was changed: %v", err)
 				}
 			})
 

@@ -226,6 +226,29 @@ func TestFiles(t *testing.T) {
 	}
 }
 
+// The access log must never carry a query string: the first-login link's token (?link_token=...),
+// OAuth codes and signed request objects travel there. The format logs method, $uri and protocol.
+func TestAccessLogHasNoQueryString(t *testing.T) {
+	for _, c := range renderCases() {
+		t.Run(c.name, func(t *testing.T) {
+			files, err := c.config(t).Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Directives only: the template explains in a comment which variables not to use.
+			conf := strings.Join(directives(files["proxy/nginx.conf"]), " ")
+			if !strings.Contains(conf, `"$request_method $uri $server_protocol"`) {
+				t.Errorf("nginx.conf's log_format does not log method, $uri and protocol:\n%s", conf)
+			}
+			for _, bad := range []string{`$request"`, "$request_uri", "$args", "$query_string", "$is_args", `"$http_referer"`} {
+				if strings.Contains(conf, bad) {
+					t.Errorf("nginx.conf mentions %s, which carries the query string", bad)
+				}
+			}
+		})
+	}
+}
+
 // The console's static files are the one thing this proxy answers itself; everything else carries the
 // services' own security headers. An add_header in a location replaces the server-level ones, so the
 // console's location must carry the whole set, in every mode. The first four are the headers versola's

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -23,23 +24,46 @@ func doctorWith(t *testing.T, args ...string) *cobra.Command {
 	return c
 }
 
-func TestConfigureLine(t *testing.T) {
+func TestBootstrapLine(t *testing.T) {
 	for _, c := range []struct {
 		args []string
 		want string
 	}{
-		{nil, "versola configure vps <version> --auth-url https://<your domain>"},
-		{[]string{"--auth-url", "https://id.example.com"}, "versola configure vps <version> --auth-url https://id.example.com"},
+		{nil, "versola bootstrap vps <version> --auth-url https://<your domain>"},
+		{[]string{"--auth-url", "https://id.example.com"}, "versola bootstrap vps <version> --auth-url https://id.example.com"},
 		// --proxy given is written out, nginx too: it may override a recorded external.
-		{[]string{"--auth-url", "https://id.example.com", "--proxy", "nginx"}, "versola configure vps <version> --auth-url https://id.example.com --proxy nginx"},
+		{[]string{"--auth-url", "https://id.example.com", "--proxy", "nginx"}, "versola bootstrap vps <version> --auth-url https://id.example.com --proxy nginx"},
 		{
 			[]string{"--target", "vps", "--auth-url", "https://id.example.com", "--proxy", "external", "--postgres-host", "db.internal:5432", "--registry", "cr.yandex/crp1"},
-			"versola configure vps <version> --auth-url https://id.example.com --proxy external --postgres-host db.internal:5432 --registry cr.yandex/crp1",
+			"versola bootstrap vps <version> --auth-url https://id.example.com --proxy external --postgres-host db.internal:5432 --registry cr.yandex/crp1",
+		},
+		{
+			[]string{"--target", "vps", "--auth-url", "https://id.example.com", "--postgres-ca", "/etc/db's CA.pem", "--central-url", "https://central.internal:8090", "--mtls-domain", "mtls.example.com", "--central-mtls-domain", "central-mtls.example.com", "--central-domain", "central.example.com"},
+			`versola bootstrap vps <version> --auth-url https://id.example.com --postgres-ca '/etc/db'\''s CA.pem' --central-url https://central.internal:8090 --mtls-domain mtls.example.com --central-mtls-domain central-mtls.example.com --central-domain central.example.com`,
 		},
 	} {
-		if got := configureLine(doctorWith(t, c.args...)); got != c.want {
+		if got := bootstrapLine(doctorWith(t, c.args...)); got != c.want {
 			t.Errorf("%v:\n got %s\nwant %s", c.args, got, c.want)
 		}
+	}
+}
+
+func TestDoctorReady(t *testing.T) {
+	for _, target := range []string{"local", "vps"} {
+		t.Run(target, func(t *testing.T) {
+			cmd := doctorWith(t, "--target", target)
+			var out bytes.Buffer
+			printDoctorReady(&out, cmd)
+			if target == "vps" {
+				for _, want := range []string{"versola bootstrap vps <version>", "Replace <version>", "versola versions"} {
+					if !strings.Contains(out.String(), want) {
+						t.Errorf("missing %q in %s", want, out.String())
+					}
+				}
+			} else if got, want := out.String(), "All checks passed — ready for `versola bootstrap local` (the latest Versola release).\n"; got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -131,10 +155,10 @@ func TestRecordedVpsFlags(t *testing.T) {
 }
 
 // A recorded --auth-url needs no placeholder in the printed line.
-func TestConfigureLineRecordedAuthURL(t *testing.T) {
+func TestBootstrapLineRecordedAuthURL(t *testing.T) {
 	c := doctorWith(t, "--target", "vps")
 	applyRecorded(map[string]string{"auth-url": "https://id.example.com", "proxy": proxy.ModeExternal})
-	if got := configureLine(c); got != "versola configure vps <version>" {
+	if got := bootstrapLine(c); got != "versola bootstrap vps <version>" {
 		t.Errorf("got %s", got)
 	}
 }

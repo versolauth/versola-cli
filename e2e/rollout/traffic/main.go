@@ -51,6 +51,34 @@ import (
 	"time"
 )
 
+// wantAnswered as a target's want: any status below 500 is a success (used
+// against real Versola services, see realTargets).
+const wantAnswered = -1
+
+// realTargets are the requests for a deployment of real Versola images, in
+// place of the stub's. Only requests that need no credentials: the public
+// metadata of auth, edge's session probe, auth's additional listener and
+// central's front. Which status the real services give to a request without
+// credentials is not asserted (wantAnswered), only that a 5xx or a transport
+// error never happens. Not covered, and so a run of these alone is not a pass
+// (see README.md): auth's mutual-TLS port 8083 (needs a client certificate),
+// the token flow (needs a client and a user), central's admin console.
+// central is left out with an empty address, as in the stub's.
+func realTargets(base, host, additional, central string, newClient func() *http.Client) []target {
+	post := `{"e2e":"post"}`
+	ts := []target{
+		{"auth GET /.well-known/openid-configuration", "GET", base + "/.well-known/openid-configuration", host, 200, "", newClient(), false, nil},
+		{"auth GET /.well-known/jwks.json", "GET", base + "/.well-known/jwks.json", host, 200, "", newClient(), false, nil},
+		{"auth POST /token (no credentials)", "POST", base + "/token", host, wantAnswered, post, newClient(), true, nil},
+		{"edge GET /permissions/me", "GET", base + "/permissions/me", host, 401, "", newClient(), false, nil},
+		{"auth-additional GET :8082", "GET", "http://" + additional + "/", "", wantAnswered, "", newClient(), false, nil},
+	}
+	if central != "" {
+		ts = append(ts, target{"central GET :8090", "GET", "http://" + central + "/", "", wantAnswered, "", newClient(), false, nil})
+	}
+	return ts
+}
+
 type target struct {
 	name   string
 	method string
@@ -196,6 +224,7 @@ func main() {
 		asJSON     = flag.Bool("json", false, "print the summary as JSON")
 		expect     = flag.String("expect-versions", "", "comma-separated versions every target must have been served by at least once (e.g. 1.0.0-e2e,1.0.1-e2e): proves traffic ran on both sides of the rollout")
 		strict     = flag.Bool("strict", false, "count cuts of the pooled 8083 connections (the known limitation) as failures")
+		realMode   = flag.Bool("real", false, "send the requests for real Versola images instead of the stub's (no 8083: it needs a client certificate); every status below 500 counts as an answer")
 	)
 	flag.Parse()
 
@@ -225,6 +254,16 @@ func main() {
 			target{"central GET :8090", "GET", "http://" + *central + "/", "", 200, "", plain(), false, nil},
 			target{"central POST :8090", "POST", "http://" + *central + "/", "", 200, post, plain(), true, nil},
 		)
+	}
+
+	if *realMode {
+		// Real answers carry no X-Stub-Version: the check would fail every target.
+		if *expect != "" {
+			fmt.Fprintln(os.Stderr, "traffic: -real and -expect-versions cannot go together (real services do not tell their version)")
+			os.Exit(2)
+		}
+		targets = realTargets(*base, *host, *additional, *central, plain)
+		fmt.Fprintln(os.Stderr, "traffic: -real covers no 8083 (mutual TLS) and no token flow: a clean run is not yet a pass")
 	}
 
 	st := newStats()
@@ -411,7 +450,14 @@ func one(st *stats, t target) outcome {
 	if err != nil {
 		return res("reading the answer: "+err.Error(), true, isTimeout(err))
 	}
-	if resp.StatusCode != t.want {
+	if t.want == wantAnswered {
+		// A real service: the exact status of a request with no credentials
+		// is the service's business (400, 401, 404...); what a rollout must
+		// not cause is an answer from the proxy or a dying backend.
+		if resp.StatusCode >= 500 {
+			return res(fmt.Sprintf("status %d, want any answer below 500", resp.StatusCode), false, false)
+		}
+	} else if resp.StatusCode != t.want {
 		return res(fmt.Sprintf("status %d, want %d", resp.StatusCode, t.want), false, false)
 	}
 	if t.body != "" && t.want == 200 && !strings.Contains(string(got), fmt.Sprintf("body=%d", len(t.body))) {

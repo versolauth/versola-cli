@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -361,5 +362,94 @@ func TestRecordKeepsCutsApartFromFailures(t *testing.T) {
 	}
 	if st.failed["broken"] != 500 {
 		t.Errorf("counter %d, want 500", st.failed["broken"])
+	}
+}
+
+// Against a real service the exact status of a request without credentials
+// is not asserted: 4xx is an answer, 5xx (a proxy with no backend, a dying
+// replica) and a transport error are failures.
+func TestOneWantAnsweredAcceptsBelow500(t *testing.T) {
+	for _, code := range []int{200, 400, 401, 404} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+		tg := target{name: "real", method: "GET", url: srv.URL, want: wantAnswered, client: plainClient()}
+		if got := one(newStats(), tg); got != outcomeOK {
+			t.Errorf("status %d: got %d, want ok", code, got)
+		}
+		srv.Close()
+	}
+}
+
+func TestOneWantAnsweredFailsOn5xxAndTransportError(t *testing.T) {
+	for _, code := range []int{500, 502, 503, 504} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+		tg := target{name: "real", method: "GET", url: srv.URL, want: wantAnswered, client: plainClient()}
+		st := newStats()
+		if got := one(st, tg); got != outcomeFail || st.failed["real"] != 1 {
+			t.Errorf("status %d: got %d (failed %d), want fail", code, got, st.failed["real"])
+		}
+		srv.Close()
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close() // nothing listens any more
+	tg := target{name: "real", method: "GET", url: url, want: wantAnswered, client: plainClient()}
+	if got := one(newStats(), tg); got != outcomeFail {
+		t.Errorf("connection refused: got %d, want fail", got)
+	}
+}
+
+// An exact want stays exact: a 404 where 200 is wanted fails, also in a run
+// that has real targets elsewhere.
+func TestOneExactWantStaysExact(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }))
+	defer srv.Close()
+	tg := target{name: "docs", method: "GET", url: srv.URL, want: 200, client: plainClient()}
+	if got := one(newStats(), tg); got != outcomeFail {
+		t.Fatalf("got %d, want fail", got)
+	}
+}
+
+// The real targets leave out what needs a client certificate, a client or a
+// user, and central when asked to; none of them is a pooled 8083 target.
+func TestRealTargets(t *testing.T) {
+	with := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", plainClient)
+	without := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "", plainClient)
+	if len(with) != len(without)+1 {
+		t.Fatalf("central: %d targets with it, %d without", len(with), len(without))
+	}
+	for _, tg := range with {
+		if tg.pooled() || strings.Contains(tg.url, ":8083") {
+			t.Errorf("%s: a real run has no 8083 target yet", tg.name)
+		}
+		if tg.want != 200 && tg.want != 401 && tg.want != wantAnswered {
+			t.Errorf("%s: want %d is a stub's status", tg.name, tg.want)
+		}
+	}
+}
+
+// The real targets' URLs and wants are pinned: a wrong path would fail every
+// request of the first real run from the start. The two public documents are
+// exact (the CLI itself pins edge as 401 and auth as 200), the rest
+// is "answered".
+func TestRealTargetsPinned(t *testing.T) {
+	got := map[string]string{}
+	for _, tg := range realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", plainClient) {
+		got[fmt.Sprintf("%s %s", tg.method, tg.url)] = fmt.Sprint(tg.want)
+	}
+	want := map[string]string{
+		"GET http://p/.well-known/openid-configuration": "200",
+		"GET http://p/.well-known/jwks.json":            "200",
+		"POST http://p/token":                           fmt.Sprint(wantAnswered),
+		"GET http://p/permissions/me":                   "401",
+		"GET http://127.0.0.1:8082/":                    fmt.Sprint(wantAnswered),
+		"GET http://127.0.0.1:8090/":                    fmt.Sprint(wantAnswered),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: want %s, got %q (all: %v)", k, v, got[k], got)
+		}
 	}
 }

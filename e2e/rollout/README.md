@@ -66,6 +66,49 @@ The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
 `go test ./...` at the repository root does not run its tests: run
 `go test -race ./...` in `traffic/` by hand.
 
+## Real images (`--real FROM TO`)
+
+The first step of versola-cli#84, "rollout by default only after a run on real
+images under load". `./run.sh run /path/to/versola --real 0.7.5 0.7.6` deploys
+the released images FROM with the bundled Postgres (no `--postgres-host`, as a
+new customer does; FROM and TO are releases or test tags the `versola` CI
+publishes: its CI/CD workflow, run by hand with a `test_tag`, builds the images
+from a branch and pushes them under that tag, and two tags of one commit do for
+a run of the mechanics), rolls out to TO and runs the traffic client with `-real`
+meanwhile. The stubs are not built, `migrate` is the real one, and the rollout
+runs without `--allow-legacy-secrets` and without `--assume-compatible`: TO's
+own `release.json` decides (pass `--assume-compatible` to override it, the
+way an operator would). `--replicas`, `--no-surge` and `--abort-at` work as
+with stubs; `--manifest` and `--slow-central` are for stubs only.
+
+What differs from the stub run:
+
+- The client's requests are the ones a real service answers without
+  credentials: `/.well-known/openid-configuration` and `/.well-known/jwks.json`
+  (200), edge's `/permissions/me` (401: what the CLI itself expects of edge
+  behind the proxy), `POST /token` with no credentials, 8082 and central's
+  front 8090. For the last three any status below 500 is an answer; 5xx and
+  transport errors are failures everywhere. Their exact status was not seen on
+  a real run, so it is not asserted.
+- Real answers carry no version, so the version is read from the containers:
+  after `up` every central/auth/edge container must run FROM, at the end TO
+  (FROM again after an abort). The client does not prove that traffic ran on
+  both sides of the rollout as it does with stubs (`-expect-versions`); only
+  that it ran, without a failure, for as long as the rollout did.
+- Needs 5432 free and the volume `versola-postgres-data-vps` absent; `clean`
+  removes that volume, and only with `E2E_CONFIRM_CLEAN=yes` (its data is lost).
+  `clean` does not remove the pulled `ghcr.io/versolauth/versola-*` images of
+  FROM and TO (it knows only the stub tags): `docker rmi` them by hand if the
+  stand runs short of disk.
+
+Not covered yet, so a clean `--real` run is **not** a pass of #84: auth's
+mutual-TLS port 8083 (a client certificate), the token flow (an OAuth client and
+a user), central's admin console, the refusal of a release that needs a fresh
+database, measured load (the client sends about one request per 50 ms per
+target, not 20-50 requests per second), memory peak, per-step failure windows.
+These are the next PR. Not run: this was written without a Docker daemon, and
+it needs published FROM and TO tools with the bundled Postgres (versola#849).
+
 ## Run (only on a throwaway machine)
 
 ```
@@ -75,6 +118,7 @@ The traffic client is a Go module of its own (`traffic/go.mod`), so CI's
 ./run.sh run /path/to/versola --slow-central 40   # central B needs 40 s to become ready
 ./run.sh run /path/to/versola --manifest declared  # B's release.json lists A in rollingFrom: no --assume-compatible
 ./run.sh run /path/to/versola --manifest fresh     # B says it needs a fresh database: refused, A keeps serving
+./run.sh run /path/to/versola --real 0.7.5 0.7.6   # real images and the bundled Postgres, see "Real images" (the versions are examples)
 E2E_CONFIRM_CLEAN=yes ./run.sh clean
 ```
 

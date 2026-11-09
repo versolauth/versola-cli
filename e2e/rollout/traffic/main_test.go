@@ -2,11 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -412,8 +421,8 @@ func TestOneExactWantStaysExact(t *testing.T) {
 // The real targets leave out what needs a client certificate, a client or a
 // user, and central when asked to; none of them is a pooled 8083 target.
 func TestRealTargets(t *testing.T) {
-	with := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", plainClient)
-	without := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "", plainClient)
+	with := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", nil, plainClient)
+	without := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "", nil, plainClient)
 	if len(with) != len(without)+1 {
 		t.Fatalf("central: %d targets with it, %d without", len(with), len(without))
 	}
@@ -433,7 +442,7 @@ func TestRealTargets(t *testing.T) {
 // is "answered".
 func TestRealTargetsPinned(t *testing.T) {
 	got := map[string]string{}
-	for _, tg := range realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", plainClient) {
+	for _, tg := range realTargets("http://p", "e2e.test", "127.0.0.1:8082", "127.0.0.1:8090", nil, plainClient) {
 		got[fmt.Sprintf("%s %s", tg.method, tg.url)] = fmt.Sprint(tg.want)
 	}
 	want := map[string]string{
@@ -524,5 +533,111 @@ func TestRecordCountsWindows(t *testing.T) {
 	}
 	if len(st.fails) != 101 {
 		t.Fatalf("detail lines %d, want 100 failures + 1 cut", len(st.fails))
+	}
+}
+
+// writeClientCert makes a self-signed certificate and its key as PEM files, the
+// way mtls-client.sh leaves them (the key as PKCS#8).
+func writeClientCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "e2e-mtls-test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile = filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pk}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+func TestLoadMTLS(t *testing.T) {
+	cert, key := writeClientCert(t)
+	if _, err := loadMTLS("127.0.0.1:8083", cert, key, "", "openid"); err == nil || !strings.Contains(err.Error(), "-mtls-client") {
+		t.Fatalf("no client id: %v", err)
+	}
+	if _, err := loadMTLS("127.0.0.1:8083", cert, key+".missing", "c", "openid"); err == nil || !strings.Contains(err.Error(), "client certificate") {
+		t.Fatalf("missing key: %v", err)
+	}
+	m, err := loadMTLS("127.0.0.1:8083", cert, key, "c", "openid")
+	if err != nil || len(m.cfg.Certificates) != 1 {
+		t.Fatalf("got %v, %v", m, err)
+	}
+}
+
+// With a client the real targets gain a token request on 8083 over a new
+// connection and mtlsPooled over long-lived ones, as a form the real token
+// endpoint takes.
+func TestRealTargetsWithMTLS(t *testing.T) {
+	m := &mtlsClient{addr: "127.0.0.1:8083", cfg: &tls.Config{InsecureSkipVerify: true}, clientID: "e2e mtls/1", scope: "openid"}
+	without := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "", nil, plainClient)
+	with := realTargets("http://p", "e2e.test", "127.0.0.1:8082", "", m, plainClient)
+	extra := with[len(without):]
+	if len(extra) != 1+mtlsPooled {
+		t.Fatalf("%d extra targets, want %d", len(extra), 1+mtlsPooled)
+	}
+	for i, tg := range extra {
+		if tg.method != "POST" || tg.url != "https://127.0.0.1:8083/token" || tg.want != 200 {
+			t.Errorf("%s: %s %s want %d", tg.name, tg.method, tg.url, tg.want)
+		}
+		if tg.body != "grant_type=client_credentials&client_id=e2e+mtls%2F1&scope=openid" || tg.contentType() != "application/x-www-form-urlencoded" {
+			t.Errorf("%s: body %q (%s)", tg.name, tg.body, tg.contentType())
+		}
+		if (i > 0) != tg.pooled() {
+			t.Errorf("%s: pooled=%v", tg.name, tg.pooled())
+		}
+	}
+}
+
+// The token requests really present the certificate: a server that requires
+// one answers them, and the stub's body check does not apply to a form
+// body.
+func TestMTLSTargetsPresentTheCertificate(t *testing.T) {
+	var asked, withCert int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&asked, 1)
+		if len(r.TLS.PeerCertificates) == 1 && r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" && r.ParseForm() == nil && r.Form.Get("grant_type") == "client_credentials" {
+			atomic.AddInt64(&withCert, 1)
+			fmt.Fprint(w, `{"access_token":"x"}`)
+			return
+		}
+		w.WriteHeader(400)
+	}))
+	srv.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	srv.StartTLS()
+	defer srv.Close()
+	cert, key := writeClientCert(t)
+	m, err := loadMTLS(srv.Listener.Addr().String(), cert, key, "c1", "openid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newStats()
+	for _, tg := range realTargets("http://p", "h", "a", "", m, plainClient)[5:] {
+		if got := one(st, tg); got != outcomeOK {
+			t.Errorf("%s: got %d (%v)", tg.name, got, st.fails)
+		}
+	}
+	if asked != 1+mtlsPooled || withCert != asked {
+		t.Fatalf("asked %d, with certificate and form %d", asked, withCert)
+	}
+	// Without the certificate the handshake itself fails: a failure, not a cut.
+	bare := target{name: "bare", method: "POST", url: "https://" + srv.Listener.Addr().String() + "/token", want: 200, body: "grant_type=client_credentials", client: freshClient(&tls.Config{InsecureSkipVerify: true})}
+	if got := one(newStats(), bare); got != outcomeFail {
+		t.Fatalf("without a certificate: got %d, want fail", got)
 	}
 }

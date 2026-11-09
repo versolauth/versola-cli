@@ -1644,6 +1644,17 @@ health (`docker compose ps` under the hood); on `vps` and `local` also the
 `notAfter` of every mutual-TLS certificate and of each public name's own,
 soonest first, marking those due for renewal (see `certs renew`).
 
+Stopped containers are included. Both formats warn for each configured
+central/auth/edge replica, proxy, OpenBao and Postgres container that is
+missing, not running, restarting or unhealthy, with a command such as
+`versola logs auth-2 --tail 100`. Optional services outside this Compose
+deployment are not checked. Successfully completed init jobs are not service
+outages; a running container without a healthcheck is not unhealthy.
+`health: starting` means its healthcheck has not finished yet.
+OpenBao retained from an earlier Compose project is checked by its
+target-specific container name; `versola logs openbao` selects that container's
+project. `containers[]` remains the current Compose project's snapshot.
+
 ```
 versola status
 versola status --json | jq .version
@@ -1680,7 +1691,7 @@ secret, a password, a URL with credentials or a container's environment
 - `certificates` (vps and local): `[{name, notAfter?, renewDue, expired,
   error?}]`, soonest to expire first; `error` instead of `notAfter` for one
   that could not be read.
-- `warnings`: the `WARNING:` lines of the text form (certificates that should
+- `warnings`: the `WARNING:` lines of the text form (service problems above, certificates that should
   have been renewed, no renewal timer) and what could not be read, as
   sentences.
 
@@ -2013,8 +2024,14 @@ script can act on:
 | 5 | The secrets plan has problems | `secrets plan`; `configure`, `bootstrap` and `rollout` when their secrets plan has problems (nothing is written to OpenBao) |
 | 130 | Interrupted | Ctrl-C during `rollout` (the first one stops between two steps, later ones leave sooner) or during `backup create`'s OpenBao copy |
 
-A problem found inside a command that has no code of its own is 1. In
-particular `migrate --dry-run` exits 0 whenever it could report, with or
+A problem found inside a command that has no code of its own is 1.
+
+`status` and `status --json`, 0 means the status was read successfully,
+even when a service is down or unhealthy; monitoring scripts must inspect
+`containers` and `warnings`. Failure to read the containers or the configured
+service inventory exits 1. Nothing deployed still exits 0.
+
+`migrate --dry-run` exits 0 whenever it could report, with or
 without pending migrations, and 1 when it couldn't. Validation errors raised deeper in deployment or secrets handling stay 1,
 such as an invalid `--auth-url` or an unsupported `secrets plan` target;
 `secrets test` errors without a class also stay 1. A Ctrl-C while `secrets plan` or `rollout --dry-run` runs

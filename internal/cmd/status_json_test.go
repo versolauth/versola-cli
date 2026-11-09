@@ -46,10 +46,16 @@ func recordDeployment(t *testing.T, st *state.State) string {
 func stubStatus(t *testing.T, containers []deploy.ContainerStatus, dockerErr error) {
 	t.Helper()
 	oc, ocr, op, ow, on := statusContainers, statusCertReport, statusProbeCerts, statusCertsWarning, statusNow
+	oservices := statusServices
+	oOpenbao := statusOpenbao
 	t.Cleanup(func() {
 		statusContainers, statusCertReport, statusProbeCerts, statusCertsWarning, statusNow = oc, ocr, op, ow, on
+		statusServices = oservices
+		statusOpenbao = oOpenbao
 	})
 	statusContainers = func(string) ([]deploy.ContainerStatus, error) { return containers, dockerErr }
+	statusServices = func(string) ([]string, error) { return []string{"auth"}, nil }
+	statusOpenbao = func(string) (*deploy.ContainerStatus, error) { t.Fatal("unexpected OpenBao lookup"); return nil, nil }
 	statusCertReport = func(*state.State) ([]deploy.CertInfo, error) {
 		now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 		return []deploy.CertInfo{{Name: "server.crt", NotBefore: now.Add(-10 * 24 * time.Hour), NotAfter: now.Add(80 * 24 * time.Hour)}}, nil
@@ -57,6 +63,100 @@ func stubStatus(t *testing.T, containers []deploy.ContainerStatus, dockerErr err
 	statusProbeCerts = func(*state.State) []deploy.CertInfo { return nil }
 	statusCertsWarning = func(*state.State) string { return "nothing renews the mutual-TLS certificates" }
 	statusNow = func() time.Time { return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC) }
+}
+
+func TestStatusServiceWarningsBothFormats(t *testing.T) {
+	compose := recordDeployment(t, vpsFixture())
+	stubStatus(t, []deploy.ContainerStatus{
+		{Name: "central", Service: "central", Slot: 1, State: "restarting"},
+		{Name: "auth", Service: "auth", Slot: 1, State: "running", Health: "unhealthy"},
+		{Name: "init", Service: "mtls-init", State: "exited", Health: "unhealthy"},
+	}, nil)
+	statusServices = func(string) ([]string, error) { return []string{"central", "auth", "edge", "mtls-init"}, nil }
+	oldTable := statusTable
+	t.Cleanup(func() { statusTable = oldTable })
+	statusTable = func(w io.Writer, _ string) error { _, err := fmt.Fprintln(w, "container table"); return err }
+	var jsonOut, textOut bytes.Buffer
+	if err := writeStatusJSON(&jsonOut, compose, true); err != nil {
+		t.Fatalf("a service outage changed the JSON exit code: %v", err)
+	}
+	if err := writeStatusContainersText(&textOut, compose); err != nil {
+		t.Fatalf("a service outage changed the text exit code: %v", err)
+	}
+	m := decodeOnly(t, jsonOut.Bytes())
+	warnings := m["warnings"].([]any)
+	if len(warnings) != 4 { // three services and the existing certificate warning
+		t.Fatalf("warnings: %v", warnings)
+	}
+	for _, warning := range warnings[:3] {
+		if !strings.Contains(textOut.String(), "WARNING: "+warning.(string)+"\n") {
+			t.Errorf("text and JSON disagree: %q, text: %s", warning, textOut.String())
+		}
+	}
+	if strings.Contains(textOut.String(), "mtls-init") || strings.Contains(jsonOut.String()+textOut.String(), fixtureSecret) {
+		t.Fatal("init warning or secret in status output")
+	}
+}
+
+func TestStatusInventoryFailureStillPrintsJSON(t *testing.T) {
+	compose := recordDeployment(t, vpsFixture())
+	stubStatus(t, []deploy.ContainerStatus{}, nil)
+	statusServices = func(string) ([]string, error) { return nil, errors.New("couldn't read the compose configuration") }
+	var out bytes.Buffer
+	if err := writeStatusJSON(&out, compose, true); err == nil {
+		t.Fatal("unreadable inventory reported as success")
+	}
+	m := decodeOnly(t, out.Bytes())
+	if !strings.Contains(fmt.Sprint(m["warnings"]), "services could not be read") {
+		t.Fatalf("warnings %v", m["warnings"])
+	}
+}
+
+func TestStatusRetainedOpenbao(t *testing.T) {
+	compose := recordDeployment(t, vpsFixture())
+	stubStatus(t, []deploy.ContainerStatus{}, nil)
+	statusServices = func(string) ([]string, error) { return []string{"openbao"}, nil }
+	for _, containerState := range []string{"running", "exited", "restarting", "missing", "unknown"} {
+		t.Run(containerState, func(t *testing.T) {
+			statusOpenbao = func(target string) (*deploy.ContainerStatus, error) {
+				if target != "vps" {
+					t.Fatalf("target %s", target)
+				}
+				if containerState == "missing" {
+					return nil, nil
+				}
+				if containerState == "unknown" {
+					return nil, errors.New("Docker unavailable")
+				}
+				return &deploy.ContainerStatus{Name: "retained", Service: "openbao", State: containerState}, nil
+			}
+			var out bytes.Buffer
+			err := writeStatusJSON(&out, compose, true)
+			if (err != nil) != (containerState == "unknown") {
+				t.Fatalf("error: %v", err)
+			}
+			m := decodeOnly(t, out.Bytes())
+			warnings := fmt.Sprint(m["warnings"])
+			switch containerState {
+			case "running":
+				if strings.Contains(warnings, "openbao") {
+					t.Fatalf("healthy retained OpenBao: %s", warnings)
+				}
+			case "missing":
+				if !strings.Contains(warnings, "service openbao has no container") {
+					t.Fatal(warnings)
+				}
+			case "unknown":
+				if !strings.Contains(warnings, "OpenBao's container could not be read") || strings.Contains(warnings, "has no container") {
+					t.Fatal(warnings)
+				}
+			default:
+				if !strings.Contains(warnings, "service openbao (retained)") || !strings.Contains(warnings, "versola logs openbao --tail 100") {
+					t.Fatal(warnings)
+				}
+			}
+		})
+	}
 }
 
 // decodeOnly fails unless out is exactly one JSON object.

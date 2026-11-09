@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -36,6 +37,16 @@ var statusJSON bool
 
 func init() {
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "print one JSON object (no secret values) instead of the text")
+}
+
+var statusTable = func(w io.Writer, composePath string) error {
+	c := exec.Command("docker", state.ComposeArgs(composePath, "ps", "--all")...)
+	c.Stdout = w
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("docker compose ps failed: %w", err)
+	}
+	return nil
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -104,11 +115,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	c := exec.Command("docker", state.ComposeArgs(composePath, "ps")...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("docker compose ps failed: %w", err)
+	return writeStatusContainersText(os.Stdout, composePath)
+}
+
+func writeStatusContainersText(w io.Writer, composePath string) error {
+	if err := statusTable(w, composePath); err != nil {
+		return err
 	}
-	return nil
+	containers, err := statusContainers(composePath)
+	if err != nil {
+		return err
+	}
+	// The table remains useful even if a concurrent configure changed the
+	// record. Without it, check the services in the Compose inventory itself.
+	st, _ := state.Load()
+	warnings, err := serviceWarnings(composePath, st, containers)
+	for _, warning := range warnings {
+		if _, writeErr := fmt.Fprintln(w, "WARNING: "+warning); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
 }

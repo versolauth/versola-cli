@@ -15,21 +15,22 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
-Commands: `doctor`, `bootstrap`, `configure`, `postgres`, `migrate`, `up`,
-`status`, `backup`, `down`, `uninstall`, `rollout`, `replica`, `upgrade`,
-`secrets`, `certs`, `edge` and `version`.
+Commands: `doctor`, `bootstrap`, `versions`, `configure`, `postgres`, `migrate`,
+`up`, `status`, `stats`, `logs`, `backup`, `down`, `uninstall`, `rollout`,
+`replica`, `upgrade`, `secrets`, `certs`, `edge` and `version`.
 
 What was tested end-to-end:
 
 - a real local deployment (Postgres + auth + central + edge + the reverse
   proxy, real browser login through to the admin console);
-- a test VPS with Versola 0.7.1: a from-scratch install following this
-  README, `down`/`up`, replicas added and removed under load;
+- a test VPS with Versola 0.7.1 and an external Postgres: a from-scratch
+  install, `down`/`up`, replicas added and removed under load;
 - `rollout` (vps) with stand-in images only, not with two real
   Versola releases;
 - `upgrade`, moving a production server between published releases.
 
-`postgres`, `backup`, `certs` and `edge` were not part of these tests.
+The default bundled Postgres path on VPS, and the `postgres`, `backup`,
+`certs` and `edge` commands, were not part of these tests.
 Releases are automated (see Releasing below) and installed via the one-line
 scripts below.
 
@@ -257,11 +258,14 @@ versola bootstrap local
 versola bootstrap local 0.7.5
 ```
 
-(`bootstrap vps <version>` does the same on a server, with the flags of
-`configure vps` below; it asks for confirmation first, and on a first
-install it stops before `migrate` -- with a non-zero exit code -- once it has
-written the SQL that sets the Postgres role's password (see Secrets below);
-run that SQL, then `versola migrate` and `versola up`.)
+`bootstrap vps <version>` does the same on a server, with the flags of
+`configure vps` below; it asks for confirmation first. On a first install,
+the default bundled Postgres is initialised automatically and bootstrap
+continues through `migrate` and `up` (see "Postgres on vps"). Only with your
+own Postgres (`--postgres-host`) does it stop before `migrate` -- with a
+non-zero exit code -- once it has written the SQL that sets the Postgres
+role's password (see Secrets below). Run `versola postgres init` or that
+SQL, then `versola migrate` and `versola up`.
 
 Deploys a specific released version of Versola locally: pulls the
 matching `versola-tools` image to generate config, then brings up

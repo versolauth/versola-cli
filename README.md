@@ -190,9 +190,11 @@ an install page in your browser, and only after you confirm:
     certificate-renewal timer `up` installs stops with your last session
     otherwise
 
-  When nothing fails, the last line is the `configure vps` command with the
-  flags given (remembered ones are left to `configure`), ready to copy (`--auth-url https://<your domain>` when there
-  is none, neither given nor remembered). Without `--auth-url` the name and
+  When nothing fails, doctor prints the `bootstrap vps <version>` command with the
+  flags given (remembered ones are left to `configure`), followed by a reminder to
+  replace `<version>` with a Versola release from `versola versions`.
+  It includes `--auth-url https://<your domain>` when there
+  is none, neither given nor remembered. Without `--auth-url` the name and
   port checks are skipped, and `doctor` says to pass it. Warnings don't fail `doctor`; their number is printed above it.
 - With `--target vps` and `--auth-url`, and any of `--mtls-domain`,
   `--central-mtls-domain`, `--central-domain` (the names you will deploy

@@ -46,12 +46,12 @@ running it with no flag against a vps machine can fail a check that
 fail. The checks of the public names a deployment will have are under
 "versola doctor --help-all" (README, "doctor").
 
-On a server, give it the flags you will give "configure vps": with
+On a server, give it the flags you will give "bootstrap vps": with
 --auth-url (and --proxy) it checks that the name points at this server
 and that the proxy's ports are free; without --postgres-host, that port
 5432 is free for the Postgres container; and that the image registry
-answers. When everything passes, it prints the configure command with
-those flags.`,
+answers. When everything passes, it prints the bootstrap command with
+those flags. Choose its <version> with "versola versions".`,
 	Example: `  versola doctor
   versola doctor --target vps --auth-url https://id.example.com
   versola doctor --target vps --auth-url https://id.example.com --proxy external --postgres-host db.internal:5432`,
@@ -178,11 +178,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		if warned > 0 {
 			fmt.Printf("%d warning(s) above: read them before going on.\n", warned)
 		}
-		if doctorTarget == "vps" {
-			fmt.Printf("All checks passed — ready for:\n\n  %s\n", configureLine(cmd))
-		} else {
-			fmt.Println("All checks passed — ready for `versola bootstrap local` (the latest Versola release).")
-		}
+		printDoctorReady(os.Stdout, cmd)
 		return nil
 	}
 
@@ -278,13 +274,21 @@ func lingerCheck(state string) (checks.Result, bool) {
 	return checks.Result{}, false
 }
 
-// configureLine is the `configure vps` command for the flags doctor was
+func printDoctorReady(w io.Writer, cmd *cobra.Command) {
+	if doctorTarget == "vps" {
+		fmt.Fprintf(w, "All checks passed — ready for:\n\n  %s\n\nReplace <version> with a Versola release from `versola versions`.\n", bootstrapLine(cmd))
+	} else {
+		fmt.Fprintln(w, "All checks passed — ready for `versola bootstrap local` (the latest Versola release).")
+	}
+}
+
+// bootstrapLine is the `bootstrap vps` command for the flags doctor was
 // given, ready to copy: the values as typed (--proxy too when it is the
 // default: given, it may override a recorded mode), and a placeholder for
 // --auth-url when there is none, neither given nor recorded. Recorded values are not written out: configure takes
 // them itself.
-func configureLine(cmd *cobra.Command) string {
-	parts := []string{"versola configure vps <version>"}
+func bootstrapLine(cmd *cobra.Command) string {
+	parts := []string{"versola bootstrap vps <version>"}
 	if doctorAuthURL == "" {
 		parts = append(parts, "--auth-url https://<your domain>")
 	}

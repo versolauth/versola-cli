@@ -1675,8 +1675,11 @@ secret, a password, a URL with credentials or a container's environment
   reverse proxy, OpenBao, a bundled Postgres), stopped ones included:
   `[{name, service, slot?, state, health?, image, startedAt?}]`. `service` is
   `auth` for `auth-2` with `slot: 2`; services that are not replicated have
-  no `slot`. `null` when Docker could not be asked: the object is still
-  printed, with a warning, and the exit code is non-zero.
+  no `slot`. `health` is there only while `state` is `running`: a stopped or
+  restarting container, such as the one-shot `mtls-init` after its run, has
+  none, and `state` tells what became of it. `containers` is `null` when
+  Docker could not be asked: the object is still printed, with a warning, and
+  the exit code is non-zero.
 - `certificates` (vps and local): `[{name, notAfter?, renewDue, expired,
   error?}]`, soonest to expire first; `error` instead of `notAfter` for one
   that could not be read.

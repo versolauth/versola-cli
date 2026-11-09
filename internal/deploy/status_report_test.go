@@ -38,6 +38,24 @@ func keysOf(t *testing.T, v any) []string {
 	return keys
 }
 
+// A one-shot container that inherited its image's HEALTHCHECK is "exited"
+// and "unhealthy" after a good run: only a running container has a health.
+func TestParseContainerInspectHealthOnlyWhileRunning(t *testing.T) {
+	in := `{"name":"/versola-mtls-init","state":"exited","health":"unhealthy","startedAt":"2026-10-14T12:00:00Z","image":"smallstep/step-ca:0.28.4","service":"mtls-init"}
+{"name":"/versola-auth","state":"running","health":"unhealthy","startedAt":"2026-10-14T12:00:00Z","image":"auth:1","service":"auth"}
+`
+	list, err := parseContainerInspect([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].Name != "versola-auth" || list[0].Health != "unhealthy" {
+		t.Errorf("a running container keeps its health: %+v", list)
+	}
+	if list[1].Name != "versola-mtls-init" || list[1].State != "exited" || list[1].Health != "" {
+		t.Errorf("an exited container has none: %+v", list[1])
+	}
+}
+
 func TestParseContainerInspect(t *testing.T) {
 	list, err := parseContainerInspect([]byte(fakeInspect))
 	if err != nil {

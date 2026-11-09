@@ -221,10 +221,19 @@ func parseContainerInspect(out []byte) ([]ContainerStatus, error) {
 		if err := json.Unmarshal(line, &raw); err != nil {
 			return nil, fmt.Errorf("unexpected docker inspect output: %w", err)
 		}
+		// A health status is only meaningful while the container runs. Docker
+		// keeps the last one of an exited container, and a one-shot one that
+		// inherits its image's HEALTHCHECK (mtls-init, from step-ca's) ends
+		// up "unhealthy" after a perfectly good run: a script reading this
+		// would report an outage that is not one. State says what happened.
+		health := raw.Health
+		if raw.State != "running" {
+			health = ""
+		}
 		c := ContainerStatus{
 			Name:           strings.TrimPrefix(raw.Name, "/"),
 			State:          raw.State,
-			Health:         raw.Health,
+			Health:         health,
 			Image:          raw.Image,
 			StartedAt:      raw.StartedAt,
 			composeService: raw.Service,

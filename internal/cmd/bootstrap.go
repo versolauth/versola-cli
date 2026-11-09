@@ -35,10 +35,10 @@ var bootstrapCmd = &cobra.Command{
 	Long: `bootstrap deploys a released version of Versola in one go: configure, migrate, up.
 
   versola bootstrap local
-  versola bootstrap local 0.1.1
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
-  versola bootstrap vps 0.1.1 --auth-url https://id.example.com --proxy external
+  versola bootstrap local 0.7.5
+  versola bootstrap vps 0.7.5 --auth-url https://id.example.com
+  versola bootstrap vps 0.7.5 --auth-url https://id.example.com --postgres-host 127.0.0.1:5432
+  versola bootstrap vps 0.7.5 --auth-url https://id.example.com --proxy external
 
 On local the version can be left out: bootstrap then keeps the version
 already deployed on this machine or, on a first deployment, deploys the

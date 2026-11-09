@@ -58,7 +58,7 @@ func init() {
 // errNothingDeployed: logs has nothing to show, and unlike status (which
 // answers "nothing" as a fact) the user asked for something that is not
 // there, so it is an error.
-var errNothingDeployed = errors.New("nothing is deployed on this machine -- run `versola bootstrap <local|vps> <version>` first")
+var errNothingDeployed = errors.New("nothing is deployed on this machine -- run `versola bootstrap <local|vps> [<version>]` first")
 
 func runLogs(cmd *cobra.Command, args []string) error {
 	st, err := state.Load()

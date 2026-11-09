@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 // tests.
 var (
 	statusContainers = deploy.ListContainers
+	statusServices   = deploy.DeploymentServices
+	statusOpenbao    = deploy.OpenbaoContainerStatus
 	statusCertReport = deploy.CertReport
 	statusProbeCerts = func(st *state.State) []deploy.CertInfo {
 		return probeAll(deploy.PublicEndpoints(st), func(addr string) deploy.CertInfo {
@@ -65,6 +68,12 @@ func writeStatusJSON(w io.Writer, composePath string, exists bool) error {
 	} else {
 		r.Containers = containers
 	}
+	var servicesErr error
+	if dockerErr == nil {
+		var warnings []string
+		warnings, servicesErr = serviceWarnings(composePath, st, containers)
+		r.Warnings = append(r.Warnings, warnings...)
+	}
 	// As in the text form: only for a deployment of this machine's own.
 	if st.Target == "vps" || st.Target == "local" {
 		now := statusNow()
@@ -92,7 +101,28 @@ func writeStatusJSON(w io.Writer, composePath string, exists bool) error {
 	if dockerErr != nil {
 		return dockerErr
 	}
-	return nil
+	return servicesErr
+}
+
+// Both formats use the same inventory and classification. If the inventory
+// cannot be read, do not mistake an empty container list for a healthy stack.
+func serviceWarnings(composePath string, st *state.State, containers []deploy.ContainerStatus) ([]string, error) {
+	services, err := statusServices(composePath)
+	if err != nil {
+		return []string{"the deployment's services could not be read: " + firstErrLine(err)}, err
+	}
+	if st != nil && slices.Contains(services, "openbao") && !slices.ContainsFunc(containers, func(c deploy.ContainerStatus) bool { return c.Service == "openbao" }) {
+		c, err := statusOpenbao(st.Target)
+		if err != nil {
+			return []string{"OpenBao's container could not be read: " + firstErrLine(err)}, err
+		}
+		if c != nil {
+			// Keep the caller's snapshot unchanged (containers[] remains the
+			// Compose project's list), but classify the retained OpenBao too.
+			containers = append(slices.Clone(containers), *c)
+		}
+	}
+	return deploy.ServiceWarnings(st, services, containers), nil
 }
 
 func encodeJSON(w io.Writer, v any) error {

@@ -43,8 +43,9 @@ var (
 
 	// Stand-ins for tests: what lists the deployment's services, and what
 	// runs docker compose logs.
-	logsServices = deploy.DeploymentServices
-	logsRun      = deploy.RunLogs
+	logsServices       = deploy.DeploymentServices
+	logsRun            = deploy.RunLogs
+	logsOpenbaoProject = deploy.OpenbaoLogProject
 )
 
 func init() {
@@ -96,6 +97,17 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if len(targets) == 1 && targets[0] == "openbao" {
+		project, err := logsOpenbaoProject(st.Target)
+		if err != nil {
+			return err
+		}
+		if project != "" {
+			// Configure may have kept this container in an older project.
+			// Override only for an explicit request for its own logs.
+			dockerArgs = append([]string{"compose", "--project-name", project}, dockerArgs[1:]...)
+		}
 	}
 	return logsRun(dockerArgs)
 }

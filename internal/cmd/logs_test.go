@@ -36,18 +36,49 @@ func runLogsWith(t *testing.T, st *state.State, compose bool, args []string, tai
 		}
 	}
 	oldServices, oldRun := logsServices, logsRun
+	oldOpenbaoProject := logsOpenbaoProject
 	oldFollow, oldSince, oldTail, oldTs := logsFollow, logsSince, logsTail, logsTimestamps
 	logsServices = func(string) ([]string, error) {
 		return []string{"auth", "auth-2", "central", "edge", "openbao", "proxy", "step-ca"}, nil
 	}
 	logsRun = func(a []string) error { ran = a; return nil }
+	logsOpenbaoProject = func(string) (string, error) { return "", nil }
 	logsFollow, logsSince, logsTail, logsTimestamps = follow, "", tail, false
 	t.Cleanup(func() {
 		logsServices, logsRun = oldServices, oldRun
+		logsOpenbaoProject = oldOpenbaoProject
 		logsFollow, logsSince, logsTail, logsTimestamps = oldFollow, oldSince, oldTail, oldTs
 	})
 	err = runLogs(logsCmd, args)
 	return ran, composePath, err
+}
+
+func TestLogsRetainedOpenbaoProject(t *testing.T) {
+	st := &state.State{Target: "vps", Version: "0.7.2", BundleDir: "bundle-1"}
+	_, composePath, err := runLogsWith(t, st, true, []string{"openbao"}, "100", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logsOpenbaoProject = func(target string) (string, error) {
+		if target != "vps" {
+			t.Fatalf("target %s", target)
+		}
+		return "earlier-project", nil
+	}
+	var ran []string
+	logsRun = func(args []string) error { ran = args; return nil }
+	if err := runLogs(logsCmd, []string{"openbao"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"compose", "--project-name", "earlier-project", "-f", composePath, "logs", "--tail", "100", "--follow", "--no-log-prefix", "openbao"}
+	if !reflect.DeepEqual(ran, want) {
+		t.Fatalf("ran %v, want %v", ran, want)
+	}
+	logsOpenbaoProject = func(string) (string, error) { return "", errors.New("Docker unavailable") }
+	ran = nil
+	if err := runLogs(logsCmd, []string{"openbao"}); err == nil || ran != nil {
+		t.Fatalf("ran %v, error %v", ran, err)
+	}
 }
 
 func TestLogsNothingDeployed(t *testing.T) {

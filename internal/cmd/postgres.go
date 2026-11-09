@@ -49,9 +49,12 @@ What it does depends on the rights it finds:
     writes the SQL for an admin to ~/.versola/openbao/vps-postgres-init.sql
     (readable only by you), the way "versola configure" does for the role.
 
-It only creates what is missing: no DROP, no ALTER of a role, database or
-schema that exists. The password of a role that exists is not set; a role
-created here gets the deployment's POSTGRES_PASSWORD.
+It only creates what is missing: no DROP, no ALTER of a database or schema that
+exists. A role created here gets the deployment's POSTGRES_PASSWORD. A role that
+exists but cannot log in with it (after "uninstall --purge" a new password was
+generated) is fixed when an admin is given: it shows the ALTER ROLE with the
+password hidden and asks. That one question is never answered by --yes or a pipe, only at a terminal, because
+other applications logging in as that role would stop working.
 
 The SQL is printed before it runs, with the password hidden, and you are asked
 to confirm (--yes skips the question, --dry-run only prints). The admin's
@@ -102,6 +105,9 @@ func runPostgresInit(cmd *cobra.Command, args []string) error {
 		PGPassword: os.Getenv("PGPASSWORD"),
 		Prompt:     readAdminPassword,
 		Confirm:    confirm,
+		// Changing the password of a role that exists is never answered by a
+		// pipe or by --yes, only by someone at a terminal.
+		ConfirmInteractive: func(prompt string) bool { return stdinIsInteractive() && confirm(prompt) },
 	})
 }
 

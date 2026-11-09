@@ -787,11 +787,31 @@ What it does depends on the rights it finds:
 | Not enough rights | runs nothing; says which rights are missing and writes the SQL for an admin to `~/.versola/openbao/vps-postgres-init.sql` (0600), safe to run again (not in a `--dry-run`, which only prints) |
 | A database that belongs to someone else, or one to be made for a role that exists by an admin that is not a superuser | runs nothing and writes no SQL: it says what to do (let the role own it, or point the deployment at another database) |
 
-- **It only creates what is missing.** No `DROP`, no `ALTER` of a role, a
-  database or a schema that exists; the password of a role that exists is not
-  set (a role it created gets the deployment's `POSTGRES_PASSWORD`). A database
-  that exists and belongs to another role is never taken over: the command
-  stops and says what to do.
+- **It only creates what is missing.** No `DROP`, no `ALTER` of a database or a
+  schema that exists. The one exception is the password of a role that exists
+  (a role it created gets the deployment's `POSTGRES_PASSWORD`): see the next
+  item. A database that exists and belongs to another role is never taken
+  over: the command stops and says what to do.
+- **A role that exists but is refused its password** (Postgres answers
+  `password authentication failed`: after `uninstall --purge` a new OpenBao
+  generated a new password and the role kept the old one) is met when an admin
+  was given. The command shows `ALTER ROLE ... PASSWORD '<hidden>'` and asks
+  `Set the password of the role? [y/N]`; on yes the admin sets it (the
+  password's SCRAM verifier goes over psql's stdin, never on a command line or
+  to the screen), the login is checked again and the run goes on. This happens
+  before the plan below is shown, so a plan that is then refused, or a no at
+  `Continue?`, leaves the new password in place; run the command again to
+  continue. Any other application that logs in as that role with its old
+  password stops working, so **`--yes` does not answer this question** and
+  neither does a piped `y`: only an answer at a terminal does. Without one, or on
+  no, nothing is changed, the exit code is 4 and the message names
+  `~/.versola/openbao/vps-postgres-role.sql` (when it is still there) and the
+  command that runs it. `--dry-run` prints the statement, changes nothing and
+  exits non-zero (the deployment is not ready). A login that fails for another
+  reason (Postgres not reachable, `pg_hba.conf`, TLS, a role that may not log
+  in) is never offered this: the error says what to check and nothing is
+  changed; and if the role still cannot log in after the password was set, the
+  error names the usual causes (`pg_hba.conf`, an expired password).
 - **The SQL is printed before it runs**, with the password hidden (the role is
   created with the password's SCRAM verifier, not the password; one that is not
   ASCII, which the generated ones never are, goes in as itself, and then can

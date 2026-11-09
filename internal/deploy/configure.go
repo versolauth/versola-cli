@@ -235,7 +235,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	for _, r := range checksToRun {
 		fmt.Println(r.String())
 		if !r.OK {
-			return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, fmt.Errorf("prerequisite check failed — run `versola doctor` for details"))
+			return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, prerequisiteFailure(target, authURL, postgresHost, pg, proxyOpts, registry))
 		}
 	}
 	if target == "vps" {
@@ -247,7 +247,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 			r := checkBundledPostgresPort()
 			fmt.Println(r.String())
 			if !r.OK {
-				return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, fmt.Errorf("prerequisite check failed -- run `versola doctor` for details"))
+				return ConfigureResult{}, exitcode.With(exitcode.Prerequisites, bundledPostgresPortFailure(runsBundledPostgres(stored)))
 			}
 		} else {
 			fmt.Printf("Postgres: yours, at %s\n", postgresHost)

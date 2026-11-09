@@ -251,7 +251,7 @@ func checkBundledPostgresPortWith(ownRunning bool) checks.Result {
 	}
 	r := checks.PortFree(bundledPostgresPort, bundledPostgresContainer)
 	if !r.OK {
-		r.Detail += fmt.Sprintf(" -- the Postgres of this deployment listens on 127.0.0.1:%d: stop the one already there, or give --postgres-host to use it instead", bundledPostgresPort)
+		r.Detail += fmt.Sprintf(" -- the Postgres of this deployment listens on 127.0.0.1:%d", bundledPostgresPort)
 	}
 	return r
 }
@@ -277,7 +277,17 @@ func PostgresCheck(postgresHost string) checks.Result {
 		running, err := docker.IsRunningWithin(bundledPostgresContainer, 5*time.Second)
 		return checkBundledPostgresPortWith(err == nil && running)
 	}
-	return postgresCheckOf(mode, host, err, bounded)
+	r := postgresCheckOf(mode, host, err, bounded)
+	// The way out of a taken port, as configure's own error says it: the check
+	// line no longer carries advice that a recorded deployment would be refused.
+	if err == nil && mode == PostgresModeBundled && !r.OK {
+		if runsBundledPostgres(stored) {
+			r.Detail += " -- stop whatever holds it, then run configure again"
+		} else {
+			r.Detail += fmt.Sprintf(" -- stop whatever holds it, or, if it is a Postgres you want to keep, give --postgres-host %s to use it as your own", BundledPostgresHost)
+		}
+	}
+	return r
 }
 
 func postgresCheckOf(mode, host string, err error, bundledPort func() checks.Result) checks.Result {

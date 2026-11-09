@@ -82,6 +82,11 @@ func toolsTarget(target string) string {
 	return "docker-local"
 }
 
+// LegacyOpenbaoVolumeName is the one name OpenBao's volume had on both
+// targets before they were split (2026-08-18). No uninstall removes it: it
+// may hold the secrets of a vps install. Local uninstall only names it.
+const LegacyOpenbaoVolumeName = "versola-openbao-file"
+
 // OpenbaoVolumeName returns the target-specific name of OpenBao's
 // persistent data volume. Separate per target, not one shared name --
 // `external: true` volumes (see compose.fragment.yml.template's own

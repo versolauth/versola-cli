@@ -539,12 +539,28 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		// --purge with its typed confirmation, not a side effect of
 		// running this general cleanup command.
 		if target == "local" {
-			fmt.Println("Removing OpenBao's data volume...")
+			// Only a volume that exists is announced and removed: one that is
+			// already gone is the goal reached, not an error to show.
 			volumeName := deploy.OpenbaoVolumeName(target)
-			if err := uninstallDocker("volume", "rm", volumeName); err != nil {
-				// Not fatal -- same reasoning as the image removal loop
-				// below: it might already be gone, or held by something else.
-				fmt.Printf("  (couldn't remove %s: %v)\n", volumeName, err)
+			exists, err := uninstallVolumeExists(volumeName)
+			switch {
+			case err != nil:
+				fmt.Printf("  (%v)\n", err)
+			case exists:
+				fmt.Printf("Removing OpenBao's data volume %s...\n", volumeName)
+				if err := uninstallDocker("volume", "rm", volumeName); err != nil {
+					// Not fatal -- same reasoning as the image removal loop
+					// below: it might be held by something else.
+					fmt.Printf("  (couldn't remove %s: %v)\n", volumeName, err)
+				}
+			}
+			// The volume an older versola-cli shared between local and vps is
+			// never removed here: it may hold the secrets of a vps install on
+			// this machine, which cannot be regenerated and need their own
+			// explicit flag (--yes would answer the question for them).
+			// Named, with the command, so "Done." is not a half-truth.
+			if legacy, err := uninstallVolumeExists(deploy.LegacyOpenbaoVolumeName); err == nil && legacy {
+				fmt.Printf("Kept the volume %s, left by an older versola-cli (it was shared by local and vps and may hold the secrets of a vps install on this machine). If you do not need it: docker volume rm %s\n", deploy.LegacyOpenbaoVolumeName, deploy.LegacyOpenbaoVolumeName)
 			}
 		}
 	} else if deployed {

@@ -1807,10 +1807,16 @@ stops the stack anyway.
 ### `uninstall`
 
 Removes everything versola deployed locally: stops the stack and deletes
-its Postgres volume, removes the `versola-*` images that were pulled, and
-clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
+its Postgres volume and OpenBao's data volume, removes the `versola-*`
+images that were pulled, and clears `~/.versola`. Prompts for confirmation first — pass `-y`/`--yes`
 to skip that. Any answer but yes prints `Aborted.`, removes nothing and
 exits 4 (versions before this one exited 0 there).
+
+OpenBao's volume is removed only if it exists; one that is already gone is
+not mentioned. The volume an older versola-cli shared between `local` and `vps`
+(`versola-openbao-file`) is never removed, `--yes` or not: it may hold the
+secrets of an old vps install on the same machine. If it exists, `uninstall`
+names it at the end with the `docker volume rm` command for it.
 
 On `vps`, OpenBao's data volume (`versola-openbao-file-vps`: every secret
 and signing key), the Postgres data volume (`versola-postgres-data-vps`, when

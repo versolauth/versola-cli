@@ -582,3 +582,40 @@ func TestUninstallPurgeDropsTheNote(t *testing.T) {
 		t.Errorf("the note survived --purge: %v, %v", note, err)
 	}
 }
+
+// A plain uninstall of a deployment with a Postgres of its own says which one
+// it forgets and how to give it back: the record is the only thing that
+// remembered it (see deploy.errEmptyBundledPostgres).
+func TestUninstallSaysWhichOwnPostgresItForgets(t *testing.T) {
+	st := vpsState()
+	st.PostgresMode, st.PostgresHost = "", "db.example.com:5432"
+	r := runUninstallCase(t, uninstallCase{st: st, volumes: allVol, files: true, answer: "y\n"})
+	if r.err != nil {
+		t.Fatalf("err %v\n%s", r.err, r.out)
+	}
+	if !strings.Contains(r.out, "--postgres-host db.example.com:5432") {
+		t.Errorf("no hint to give the Postgres again:\n%s", r.out)
+	}
+}
+
+func TestUninstallSaysNothingAboutPostgresWhenThereIsNothingToForget(t *testing.T) {
+	bundled := vpsState()
+	bundled.PostgresMode, bundled.PostgresHost = deploy.PostgresModeBundled, deploy.BundledPostgresHost
+	own := vpsState()
+	own.PostgresMode, own.PostgresHost = "", "db.example.com:5432"
+	for name, c := range map[string]uninstallCase{
+		"bundled":   {st: bundled, volumes: allVol, answer: "y\n"},
+		"no record": {volumes: allVol, answer: "y\n"},
+		"purge":     {st: own, volumes: allVol, answer: "vps\n", purge: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := runUninstallCase(t, c)
+			if r.err != nil {
+				t.Fatalf("err %v\n%s", r.err, r.out)
+			}
+			if strings.Contains(r.out, "To install again over the same data") {
+				t.Errorf("a hint where there is nothing to forget:\n%s", r.out)
+			}
+		})
+	}
+}

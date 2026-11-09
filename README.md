@@ -650,7 +650,7 @@ Typical problems:
 | `lost` | a first-install-only secret is missing though the deployment exists | restore it from a backup; a new one would make existing data unreadable |
 | `group-partial` | part of a key group (e.g. a JWT key pair) is present | restore the missing half, or use `--generate-missing` if the data is expendable |
 | `vault-empty-with-state` | this machine has a record, OpenBao is empty | check that you point at the right OpenBao; restore it |
-| `unknown-state` | OpenBao has secrets, this machine has no record | starting over after a failed attempt (after a failed first install a plain `uninstall` keeps the note that lets `configure` resume it, so this is rarer than it was): `versola uninstall --purge`, then configure again. A server that ran Versola and lost `~/.versola`: do **not** purge, the keys protect live data; restore the missing secrets, or `--generate-missing` if they are gone for good. The plan prints both, once |
+| `unknown-state` | OpenBao has secrets, this machine has no record (on vps, when the plan has no other problem, a `configure` with no `--postgres-host` and no bundled data volume stops with a Postgres-specific message instead: the earlier install most likely used a Postgres of your own, see "Postgres on vps") | starting over after a failed attempt (after a failed first install a plain `uninstall` keeps the note that lets `configure` resume it, so this is rarer than it was): `versola uninstall --purge`, then configure again. A server that ran Versola and lost `~/.versola`: do **not** purge, the keys protect live data; restore the missing secrets, or `--generate-missing` if they are gone for good. The plan prints both, once |
 | `external-missing` | a secret you must supply is absent | write it to OpenBao yourself |
 
 #### `--generate-missing NAME[,NAME...]`
@@ -733,6 +733,17 @@ stops the container from starting). Nothing in this mode is done by hand:
   `versola uninstall --purge`: the database keeps the password it was
   created with, and what it holds was encrypted with the keys of the OpenBao
   that is gone. No `docker` command is asked of you.
+- **After a plain `uninstall` of a deployment with your own Postgres**,
+  `uninstall` forgets which one it was (the record is removed) but keeps
+  OpenBao and its secrets. A `configure` without `--postgres-host` then
+  finds no record, no data volume of a bundled Postgres and a Postgres
+  password already in OpenBao, and refuses before it stores a secret or starts a container: it
+  would otherwise start an empty container and run Versola on an empty
+  database. The message ends with the two ways out: the same command with
+  `--postgres-host <host:port>`, or `versola uninstall --purge` to start over
+  (this destroys OpenBao's secrets). `uninstall` prints the address it
+  forgets and the flag to give it back. An interrupted first install being
+  continued, and a first install, are not affected.
 - **Where the data is** is in `versola status`: the volume
   `versola-postgres-data-vps` and where Docker keeps it on the server
   (`Postgres: in a container of this deployment, ...; data in the Docker volume ...`).
@@ -1769,7 +1780,10 @@ and signing key), the Postgres data volume (`versola-postgres-data-vps`, when
 Postgres runs in a container) and the TLS certificate volume
 (`versola-acme-vps`) are kept: they are a live server's data. `uninstall`
 names the ones it kept and ends with `To start over from scratch: versola
-uninstall --purge`, also when there is no deployment record any more.
+uninstall --purge`, also when there is no deployment record any more. When
+the deployment used a Postgres of your own, it also prints that Postgres's
+address and the flag that gives it back (`--postgres-host <host:port>`): the
+record that remembered it is removed.
 
 #### `uninstall --purge`
 

@@ -222,3 +222,29 @@ func TestForgottenPostgresPasswordNote(t *testing.T) {
 		}
 	}
 }
+
+func TestRefuseEmptyBundledPostgres(t *testing.T) {
+	// target, staged, hasRecord, hostGiven, mode, dataExisted
+	cases := []struct {
+		name                         string
+		target                       string
+		staged, hasRecord, hostGiven bool
+		mode                         string
+		dataExisted, want            bool
+	}{
+		{"vps, nothing recorded, bundled by default", "vps", false, false, false, PostgresModeBundled, false, true},
+		{"a record exists", "vps", false, true, false, PostgresModeBundled, false, false},
+		{"--postgres-host given", "vps", false, false, true, "", false, false},
+		{"the data volume of an earlier bundled Postgres exists", "vps", false, false, false, PostgresModeBundled, true, false},
+		{"a rolling upgrade", "vps", true, true, false, PostgresModeBundled, false, false},
+		{"own Postgres mode", "vps", false, false, false, "", false, false},
+		{"local", "local", false, false, false, "", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := refuseEmptyBundledPostgres(c.target, c.staged, c.hasRecord, c.hostGiven, c.mode, c.dataExisted); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}

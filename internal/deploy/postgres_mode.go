@@ -328,3 +328,29 @@ to start over from scratch, which destroys the volume, run
 Nothing in the volume was changed by this configure.
 `, bundledPostgresVolume, role)
 }
+
+// refuseEmptyBundledPostgres says whether this configure is the shape of an
+// install whose own Postgres a plain `uninstall` forgot (see
+// SecretOptions.RefuseEmptyBundledPostgres): a vps deployment that is new to
+// this machine (no record, not a rolling upgrade), that reaches the bundled
+// Postgres only by default (no --postgres-host), with no data volume of one.
+// Whether OpenBao already holds secrets is settleSecrets's to add.
+func refuseEmptyBundledPostgres(target string, staged, hasRecord, hostGiven bool, mode string, dataExisted bool) bool {
+	return target == "vps" && !staged && !hasRecord && !hostGiven && mode == PostgresModeBundled && !dataExisted
+}
+
+// errEmptyBundledPostgres stops a configure that would put the services on a
+// new, empty Postgres container over the secrets of an earlier install. The
+// usual way to get here: the earlier install used a Postgres of the
+// customer's own, a plain `uninstall` removed the record that said so (the
+// record is all that remembers --postgres-host), and OpenBao, which uninstall
+// keeps, still holds that install's secrets. Nothing has been written when
+// this is returned. It ends with the two ways out and never names a value.
+func errEmptyBundledPostgres() error {
+	return fmt.Errorf(`this machine has no record of a deployment, but OpenBao already holds the secrets of an earlier install, and the Postgres data volume %s does not exist.
+That is what a deployment with a Postgres of your own looks like after a plain `+"`versola uninstall`"+`, which forgets which Postgres it used. Starting
+the Postgres container now would run Versola on an empty database: users and clients would be gone. No secret was written and the Postgres container was not started.
+
+  - The data is in a Postgres of your own: run the same command again with --postgres-host <host:port>.
+  - You want to start over from scratch, which destroys OpenBao's secrets and keys: versola uninstall --purge`, bundledPostgresVolume)
+}

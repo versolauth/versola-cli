@@ -238,6 +238,19 @@ func printKeptVolumes(kept []string) {
 	fmt.Println("To start over from scratch: versola uninstall --purge")
 }
 
+// ownPostgresNote is printed by a plain uninstall of a vps deployment that
+// uses a Postgres of the customer's own: the record that remembers its address
+// is removed with ~/.versola/active, and OpenBao, which is kept, still holds
+// that install's secrets. Without --postgres-host the next configure would not
+// know which database the data lives in (configure refuses that case, see
+// deploy.errEmptyBundledPostgres). "" for any other record.
+func ownPostgresNote(st *state.State) string {
+	if st == nil || st.Target != "vps" || st.PostgresMode == deploy.PostgresModeBundled || st.PostgresHost == "" {
+		return ""
+	}
+	return fmt.Sprintf("\nYour own Postgres (%s) is not touched, and uninstall forgets that this deployment uses it.\nTo install again over the same data, give it to configure or bootstrap: --postgres-host %s\n", st.PostgresHost, st.PostgresHost)
+}
+
 // confirmPurge asks for purgeWord to be typed. assumeYes does not answer it:
 // the purge destroys what no backup taken by this CLI can bring back, so a
 // script has to say so on stdin ("vps"), not just with -y.
@@ -300,6 +313,12 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 	// settleSecrets), never for a store of unknown origin. --purge starts over,
 	// so it keeps nothing.
 	var unfinished *state.Pending
+	// The record that is about to be removed, when it names a Postgres of the
+	// customer's own (see ownPostgresNote): said at the end, once it is gone.
+	forgotten := ""
+	if loadErr == nil && !uninstallPurge {
+		forgotten = ownPostgresNote(st)
+	}
 	if !uninstallPurge && errors.Is(loadErr, state.ErrNotConfigured) {
 		if note, err := state.LoadPending(); err == nil && note != nil {
 			unfinished = note
@@ -581,6 +600,7 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	forgottenPrinted := ""
 	if dirExists && !keepDirForLaterCleanup {
 		fmt.Printf("Removing %s...\n", stateDir)
 		rmErr := os.RemoveAll(stateDir)
@@ -596,11 +616,15 @@ func runUninstall(cmd *cobra.Command, args []string) error {
 			printKeptVolumes(kept)
 			return stateDirError(stateDir, rmErr)
 		}
+		forgottenPrinted = forgotten
 		if keptNote {
 			fmt.Println("\nKept: the note of the unfinished first install. `versola configure vps ...` resumes it; `versola uninstall --purge` starts over from scratch.")
 		}
 	}
 
+	// Before the pointer at --purge: for a Postgres of your own the answer is
+	// the flag, not a fresh start.
+	fmt.Print(forgottenPrinted)
 	printKeptVolumes(kept)
 	if uninstallPurge {
 		fmt.Println("\nThis server holds no Versola secrets or data any more: `versola configure vps ...` (or bootstrap) starts a first install.")

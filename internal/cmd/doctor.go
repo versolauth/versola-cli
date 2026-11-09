@@ -125,7 +125,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if doctorTarget == "local" {
 		results = append(results, checks.PortFree(proxy.LocalPort, proxy.LocalContainerName))
 	}
-	results = append(results, checks.DockerMemory(doctorTarget), checks.DiskSpace())
+	results = append(results, checks.DockerMemory(doctorTarget, doctorTarget == "vps" && deploy.PostgresIsBundled(vps.postgresHost)), checks.DiskSpace())
 	if doctorTarget == "vps" {
 		results = append(results, vpsChecks(vps)...)
 		central, err := centralChecks(doctorAuthURL, doctorCentralURL)

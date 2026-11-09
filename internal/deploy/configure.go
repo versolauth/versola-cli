@@ -223,7 +223,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	checksToRun := []checks.Result{
 		daemon,
 		checks.ComposePlugin(),
-		checks.DockerMemory(target),
+		checks.DockerMemory(target, pg.Mode == PostgresModeBundled),
 		checks.DiskSpace(),
 	}
 	// local's proxy port. vps's ports are checked separately, by

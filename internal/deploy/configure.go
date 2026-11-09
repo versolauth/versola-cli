@@ -130,6 +130,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	// vps: which Postgres -- one in a container (no --postgres-host, a
 	// deployment that has none yet) or the one --postgres-host names. See
 	// resolvePostgres; postgresHost is the address the services reach it at.
+	hostGiven := postgresHost != ""
 	var stored *state.State
 	if staged != nil {
 		stored = staged.from
@@ -459,6 +460,10 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	// OpenBao was first initialized, which this CLI was deliberately
 	// never handed in that mode — see develop.md's OpenBao section for
 	// the manual `bao operator unseal` step.
+	// A deployment that is new to this machine, on the bundled Postgres only by
+	// default, over an OpenBao that already has secrets (see
+	// SecretOptions.RefuseEmptyBundledPostgres).
+	secretOpts.RefuseEmptyBundledPostgres = refuseEmptyBundledPostgres(target, staged != nil, stored != nil, hostGiven, pg.Mode, pgDataExisted)
 	fmt.Println("Resolving secrets (OpenBao)...")
 	secretsOut, err := resolveSecrets(dir, target, version, secretOpts)
 	newPgPassword := secretsOut.NewPostgresPassword

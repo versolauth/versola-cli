@@ -88,6 +88,12 @@ type SecretOptions struct {
 	// has a record of a deployment, i.e. with the old rule "anything missing is
 	// generated", which cannot tell a new secret from a lost one.
 	AllowLegacy bool
+	// RefuseEmptyBundledPostgres is set by configure, never by a flag: this
+	// run would start the Postgres container of a deployment that has no record
+	// and no data volume of one, with no --postgres-host, over an OpenBao that
+	// already holds a Postgres password. That is the shape of an install whose
+	// own Postgres a plain `uninstall` forgot (settleSecrets stops it).
+	RefuseEmptyBundledPostgres bool
 }
 
 func (o SecretOptions) generateSet() map[string]bool {
@@ -298,6 +304,11 @@ func settleSecrets(ctx context.Context, client *openbao.Client, dir, target, ver
 			strings.Join(services, ", "), postgresPasswordKey, target)
 	}
 	pgPassword, pgIsNew := pickPostgresPassword(existing, candidates)
+	// An install that is being continued (installing) stored its own password
+	// before it died: that is not an earlier install's.
+	if opts.RefuseEmptyBundledPostgres && !installing && !pgIsNew && pgPassword != "" {
+		return settledSecrets{}, errEmptyBundledPostgres()
+	}
 	if pgPassword != "" {
 		if shared == nil {
 			shared = map[string]map[string]string{}

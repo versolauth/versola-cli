@@ -713,3 +713,67 @@ func TestSecretsAFillSharedCopyIsStoredEvenWithoutACandidateForIt(t *testing.T) 
 		t.Errorf("%v %v", final, wrote)
 	}
 }
+
+// An install whose own Postgres a plain `uninstall` forgot: OpenBao keeps the
+// earlier install's secrets, there is no record and no bundled data volume.
+// configure (RefuseEmptyBundledPostgres) must stop before anything is written,
+// and name both ways out.
+func TestSecretsRefuseAnEmptyBundledPostgresOverAnEarlierInstall(t *testing.T) {
+	h := newHarness(t, "vps", vpsSchemaFixture)
+	h.writeCandidates("S3CR3T-NEW")
+	h.store("S3CR3T-OLD")
+
+	_, err := h.run(SecretOptions{RefuseEmptyBundledPostgres: true})
+	if err == nil {
+		t.Fatal("a new empty Postgres over an earlier install's secrets must stop")
+	}
+	for _, want := range []string{"--postgres-host <host:port>", "versola uninstall --purge", "No secret was written"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error lacks %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "S3CR3T") {
+		t.Errorf("a value reached the error: %v", err)
+	}
+	if len(h.bao.writes) != 0 {
+		t.Errorf("something was written to OpenBao: %v", h.bao.writes)
+	}
+	if note, _ := state.LoadPending(); note != nil {
+		t.Errorf("a note was left: %+v", note)
+	}
+}
+
+// The same run without the condition (a --postgres-host, a record, or the
+// volume of an earlier bundled Postgres) goes on as before.
+func TestSecretsAnEarlierInstallIsKeptWhenTheGuardDoesNotApply(t *testing.T) {
+	h := newHarness(t, "vps", vpsSchemaFixture)
+	h.writeCandidates("c1")
+	h.store("old")
+	if _, err := h.run(SecretOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Nothing earlier to protect: a first install has no stored password, and an
+// interrupted one is being continued with its own.
+func TestSecretsTheGuardLeavesFirstAndInterruptedInstallsAlone(t *testing.T) {
+	guard := SecretOptions{RefuseEmptyBundledPostgres: true}
+
+	h := newHarness(t, "vps", vpsSchemaFixture)
+	h.writeCandidates("c1")
+	if _, err := h.run(guard); err != nil {
+		t.Fatalf("a first install: %v", err)
+	}
+
+	h = newHarness(t, "vps", vpsSchemaFixture)
+	h.writeCandidates("c1")
+	h.bao.failWrite[openbao.SecretPath("vps", "edge")] = true
+	if _, err := h.run(guard); err == nil {
+		t.Fatal("the failing write must fail the run")
+	}
+	delete(h.bao.failWrite, openbao.SecretPath("vps", "edge"))
+	h.writeCandidates("c2")
+	if _, err := h.run(guard); err != nil {
+		t.Fatalf("an interrupted install being continued: %v", err)
+	}
+}

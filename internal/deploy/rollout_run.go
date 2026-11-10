@@ -162,7 +162,7 @@ func RequireCompatible(st *state.State, version string, o RolloutOptions) error 
 	}
 	switch o.Compat.Verdict {
 	case manifest.FreshDatabase:
-		return freshDatabaseError(o.Compat, true)
+		return freshDatabaseError(o.Compat, true, st.PostgresMode == PostgresModeBundled)
 	case manifest.Rolling:
 		return nil
 	}
@@ -180,14 +180,22 @@ func RequireCompatible(st *state.State, version string, o RolloutOptions) error 
 
 // freshDatabaseError is the refusal of an upgrade the release says has no
 // in-place way. rollout says what to do instead; configure also names the flag
-// for someone who already has a new database.
-func freshDatabaseError(r manifest.Result, rollout bool) error {
+// for someone who already has a new database -- but only with their own
+// Postgres: the bundled one lives in this deployment's volume, `configure`
+// refuses --postgres-host and another --postgres-db on it, so there is no new
+// database to put behind it short of `uninstall --purge`, and the flag would
+// lead nowhere. bundled is State.PostgresMode == PostgresModeBundled.
+func freshDatabaseError(r manifest.Result, rollout, bundled bool) error {
 	notes := ""
 	if r.Notes != "" {
 		notes = " (release notes: " + r.Notes + ")"
 	}
-	way := fmt.Sprintf("Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall --purge` (it asks first and removes this deployment's data and secrets) and `versola bootstrap vps %s ...` (with your own Postgres, name an empty database).", r.To)
-	if !rollout {
+	own := ""
+	if !bundled {
+		own = " (with your own Postgres, name an empty database: `--postgres-host <host:port> --postgres-db <empty database>`)"
+	}
+	way := fmt.Sprintf("Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall --purge` (it asks first and removes this deployment's data and secrets) and `versola bootstrap vps %s ...`%s.", r.To, own)
+	if !rollout && !bundled {
 		way += fmt.Sprintf(" Already on a new, empty database? Run `versola configure vps %s ... --allow-fresh-database`, then `versola migrate` and `versola up`.", r.To)
 	}
 	return fmt.Errorf("version %s cannot be upgraded in place from %s: the release says it needs a fresh database%s, so neither a rollout nor `configure` followed by `migrate` can work. %s", r.To, r.From, notes, way)
@@ -920,7 +928,7 @@ func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 	fmt.Print(RolloutPlan(st, version, o))
 	fmt.Println()
 	if o.Compat.Verdict == manifest.FreshDatabase && !st.RolloutUnderway() {
-		err := freshDatabaseError(o.Compat, true)
+		err := freshDatabaseError(o.Compat, true, st.PostgresMode == PostgresModeBundled)
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
 	}

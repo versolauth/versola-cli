@@ -567,28 +567,138 @@ func pgDumpExternalArgs(t pgTarget, secretsFile string) []string {
 }
 
 func dockerDumpDatabase(st *state.State, bundleDir string, t pgTarget, w io.Writer) error {
-	var args []string
 	if BackupPostgresMode(st) == PostgresModeBundled {
 		composePath, _, err := st.ComposeFilePath()
 		if err != nil {
 			return err
 		}
-		out, err := docker.Output(state.ComposeArgs(composePath, "ps", "-q", "postgres")...)
-		id := strings.TrimSpace(string(out))
-		if err != nil || id == "" {
-			return fmt.Errorf("the deployment's Postgres container isn't running -- `versola up` starts it")
-		}
-		args = pgDumpInContainerArgs(strings.Fields(id)[0], t)
-	} else {
-		if t.rootCert != "" && pgVerifies(t.sslmode) {
-			ca, err := pgCAOnHost(bundleDir, t.rootCert)
-			if err != nil {
-				return err
-			}
-			t.caFile = ca
-		}
-		args = pgDumpExternalArgs(t, filepath.Join(bundleDir, AuthService+".secrets.env"))
+		return withBundledPostgres(dockerBundledPg, composePath, os.Stdout, func(container string) error {
+			return runPgDump(w, pgDumpInContainerArgs(container, t))
+		})
 	}
+	if t.rootCert != "" && pgVerifies(t.sslmode) {
+		ca, err := pgCAOnHost(bundleDir, t.rootCert)
+		if err != nil {
+			return err
+		}
+		t.caFile = ca
+	}
+	return runPgDump(w, pgDumpExternalArgs(t, filepath.Join(bundleDir, AuthService+".secrets.env")))
+}
+
+// bundledPgCtl is what reaching the deployment's own Postgres container
+// does with Docker: a variable so the tests can stand in for each step.
+type bundledPgCtl struct {
+	// runningID is the id of the running postgres container, "" when there
+	// is none; an error when Docker could not be asked (nothing is started
+	// then: the cause is Docker, not a stopped Postgres).
+	runningID func(composePath string) (string, error)
+	// start starts that one service and waits for its healthcheck; stop stops it.
+	start func(composePath string) error
+	stop  func(composePath string) error
+	// signals receives the signals held while Postgres is started by the backup.
+	signals func() (<-chan os.Signal, func())
+}
+
+var dockerBundledPg = bundledPgCtl{
+	runningID: func(composePath string) (string, error) {
+		out, stderr, err := docker.OutputWithin(time.Minute, state.ComposeArgs(composePath, bundledPgPsArgs()...)...)
+		if err != nil {
+			return "", fmt.Errorf("couldn't ask Docker whether the deployment's Postgres runs%s: %w", firstLine(stderr), err)
+		}
+		if f := strings.Fields(string(out)); len(f) > 0 {
+			return f[0], nil
+		}
+		return "", nil
+	},
+	start: func(composePath string) error {
+		return docker.Run(state.ComposeArgs(composePath, bundledPgStartArgs()...)...)
+	},
+	stop: func(composePath string) error {
+		_, stderr, err := docker.OutputWithin(2*time.Minute, state.ComposeArgs(composePath, bundledPgStopArgs()...)...)
+		if err != nil {
+			return fmt.Errorf("%w%s", err, firstLine(stderr))
+		}
+		return nil
+	},
+	signals: func() (<-chan os.Signal, func()) { return dockerOpenbaoCtl.signals() },
+}
+
+// The compose arguments that reach the deployment's Postgres: kept as
+// functions so a test holds them -- naming one service is what keeps the
+// backup from starting anything else.
+func bundledPgPsArgs() []string    { return []string{"ps", "-q", "postgres"} }
+func bundledPgStartArgs() []string { return []string{"up", "-d", "--wait", "postgres"} }
+func bundledPgStopArgs() []string  { return []string{"stop", "postgres"} }
+
+// withBundledPostgres runs dump against the deployment's own Postgres
+// container. After `versola down` there is none, and the way out must not be
+// `versola up`, which starts the whole public stack just to take a dump: so
+// this starts that one service (never anything else, `up` of a service starts
+// only what it depends on, and Postgres depends on nothing), and stops it
+// again afterwards, whatever dump returned -- the customer stopped it on
+// purpose. A Postgres that was already running is left running. The signals
+// that end a session are held until it is stopped again, like OpenBao's stop
+// in the same command: leaving it running is the one thing this must not do.
+func withBundledPostgres(c bundledPgCtl, composePath string, out io.Writer, dump func(container string) error) error {
+	id, err := c.runningID(composePath)
+	if err != nil {
+		return err
+	}
+	if id != "" {
+		return dump(id)
+	}
+	sigs, release := c.signals()
+	defer release()
+	var heard atomic.Bool
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-sigs:
+				if !heard.Swap(true) {
+					fmt.Fprintln(out, "Interrupted -- stopping once Postgres is stopped again.")
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	docker.SetShielded(true)
+	defer docker.SetShielded(false)
+
+	fmt.Fprintln(out, "The deployment's Postgres is not running; starting it for the dump (and stopping it again after)...")
+	if serr := c.start(composePath); serr != nil {
+		err = fmt.Errorf("couldn't start the deployment's Postgres for the dump (`versola logs postgres` says what it failed on): %w", serr)
+	} else if id, rerr := c.runningID(composePath); rerr != nil {
+		err = rerr
+	} else if id == "" {
+		err = errors.New("the deployment's Postgres was started but its container isn't there -- `versola logs postgres` says why")
+	} else {
+		err = dump(id)
+	}
+	// Stopped also when the start failed: a service that never became
+	// healthy is still running.
+	if serr := c.stop(composePath); serr != nil {
+		fmt.Fprintf(out, "Warning: couldn't stop Postgres again (%v) -- stop it with `versola down`.\n", serr)
+	} else {
+		fmt.Fprintln(out, "Postgres is stopped again.")
+	}
+	close(done)
+	<-stopped
+	select {
+	case <-sigs:
+		heard.Store(true)
+	default:
+	}
+	if heard.Load() {
+		return exitcode.With(exitcode.Interrupted, errors.New("interrupted -- Postgres is stopped again; no archive was written"))
+	}
+	return err
+}
+
+func runPgDump(w io.Writer, args []string) error {
 	stderr, err := docker.RunTo(w, args...)
 	if err != nil {
 		var exit *exec.ExitError

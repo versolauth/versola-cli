@@ -451,10 +451,13 @@ stops with the release notes and the way on -- a backup, `uninstall --purge`,
 `bootstrap` -- instead of letting `migrate` fail later on a Flyway checksum.
 `--allow-fresh-database` (an advanced flag, `--help-all`) goes on anyway, for
 someone who has already put a new, empty database behind the deployment; it
-is refused on `local`. Anything else the manifest says, or no manifest at all
+is refused on `local`. It is for a deployment on your own Postgres (the refusal
+names `--postgres-host` and `--postgres-db` for it); with the bundled Postgres
+there is no other database to put behind the deployment, so the refusal names
+only `uninstall --purge` and `bootstrap`. Anything else the manifest says, or no manifest at all
 (an older release), changes nothing here, and a first deployment has no
 version to upgrade from. `bootstrap` has no such flag: it is for a first
-deployment, and a refusal there tells you to run `configure --allow-fresh-database`, then `migrate` and `up`.
+deployment, and a refusal there (own Postgres only) tells you to run `configure --allow-fresh-database`, then `migrate` and `up`.
 
 `--auth-url`, `--proxy` and the Postgres are fields of `state.json`. Staging and
 "OpenBao set up by hand" are not: they are read the way `rollout` reads them,

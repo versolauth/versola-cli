@@ -72,6 +72,24 @@ func TestRequireCompatibleFollowsTheManifest(t *testing.T) {
 	}
 }
 
+func TestRolloutRefusalFollowsThePostgresMode(t *testing.T) {
+	st := rolloutGuardState(t)
+	st.Version = "0.6.2"
+	compat := compatFor(t, "0.6.2")
+	err := RequireCompatible(st, "0.7.6", RolloutOptions{Compat: compat})
+	if err == nil || !strings.Contains(err.Error(), "--postgres-host <host:port> --postgres-db <empty database>") {
+		t.Errorf("own Postgres: the refusal does not name the flags: %v", err)
+	}
+	st.PostgresMode = PostgresModeBundled
+	err = RequireCompatible(st, "0.7.6", RolloutOptions{Compat: compat})
+	if err == nil || !strings.Contains(err.Error(), "`versola uninstall --purge`") {
+		t.Fatalf("bundled: %v", err)
+	}
+	if strings.Contains(err.Error(), "--postgres-host") || strings.Contains(err.Error(), "--allow-fresh-database") {
+		t.Errorf("bundled: the refusal names a flag that cannot work:\n%v", err)
+	}
+}
+
 func TestRolloutPlanSaysWhatTheReleaseSays(t *testing.T) {
 	st := rolloutGuardState(t)
 	for name, c := range map[string]struct {
@@ -110,28 +128,40 @@ func TestCheckFreshDatabase(t *testing.T) {
 	dir := writeManifest(t, compatManifest)
 
 	// configure from a version the release cannot be reached from: refused, with the flag in the message.
-	err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false)
+	err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false, false)
 	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || !strings.Contains(err.Error(), "`versola configure vps 0.7.6 ... --allow-fresh-database`, then `versola migrate` and `versola up`") {
 		t.Errorf("a fresh-database upgrade was not refused with the way out: %v", err)
 	}
+	// With their own Postgres the message also names the flags that put an empty database behind the deployment.
+	if err == nil || !strings.Contains(err.Error(), "--postgres-host <host:port> --postgres-db <empty database>") {
+		t.Errorf("own Postgres: the refusal does not name the flags: %v", err)
+	}
+	// The bundled Postgres cannot be swapped by configure: the flag is not offered, nor the own-Postgres hint.
+	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", true, false)
+	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || !strings.Contains(err.Error(), "`versola uninstall --purge`") || !strings.Contains(err.Error(), "`versola bootstrap vps 0.7.6 ...`.") {
+		t.Errorf("bundled: the refusal lacks the way out: %v", err)
+	}
+	if err != nil && (strings.Contains(err.Error(), "--allow-fresh-database") || strings.Contains(err.Error(), "--postgres-host")) {
+		t.Errorf("bundled: the refusal offers a flag that cannot work:\n%v", err)
+	}
 	// The flag lets someone who has a new database through.
-	if err := checkFreshDatabase(dir, "0.6.2", "0.7.6", true); err != nil {
+	if err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false, true); err != nil {
 		t.Errorf("--allow-fresh-database: %v", err)
 	}
 	// Anything else the manifest says is not configure's business.
 	for _, from := range []string{"0.7.5", "0.7.1", "0.7.6", "0.8.0", "dev"} {
-		if err := checkFreshDatabase(dir, from, "0.7.6", false); err != nil {
+		if err := checkFreshDatabase(dir, from, "0.7.6", false, false); err != nil {
 			t.Errorf("from %s: %v", from, err)
 		}
 	}
 	// No manifest (an older release): as before.
-	if err := checkFreshDatabase(writeManifest(t, ""), "0.6.2", "0.7.0", false); err != nil {
+	if err := checkFreshDatabase(writeManifest(t, ""), "0.6.2", "0.7.0", false, false); err != nil {
 		t.Errorf("a release without a manifest: %v", err)
 	}
 	// A manifest this CLI cannot read is an error that names the problem, flag or not.
 	bad := writeManifest(t, `{"schemaVersion": 9, "releases": []}`)
 	for _, allow := range []bool{false, true} {
-		if err := checkFreshDatabase(bad, "0.6.2", "0.7.6", allow); err == nil || !strings.Contains(err.Error(), "schemaVersion 9") {
+		if err := checkFreshDatabase(bad, "0.6.2", "0.7.6", false, allow); err == nil || !strings.Contains(err.Error(), "schemaVersion 9") {
 			t.Errorf("an unknown schema (allow=%v): %v", allow, err)
 		}
 	}

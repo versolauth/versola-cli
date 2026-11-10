@@ -321,7 +321,7 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	// same question before it got here (RolloutCompatibility), and is not asked
 	// again. A first deployment has no version to upgrade from.
 	if staged == nil && stored != nil {
-		if err := checkFreshDatabase(dir, stored.Version, version, allowFreshDatabase); err != nil {
+		if err := checkFreshDatabase(dir, stored.Version, version, stored.PostgresMode == PostgresModeBundled, allowFreshDatabase); err != nil {
 			return ConfigureResult{}, err
 		}
 	}

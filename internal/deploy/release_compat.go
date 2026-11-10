@@ -19,7 +19,7 @@ import (
 //
 // A manifest this CLI cannot read (an unknown schemaVersion, broken JSON) is an
 // error here too, since it may declare exactly such a break.
-func checkFreshDatabase(dir, running, version string, bundled, allow bool) error {
+func checkFreshDatabase(dir, running, version, target string, bundled, allow bool) error {
 	m, err := manifest.Load(dir)
 	if err != nil {
 		return fmt.Errorf("versola-tools %s: %w", version, err)
@@ -32,5 +32,18 @@ func checkFreshDatabase(dir, running, version string, bundled, allow bool) error
 		fmt.Printf("Versola %s says it cannot be upgraded in place from %s: going on because of --allow-fresh-database -- the database behind it has to be a new, empty one.\n", version, running)
 		return nil
 	}
-	return freshDatabaseError(res, false, bundled)
+	return freshDatabaseError(res, false, target, bundled)
+}
+
+// checkFreshDatabaseLocal is checkFreshDatabase for `configure local`: the
+// version to upgrade from is the one in the recorded local deployment, none
+// when there is no such record (a first install, or after `uninstall`), so
+// nothing is asked then. local's Postgres is always the bundled one and
+// --allow-fresh-database is refused there, so the refusal is final.
+func checkFreshDatabaseLocal(dir, version string) error {
+	st := storedLocal()
+	if st == nil {
+		return nil
+	}
+	return checkFreshDatabase(dir, st.Version, version, "local", true, false)
 }

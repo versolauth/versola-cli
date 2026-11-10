@@ -454,7 +454,11 @@ someone who has already put a new, empty database behind the deployment; it
 is refused on `local`. It is for a deployment on your own Postgres (the refusal
 names `--postgres-host` and `--postgres-db` for it); with the bundled Postgres
 there is no other database to put behind the deployment, so the refusal names
-only `uninstall --purge` and `bootstrap`. Anything else the manifest says, or no manifest at all
+only `uninstall --purge` and `bootstrap`. The flag itself is refused over a
+deployment recorded as running the bundled Postgres at once, before the
+confirmation question and whatever the release says (leave it out: `configure`
+finds out by itself whether the release can be upgraded in place), with the
+same way out. Anything else the manifest says, or no manifest at all
 (an older release), changes nothing here, and a first deployment has no
 version to upgrade from. `bootstrap` has no such flag: it is for a first
 deployment, and a refusal there (own Postgres only) tells you to run `configure --allow-fresh-database`, then `migrate` and `up`.

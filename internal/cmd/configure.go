@@ -142,6 +142,13 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Before the confirmation, so that the answer is not spent (and
+	// versola-tools not pulled) on a flag that cannot help here.
+	if configureAllowFreshDB {
+		if err := deploy.RefuseFreshDatabaseFlag(vf.recorded, version); err != nil {
+			return err
+		}
+	}
 
 	// Configure looks like the harmless step of the three -- it starts
 	// nothing and touches no database -- but its own Finalize is
@@ -268,7 +275,7 @@ const centralURLUsage = "vps only: how edge reaches central's mutual-TLS listene
 
 const registryUsage = "pull Versola's images from this registry prefix instead of ghcr.io/versolauth (e.g. cr.yandex/crp1a2b3c): versola-tools, central, auth and edge as PREFIX/versola-<name>:<version>; no login is done, run docker login first"
 
-const allowFreshDatabaseUsage = "vps only: deploy a release that says no in-place upgrade exists from the version recorded here, because you already put a new, empty database behind it (without it configure refuses before changing anything)"
+const allowFreshDatabaseUsage = "vps only, and only with your own Postgres (refused over a deployment recorded as running the bundled one: there is no other database to put behind it): deploy a release that says no in-place upgrade exists from the version recorded here, because you already put a new, empty database behind it (without it configure refuses before changing anything)"
 
 const postgresDBUsage = "vps only: name of the Postgres database to use (default: auth)"
 const postgresCAUsage = "vps only: PEM file with the CA certificate(s) that signed Postgres' server certificate, for sslmode=verify-full when that CA is not in the JVM trust store"

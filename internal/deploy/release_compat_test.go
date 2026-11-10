@@ -148,6 +148,11 @@ func TestCheckFreshDatabase(t *testing.T) {
 	if err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false, true); err != nil {
 		t.Errorf("--allow-fresh-database: %v", err)
 	}
+	// ... but never over the bundled Postgres, where there is no other database to have: the refusal stands.
+	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", true, true)
+	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || strings.Contains(err.Error(), "--allow-fresh-database") {
+		t.Errorf("bundled with the flag: the flag must not let the release through: %v", err)
+	}
 	// Anything else the manifest says is not configure's business.
 	for _, from := range []string{"0.7.5", "0.7.1", "0.7.6", "0.8.0", "dev"} {
 		if err := checkFreshDatabase(dir, from, "0.7.6", false, false); err != nil {

@@ -893,6 +893,22 @@ serves the admin console at `/central/admin/`, with the security headers
 Content-Security-Policy) and, when the browser used https, `Strict-Transport-Security`
 (with `--proxy external`, as `X-Forwarded-Proto` says).
 
+Its access log (`versola logs proxy`, on `local` and on `vps`) records the method, the path and the
+protocol of a request, and the Referer, never with a query string: the
+one-time first-login link (`?link_token=...`), OAuth codes and signed request
+objects would otherwise reach `docker logs` and whatever collects it. The
+path is the one after the proxy's own rewrites, and the query (`client_id`,
+`redirect_uri`, ...) is not kept. A deployment configured before this change
+picks the format up on its next `configure` followed by `up` (`bootstrap`
+does both); old log lines stay.
+
+What this does not cover: nginx's error log. On an upstream failure (a
+restart, a rolling upgrade, edge still starting) and when a rate limit
+refuses a request, it prints the request line, the upstream URL and the
+Referer, all with their query strings, and nginx cannot strip them. Treat
+`versola logs proxy` as sensitive until the first-login link is used. With
+`--proxy external` the proxy in front keeps its own log.
+
 `--proxy` picks how it's exposed:
 
 - **`nginx`** (default) — the proxy owns the server's ports 80 and 443.

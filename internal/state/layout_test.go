@@ -141,7 +141,7 @@ func TestLayout3EmptyFieldsOmitted(t *testing.T) {
 
 func TestLoadRefusesNewerLayout(t *testing.T) {
 	dir := activeDir(t)
-	writeState(t, dir, `{"schemaVersion":5,"target":"vps","version":"9.9.9"}`)
+	writeState(t, dir, `{"schemaVersion":6,"target":"vps","version":"9.9.9"}`)
 	if _, err := Load(); !errors.Is(err, ErrNewerSchema) {
 		t.Fatalf("got %v, want ErrNewerSchema", err)
 	}

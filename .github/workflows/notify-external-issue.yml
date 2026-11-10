@@ -10,4 +10,6 @@ permissions: {}
 jobs:
   notify:
     uses: versolauth/versola/.github/workflows/notify-external-issue.yml@main
-    secrets: inherit
+    # Only the one secret the called workflow needs, passed by name.
+    secrets:
+      NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}

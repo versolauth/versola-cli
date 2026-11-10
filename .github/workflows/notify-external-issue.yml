@@ -1,0 +1,13 @@
+name: Notify external issue
+
+# The filter and the message live in versolauth/versola; see the file there.
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: versolauth/versola/.github/workflows/notify-external-issue.yml@main
+    secrets: inherit

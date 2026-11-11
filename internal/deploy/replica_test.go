@@ -200,7 +200,7 @@ func TestAddNeverReadyIsUndone(t *testing.T) {
 	if n := slotNumbers(s.slots[AuthService]); !reflect.DeepEqual(n, []int{1}) {
 		t.Errorf("slots: %v", n)
 	}
-	if ops.files != nil && len(ops.files) != 0 {
+	if len(ops.files) != 0 {
 		t.Errorf("replicas.yml still lists %v", ops.files)
 	}
 }

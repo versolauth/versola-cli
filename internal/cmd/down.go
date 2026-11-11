@@ -45,7 +45,9 @@ func runDown(cmd *cobra.Command, args []string) error {
 	// While a rolling upgrade is under way, stopping everything is rarely
 	// what is meant (it takes a vps deployment down mid-upgrade), and `up`
 	// can't start it again afterwards -- only `rollout` can.
+	target := ""
 	if st, err := state.Load(); err == nil {
+		target = st.Target
 		if err := deploy.DownBlocked(st, downForce); err != nil {
 			return err
 		}
@@ -60,10 +62,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	dockerArgs := state.ComposeArgs(composePath, "down")
-	if removeVolumes {
-		dockerArgs = append(dockerArgs, "--volumes")
-	}
+	dockerArgs := state.ComposeArgs(composePath, downAction(target, removeVolumes)...)
 
 	c := exec.Command("docker", dockerArgs...)
 	c.Stdout = os.Stdout
@@ -73,4 +72,17 @@ func runDown(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("Stopped.")
 	return nil
+}
+
+func downAction(target string, volumes bool) []string {
+	if volumes {
+		return []string{"down", "--volumes"}
+	}
+	// Released local bundles use the Postgres image's anonymous volume.
+	// Removing its container loses Compose's association with that data;
+	// a later up silently creates an empty database instead of reusing it.
+	if target == "local" {
+		return []string{"stop"}
+	}
+	return []string{"down"}
 }

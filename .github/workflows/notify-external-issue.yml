@@ -1,0 +1,15 @@
+name: Notify external issue
+
+# The filter and the message live in versolauth/versola; see the file there.
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: versolauth/versola/.github/workflows/notify-external-issue.yml@main
+    # Only the one secret the called workflow needs, passed by name.
+    secrets:
+      NOTIFY_TOKEN: ${{ secrets.NOTIFY_TOKEN }}

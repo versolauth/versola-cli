@@ -744,8 +744,8 @@ that saves state with this CLI, do not go back to an older one on the same
 machine. A deployment in layout 5 cannot go back at all (an older CLI would
 not know how to run its Postgres, and a copy of `state.json` is in layout 5
 too): the error touches nothing in Docker or in `~/.versola`, and installing
-the newer release again (`versola upgrade`, or the install script with its
-version) brings the commands back. For any other deployment, copy
+the newer release again (the install script with its version; `versola
+upgrade` only if the older release's latest stable is the newer one) brings the commands back. For any other deployment, copy
 `~/.versola/active/state.json` first if you may need to go back.
 
 Deployments made by much older versola-clis -- before `state.json`, before
@@ -2113,7 +2113,15 @@ asking GitHub which release is the latest. A pre-release (`0.4.0-rc1`) is
 installed too, with a warning. A release older than the running binary is
 installed after a warning that a newer versola-cli may have written
 deployment state (`~/.versola/active`) an older one can't read (it stops
-with a "newer schema" error, see "Upgrading the CLI" above). What isn't a
+with a "newer schema" error, see "Upgrading the CLI" above). When the state
+on this machine is in layout 5 (see above) that is no longer a "may": the
+warning, read-only (`upgrade` looks at the record and prints nothing from it),
+says that the older CLI will stop on every command that reads the state, that
+nothing is lost, and gives the way back (the install script with this release's version, for macOS/Linux and
+Windows; `versola upgrade --version` only if the older release has that flag), and
+the question becomes
+"Install it anyway?" (`--yes` answers it). In layout 4 the warning is the
+generic one. What isn't a
 version (`latest`, a path, anything but `X.Y.Z` or `X.Y.Z-pre`) is refused
 with exit code 2 before anything is downloaded; a release that doesn't exist says so and points at the
 releases page. `--check` and `--version` don't go together (exit code 2).

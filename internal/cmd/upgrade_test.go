@@ -149,19 +149,135 @@ func TestNormalizeReleaseTag(t *testing.T) {
 
 func TestPinnedVersionWarnings(t *testing.T) {
 	var out bytes.Buffer
-	warnAboutPinnedVersion(&out, "0.4.0-rc1", "0.3.2")
+	warnAboutPinnedVersion(&out, "0.4.0-rc1", "0.3.2", 0)
 	if got := out.String(); got != "Warning: 0.4.0-rc1 is a pre-release.\n" {
 		t.Errorf("pre-release: %q", got)
 	}
 	out.Reset()
-	warnAboutPinnedVersion(&out, "0.3.1", "0.3.2")
+	warnAboutPinnedVersion(&out, "0.3.1", "0.3.2", 0)
 	if got := out.String(); !strings.Contains(got, "0.3.1 is older than this binary (0.3.2)") || !strings.Contains(got, "cannot read") {
 		t.Errorf("downgrade: %q", got)
 	}
 	out.Reset()
-	warnAboutPinnedVersion(&out, "0.3.3", "0.3.2")
+	warnAboutPinnedVersion(&out, "0.3.3", "0.3.2", 0)
 	if out.Len() != 0 {
 		t.Errorf("an ordinary newer release warned: %q", out.String())
+	}
+}
+
+// With the deployment recorded in layout 5, going back to an older release is
+// not "may": the warning says the older CLI will stop on the state, that
+// nothing is lost, and the commands that bring the current release back. In
+// layout 4 (or no record) the generic warning stays, word for word.
+func TestPinnedVersionWarningForLayout5(t *testing.T) {
+	var out bytes.Buffer
+	warnAboutPinnedVersion(&out, "0.3.1", "0.8.0", 5)
+	got := out.String()
+	for _, want := range []string{
+		"state layout 5", "cannot read", "this one reads up to 4 -- upgrade versola",
+		"install.sh | sh -s 0.8.0", "VERSOLA_VERSION", "install.ps1 -useb | iex", "Nothing is lost", "older releases only have `versola upgrade`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("layout 5: lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "may have written") {
+		t.Errorf("layout 5 still hedges: %s", got)
+	}
+	for _, layout := range []int{0, 3, 4} {
+		out.Reset()
+		warnAboutPinnedVersion(&out, "0.3.1", "0.8.0", layout)
+		if g := out.String(); !strings.Contains(g, "may have written") || strings.Contains(g, "install.sh") {
+			t.Errorf("layout %d: %q", layout, g)
+		}
+	}
+	// A release that is not older, or a pre-release newer one, is not a way back.
+	out.Reset()
+	warnAboutPinnedVersion(&out, "0.9.0", "0.8.0", 5)
+	if out.Len() != 0 {
+		t.Errorf("a newer release warned: %q", out.String())
+	}
+}
+
+// Once a release reads layout 5, going back to it (or between two such
+// releases) is not a lockout and must not be said to be one.
+func TestGoesBackBeyondStateStopsAtFirstLayout5Release(t *testing.T) {
+	old := layout5FirstRelease
+	layout5FirstRelease = "0.5.0"
+	t.Cleanup(func() { layout5FirstRelease = old })
+	for _, c := range []struct {
+		tag  string
+		want bool
+	}{
+		{"0.4.9", true},
+		{"0.5.0-rc1", true},
+		{"0.5.0", false},
+		{"0.6.0", false},
+	} {
+		if got := goesBackBeyondState(c.tag, "0.8.0", 5); got != c.want {
+			t.Errorf("%s: got %v", c.tag, got)
+		}
+	}
+}
+
+func TestPinnedQuestion(t *testing.T) {
+	if got := pinnedQuestion("0.3.1", "0.8.0", 5); got != "Install it anyway?" {
+		t.Errorf("layout 5: %q", got)
+	}
+	for _, c := range []struct {
+		tag    string
+		layout int
+	}{{"0.3.1", 4}, {"0.3.1", 0}, {"0.9.0", 5}} {
+		if got := pinnedQuestion(c.tag, "0.8.0", c.layout); got != "Install now?" {
+			t.Errorf("%+v: %q", c, got)
+		}
+	}
+}
+
+func TestGoesBackBeyondState(t *testing.T) {
+	for _, c := range []struct {
+		tag, cur string
+		layout   int
+		want     bool
+	}{
+		{"0.3.1", "0.8.0", 5, true},
+		{"0.8.0-rc1", "0.8.0", 5, true},
+		{"0.3.1", "0.8.0", 4, false},
+		{"0.3.1", "0.8.0", 0, false},
+		{"0.9.0", "0.8.0", 5, false},
+		{"0.8.0", "0.8.0", 5, false},
+	} {
+		if got := goesBackBeyondState(c.tag, c.cur, c.layout); got != c.want {
+			t.Errorf("%+v: got %v", c, got)
+		}
+	}
+}
+
+// deployedLayout only reads the record: its number comes back, the file is
+// not touched, and no record or an unreadable one is 0.
+func TestDeployedLayoutReadsOnly(t *testing.T) {
+	writeVpsState(t, `{"schemaVersion":5,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1","postgresMode":"bundled"}`)
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".versola", "active", "state.json")
+	before, _ := os.ReadFile(path)
+	if got := deployedLayout(); got != 5 {
+		t.Errorf("layout %d, want 5", got)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Error("the record changed")
+	}
+	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1"}`)
+	if got := deployedLayout(); got != 4 {
+		t.Errorf("layout %d, want 4", got)
+	}
+	writeVpsState(t, `{"schemaVersion":99}`)
+	if got := deployedLayout(); got != 0 {
+		t.Errorf("a newer record: layout %d, want 0", got)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	if got := deployedLayout(); got != 0 {
+		t.Errorf("no record: layout %d, want 0", got)
 	}
 }
 

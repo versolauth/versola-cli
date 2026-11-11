@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/versolauth/versola-cli/internal/exitcode"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // upgradeRepo is versola-cli's own repository -- not to be confused with
@@ -142,7 +143,9 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Already on %s.\n", version)
 			return nil
 		}
-		warnAboutPinnedVersion(os.Stdout, tag, version)
+		layout := deployedLayout()
+		warnAboutPinnedVersion(os.Stdout, tag, version, layout)
+		question = pinnedQuestion(tag, version, layout)
 		fmt.Printf("Installing versola-cli %s (you have %s).\n", tag, version)
 	} else {
 		latestTag, err := releaseClient(latestTimeout).Latest(upgradeRepo)
@@ -263,17 +266,75 @@ func normalizeReleaseTag(s string) (string, error) {
 	return tag, nil
 }
 
+// deployedLayout is the layout of the state record on this machine: 0 when
+// there is none or it cannot be read (then the generic warning stands). A
+// read-only look: state.Load changes nothing, and only the number leaves it.
+func deployedLayout() int {
+	st, err := state.Load()
+	if err != nil {
+		return 0
+	}
+	return st.SchemaVersion
+}
+
+// layout5FirstRelease is the first versola-cli release that reads state layout
+// 5, "" while no release has it. A release from it on reads layout 5, so going
+// back to it (or between two such releases) locks nobody out. SET IT when the
+// first release that writes layout 5 is tagged: until then every release the
+// command can install is older than layout 5 and the definite warning is true.
+var layout5FirstRelease = ""
+
+// goesBackBeyondState is whether installing tag over current would leave
+// this deployment's state (in layout `layout`) unreadable by the CLI it
+// installs: tag is older than the running binary and than the first release
+// that reads layout 5, and the record carries a field of a layout newer than
+// BaseSchemaVersion, which every older CLI refuses ("state layout 5, this one
+// reads up to 4"). Layout 4 and lower were read by every release this command
+// can install, so it is false there.
+func goesBackBeyondState(tag, current string, layout int) bool {
+	cmp, ok := compareVersions(tag, current)
+	if !ok || cmp >= 0 || layout <= state.BaseSchemaVersion {
+		return false
+	}
+	if layout5FirstRelease != "" {
+		if c, ok := compareVersions(tag, layout5FirstRelease); !ok || c >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// pinnedQuestion is what `upgrade --version` asks before replacing the binary:
+// sharper when the release would lock the deployment's state out.
+func pinnedQuestion(tag, current string, layout int) string {
+	if goesBackBeyondState(tag, current, layout) {
+		return "Install it anyway?"
+	}
+	return "Install now?"
+}
+
 // warnAboutPinnedVersion says what is unusual about the release the customer
 // asked for: a pre-release, or one older than the binary they run, since a
 // newer CLI may have written state (~/.versola/active) that an older one
 // cannot read. Neither is refused: both are things someone does on purpose.
-func warnAboutPinnedVersion(w io.Writer, tag, current string) {
+// layout is deployedLayout(): above BaseSchemaVersion the second warning is
+// not "may" but a fact, and names the commands that bring the newer CLI back
+// (the install script with the version, because `versola upgrade` run by the
+// older CLI asks for the latest stable release, and a layout-5 release may
+// still be a pre-release).
+func warnAboutPinnedVersion(w io.Writer, tag, current string, layout int) {
 	if _, pre, ok := parseVersion(tag); ok && len(pre) > 0 {
 		fmt.Fprintf(w, "Warning: %s is a pre-release.\n", tag)
 	}
-	if cmp, ok := compareVersions(tag, current); ok && cmp < 0 {
-		fmt.Fprintf(w, "Warning: %s is older than this binary (%s). A newer versola-cli may have written deployment state (~/.versola/active) that an older one cannot read; if a command then reports an unreadable state layout, install the newer release again.\n", tag, current)
+	cmp, ok := compareVersions(tag, current)
+	if !ok || cmp >= 0 {
+		return
 	}
+	if goesBackBeyondState(tag, current, layout) {
+		fmt.Fprintf(w, "Warning: %s is older than this binary (%s), and the deployment on this machine is recorded in state layout %d, which %s cannot read: every command of it that reads the state will stop with \"state layout %d, this one reads up to %d -- upgrade versola\".\nNothing is lost and nothing changes in Docker or in ~/.versola, but to run Versola commands again you will have to install %s again, with the install script and its version:\n  macOS/Linux: curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s %s\n  Windows:     $env:VERSOLA_VERSION = \"%s\"; iwr https://raw.githubusercontent.com/%s/main/install.ps1 -useb | iex\n(If %s has `versola upgrade --version`, that works too; older releases only have `versola upgrade`, which installs the latest stable release.)\n", tag, current, layout, tag, layout, state.BaseSchemaVersion, current, upgradeRepo, current, current, upgradeRepo, tag)
+		return
+	}
+	fmt.Fprintf(w, "Warning: %s is older than this binary (%s). A newer versola-cli may have written deployment state (~/.versola/active) that an older one cannot read; if a command then reports an unreadable state layout, install the newer release again.\n", tag, current)
 }
 
 // executablePath returns the real, symlink-resolved path to the running

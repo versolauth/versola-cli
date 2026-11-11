@@ -28,7 +28,11 @@ func checkFreshDatabase(dir, running, version, target string, bundled, allow boo
 	if res.Verdict != manifest.FreshDatabase {
 		return nil
 	}
-	if allow {
+	// Never on the bundled Postgres, whatever the caller passes (the command
+	// refuses the flag there earlier, RefuseFreshDatabaseFlag): no other
+	// database can be put behind it, so the refusal below, which does not
+	// offer the flag, is the answer.
+	if allow && !bundled {
 		fmt.Printf("Versola %s says it cannot be upgraded in place from %s: going on because of --allow-fresh-database -- the database behind it has to be a new, empty one.\n", version, running)
 		return nil
 	}

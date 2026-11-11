@@ -11,6 +11,7 @@ import (
 
 	"github.com/versolauth/versola-cli/internal/checks"
 	"github.com/versolauth/versola-cli/internal/docker"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -146,6 +147,26 @@ func refuseBundledDBChange(stored *state.State, db string) error {
 		return fmt.Errorf("--postgres-db %q: this deployment's Postgres was created with the database %q, and it is only created on the first start. Renaming is a dump and a restore, which configure does not do", db, current)
 	}
 	return nil
+}
+
+// RefuseFreshDatabaseFlag refuses --allow-fresh-database over a deployment that
+// runs its own Postgres in a container, as a usage error and before anything is
+// asked or pulled. The flag says a new, empty database is already behind the
+// deployment, and checkFreshDatabase then lets the release through; here there
+// is no other database to put behind it (resolvePostgres refuses --postgres-host
+// and refuseBundledDBChange another --postgres-db), so the configure would go
+// on, replace the record and the previous bundle, and `migrate` would then
+// fail on a Flyway checksum of the old database. rec is the deployment this
+// run replaces (StoredVps): nil, a deployment on a Postgres of the customer's
+// own, and a first deployment (which has nothing to refuse) pass.
+func RefuseFreshDatabaseFlag(rec *RecordedVps, version string) error {
+	if rec == nil || rec.PostgresMode != PostgresModeBundled {
+		return nil
+	}
+	return exitcode.With(exitcode.Usage, fmt.Errorf("--allow-fresh-database is for a deployment on your own Postgres, where a new, empty database can be put behind it (--postgres-host, --postgres-db). "+
+		"This deployment runs its own Postgres in a container, so there is no other database to point it at and the flag would not help. "+
+		"Leave it out: configure itself finds out whether the release can be upgraded in place, and says what to do when it cannot. "+
+		"Starting over with an empty database instead? %s.", startOverSteps(version)))
 }
 
 // bundledServiceLine is how the compose file declares the service: a key of

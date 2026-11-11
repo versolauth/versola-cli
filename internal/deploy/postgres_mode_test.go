@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/versolauth/versola-cli/internal/checks"
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -180,6 +181,34 @@ func TestRefuseBundledDBChange(t *testing.T) {
 	}
 	if err := refuseBundledDBChange(named, "auth"); err == nil || !strings.Contains(err.Error(), `"versola"`) {
 		t.Errorf("a new name over a recorded one must be refused, naming the current one: %v", err)
+	}
+}
+
+func TestRefuseFreshDatabaseFlag(t *testing.T) {
+	// Nothing to refuse: no record (a first deployment), and a deployment whose Postgres is the customer's own,
+	// where a new, empty database can be put behind it.
+	if err := RefuseFreshDatabaseFlag(nil, "0.7.6"); err != nil {
+		t.Errorf("no record: %v", err)
+	}
+	if err := RefuseFreshDatabaseFlag(&RecordedVps{PostgresHost: "db.example.com:5432"}, "0.7.6"); err != nil {
+		t.Errorf("own Postgres: %v", err)
+	}
+	// A record from before the layout that knows the mode is an external one (resolvePostgres): also not refused here.
+	if err := RefuseFreshDatabaseFlag(&RecordedVps{}, "0.7.6"); err != nil {
+		t.Errorf("old record: %v", err)
+	}
+
+	err := RefuseFreshDatabaseFlag(&RecordedVps{PostgresMode: PostgresModeBundled, PostgresHost: BundledPostgresHost}, "0.7.6")
+	if err == nil {
+		t.Fatal("the bundled Postgres must refuse --allow-fresh-database")
+	}
+	for _, want := range []string{"--allow-fresh-database", "no other database", "`versola backup create`", "`versola uninstall --purge`", "`versola bootstrap vps 0.7.6 ...`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal lacks %q: %v", want, err)
+		}
+	}
+	if code := exitcode.Code(err); code != exitcode.Usage {
+		t.Errorf("exit code %d, want %d", code, exitcode.Usage)
 	}
 }
 

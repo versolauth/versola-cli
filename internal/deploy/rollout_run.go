@@ -199,11 +199,18 @@ func freshDatabaseError(r manifest.Result, rollout bool, target string, bundled 
 	if !bundled {
 		own = " (with your own Postgres, name an empty database: `--postgres-host <host:port> --postgres-db <empty database>`)"
 	}
-	way := fmt.Sprintf("Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall --purge` (it asks first and removes this deployment's data and secrets) and `versola bootstrap vps %s ...`%s.", r.To, own)
+	way := startOverSteps(r.To) + own + "."
 	if !rollout && !bundled {
 		way += fmt.Sprintf(" Already on a new, empty database? Run `versola configure vps %s ... --allow-fresh-database`, then `versola migrate` and `versola up`.", r.To)
 	}
 	return fmt.Errorf("version %s cannot be upgraded in place from %s: the release says it needs a fresh database%s, so neither a rollout nor `configure` followed by `migrate` can work. %s", r.To, r.From, notes, way)
+}
+
+// startOverSteps is the way out every refusal of a release that needs a fresh
+// database ends on (and RefuseFreshDatabaseFlag's): the one place that says
+// which commands start over, so that the refusals cannot drift apart.
+func startOverSteps(version string) string {
+	return fmt.Sprintf("Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall --purge` (it asks first and removes this deployment's data and secrets) and `versola bootstrap vps %s ...`", version)
 }
 
 // RolloutCompatibility asks the release being deployed what it says about an

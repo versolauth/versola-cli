@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
+	"github.com/versolauth/versola-cli/internal/exitcode"
 	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
@@ -218,5 +220,57 @@ func TestRememberedVpsFlagsOnConfigureAndBootstrap(t *testing.T) {
 		if f := c.Flags().Lookup("proxy"); f.DefValue != proxy.ModeNginx {
 			t.Errorf("%s --proxy defaults to %q", c.Name(), f.DefValue)
 		}
+	}
+}
+
+// A connection URL pasted as --postgres-host is refused in all three
+// commands as a usage error (exit code 2), before the lock and any question
+// (an empty home, no --yes: a run that got past it would stop at the
+// question with exit code 4, or at Docker), and the password in it appears
+// nowhere in the output.
+func TestPostgresHostFlagRefusedBeforeAnything(t *testing.T) {
+	const pw = "s3cr3tPW"
+	bad := []string{"postgres://versola:" + pw + "@db.example.com:5432/auth", "versola:" + pw + "@db.example.com", "db.example.com/auth"}
+	// The flags live on the package's own commands (and their variables):
+	// put every one back to its default for the tests after this one.
+	t.Cleanup(func() {
+		for _, c := range []*cobra.Command{configureCmd, bootstrapCmd, doctorCmd} {
+			c.Flags().VisitAll(func(f *pflag.Flag) {
+				if f.Changed {
+					_ = f.Value.Set(f.DefValue)
+					f.Changed = false
+				}
+			})
+		}
+	})
+	for _, args := range [][]string{
+		{"configure", "vps", "0.7.6", "--auth-url", "https://id.example.com"},
+		{"bootstrap", "vps", "0.7.6", "--auth-url", "https://id.example.com"},
+		{"doctor", "--target", "vps", "--auth-url", "https://id.example.com"},
+	} {
+		for _, host := range bad {
+			writeVpsState(t, `{}`)
+			var stderr bytes.Buffer
+			code := Run(append(append([]string{}, args...), "--postgres-host", host), &stderr)
+			if code != exitcode.Usage {
+				t.Errorf("%s %q: exit code %d, want %d:\n%s", args[0], host, code, exitcode.Usage, stderr.String())
+			}
+			if strings.Contains(stderr.String(), pw) || !strings.Contains(stderr.String(), "host or host:port") {
+				t.Errorf("%s %q: stderr:\n%s", args[0], host, stderr.String())
+			}
+		}
+	}
+}
+
+// A value recorded by an earlier run is not refused again: only the flag as
+// typed is checked.
+func TestPostgresHostFlagOnlyCheckedWhenGiven(t *testing.T) {
+	c := newVpsFlagsCmd()
+	if err := checkPostgresHostFlag(c, "not a host"); err != nil {
+		t.Errorf("not given: %v", err)
+	}
+	c = newVpsFlagsCmd("--postgres-host", "not a host")
+	if err := checkPostgresHostFlag(c, "not a host"); err == nil {
+		t.Error("given: no error")
 	}
 }

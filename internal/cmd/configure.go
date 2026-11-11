@@ -101,6 +101,10 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	if err := rejectVpsOnlyFlags(cmd, target); err != nil {
 		return err
 	}
+	// A pasted URL (with its password) is refused before anything is echoed.
+	if err := checkPostgresHostFlag(cmd, configurePostgresHost); err != nil {
+		return err
+	}
 	// Validated before the lock and the confirmation: a typo'd CA path
 	// should fail immediately, not after the user has said yes.
 	pg, err := deploy.PostgresOptions{DB: configurePostgresDB, CAFile: configurePostgresCA}.Validate(target)

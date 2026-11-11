@@ -154,3 +154,48 @@ func TestPostgresOptionsStored(t *testing.T) {
 		t.Fatalf("toolsArgs = %v, want %v", got, want)
 	}
 }
+
+func TestParsePostgresHost(t *testing.T) {
+	for _, ok := range []string{"", "db", "db.example.com", "DB.Example.com:5432", "10.0.0.5", "10.0.0.5:65535", "127.0.0.1:1", "[::1]", "[::1]:5432", "[2001:db8::5]:5433", "my_db-1.internal", "db.example.com.", "db.example.com.:5432"} {
+		if got, err := ParsePostgresHost(ok); err != nil || got != ok {
+			t.Errorf("%q: got %q, %v", ok, got, err)
+		}
+	}
+	const pw = "s3cr3tPW"
+	for _, bad := range []string{
+		"postgres://versola:" + pw + "@db.example.com:5432/auth",
+		"versola:" + pw + "@db.example.com",
+		"db.example.com/auth",
+		"db.example.com:5432/",
+		"db.example.com?sslmode=require",
+		"db example.com",
+		"db.example.com:",
+		"db.example.com:0",
+		"db.example.com:65536",
+		"db.example.com:54x2",
+		"db.example.com:-1",
+		":5432",
+		"::1",
+		"2001:db8::5",
+		"[::1",
+		"[::1]5432",
+		"[db.example.com]:5432",
+		"[10.0.0.5]",
+		"db..example.com",
+		".db",
+		"db.example.com..",
+		"db$.example.com",
+	} {
+		_, err := ParsePostgresHost(bad)
+		if err == nil {
+			t.Errorf("%q: accepted", bad)
+			continue
+		}
+		if strings.Contains(err.Error(), pw) || (len(bad) > 12 && strings.Contains(err.Error(), bad)) {
+			t.Errorf("%q: the error repeats the value: %v", bad, err)
+		}
+		if !strings.Contains(err.Error(), "host or host:port") {
+			t.Errorf("%q: no shape in the error: %v", bad, err)
+		}
+	}
+}

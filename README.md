@@ -765,6 +765,13 @@ and remove `~/.versola/active` by hand, or configure again.
 
 ### Postgres on vps
 
+`--postgres-host` is `host` or `host:port`: a name or an IP, a port from 1 to
+65535, an IPv6 address in brackets (`db.example.com`, `10.0.0.5:5432`,
+`[::1]:5432`). Anything else -- a connection URL, a user name or password, a
+path, a space -- is a usage error (exit code 2) in `configure`, `bootstrap` and
+`doctor`, before the lock and any question, and the message never repeats the
+value, so a password pasted by mistake is not echoed or recorded.
+
 Without `--postgres-host`, `configure vps` makes Postgres a service of the
 deployment: a `postgres` container (the image `versola-tools` pins) on the
 host network, listening on `127.0.0.1:5432` only, so port 5432 has to be free

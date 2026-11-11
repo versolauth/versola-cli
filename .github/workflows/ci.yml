@@ -79,6 +79,20 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # The SQL script `backup restore` runs (pgRestoreScript) empties the
+      # database and commits only when pg_restore finished; its unit tests
+      # match text. This runs it against a real postgres:18-alpine (Docker is
+      # on the runner): a good dump over a changed database, a truncated
+      # dump, garbage. Without VERSOLA_PG_IT=1 the test skips, so the step
+      # also fails when the test did not actually pass (a skip is `ok` to go
+      # test). Linux only: there are no Linux containers on the Windows job.
+      - name: Restore script against a real Postgres
+        env:
+          VERSOLA_PG_IT: "1"
+        run: |
+          go test ./internal/deploy -run 'TestPgRestoreScriptAgainstRealPostgres$' -count=1 -timeout 5m -v | tee "$RUNNER_TEMP/pg-restore-it.log"
+          grep -q -- '--- PASS: TestPgRestoreScriptAgainstRealPostgres' "$RUNNER_TEMP/pg-restore-it.log"
+
   # The windows half of the *_unix.go / *_windows.go pairs (docker shield,
   # state lock) is otherwise only compiled, never run. internal/proxy is
   # left out: its tests need symlink privileges and POSIX paths, and the

@@ -277,6 +277,32 @@ func OutputWithin(timeout time.Duration, args ...string) (stdout []byte, stderr 
 	return out, errBuf.String(), err
 }
 
+// RunWithStdin runs docker with in as its standard input and returns its
+// stderr for the caller to report: for feeding a dump or an archive of a
+// volume to a container (`backup restore`). Its stdout goes to the user's
+// terminal like Run's. Not bounded by a timeout: how long it takes depends on
+// the size of what is fed.
+func RunWithStdin(in io.Reader, args ...string) (stderr string, err error) {
+	return RunWithStdinTo(in, os.Stdout, args...)
+}
+
+// RunWithStdinTo is RunWithStdin with docker's stdout written to w, for a
+// short answer to read (a count) rather than show.
+func RunWithStdinTo(in io.Reader, w io.Writer, args ...string) (stderr string, err error) {
+	done, err := track()
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	c := command(args...)
+	c.Stdin = in
+	c.Stdout = w
+	var errBuf strings.Builder
+	c.Stderr = &errBuf
+	err = c.Run()
+	return errBuf.String(), err
+}
+
 // RunTo runs docker with its stdout written to w (a dump, an archive of a
 // volume: data, not text for the terminal) and returns its stderr for the
 // caller to report. Not bounded by a timeout: how long a dump takes depends

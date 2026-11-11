@@ -1671,7 +1671,7 @@ versola backup restore <archive> [--replace-database] [--yes]
 
 | Member | What |
 |---|---|
-| `manifest.json` | CLI and Versola versions, target, Postgres mode (`bundled`: the deployment's own container, and local; `external`: yours), database and role, the vps proxy's configuration generation, and the size and SHA-256 of every other member; what was left out and why |
+| `manifest.json` | CLI and Versola versions, target, Postgres mode (`bundled`: the deployment's own container, and local; `external`: yours), database and role, the vps proxy's configuration generation, whether the vps certificate comes from Let's Encrypt staging (`acmeStaging`, only when it does), and the size and SHA-256 of every other member; what was left out and why |
 | `database.dump` | `pg_dump -Fc` of the database. The deployment's own Postgres is dumped inside its container (`docker exec`, the server's own `pg_dump`). After `versola down` that container is gone, and `backup create` starts that one service, only it, for the dump and stops it again afterwards (a Postgres that was already running is left running; a Ctrl-C or a dropped SSH session waits until it is stopped again; if it cannot be stopped the command warns and the archive is still written; if it cannot start, the error names `versola logs postgres`). Yours from a throw-away `postgres:18-alpine` container on the host network, connecting and verifying TLS as the services do, with the password read by Docker from `auth.secrets.env`, never put on a command line |
 | `openbao-volume.tar` | OpenBao's data volume. OpenBao's file storage has no online snapshot, so OpenBao is stopped for the copy (seconds; the services keep running, they read their secrets from their own files), then started and unsealed with the saved key (also when the copy failed). A Ctrl-C, a dropped SSH session or a kill meanwhile waits until it runs again (it says so at once). The image the copy runs in (`postgres:18-alpine`) is pulled before the stop, never while OpenBao is down. It is stopped only when it is sure to come back, so no question is asked: its configuration file still exists, and this machine has an unseal key and a root token the running OpenBao accepts. Otherwise (OpenBao set up by hand, a stale key file) it is not stopped and the copy is left out, with the reason; the archive is still written, but the command fails (exit code 1), since a dump without OpenBao's data can't be read after a restore. A stopped OpenBao is copied as it is |
 | `openbao/` | `<target>.json`, `<target>-admin.json` (the root token and unseal key), `<target>-postgres-role.sql`, the ones present |
@@ -1743,7 +1743,10 @@ the output of the first names the next:
    <version> ...` to run next, with the flags the archive's record holds
    (`--auth-url`, `--proxy`, `--central-url`, the public names,
    `--cert-lifetime-days`, `--est`, `--registry`, `--postgres-db`, and
-   `--setup-openbao` when OpenBao was set up by hand). The record itself is not
+   `--setup-openbao` when OpenBao was set up by hand, and `--acme-staging` when
+   the deployment got its certificate from Let's Encrypt staging: the record
+   does not keep it, so `backup create` writes it in the manifest; an archive made
+before that has no such note, so add the flag yourself if the old server used it). The record itself is not
    put back: `configure` writes a new one.
 2. **After that `configure`**, on the same Versola version as the archive, with
    the services stopped (`versola down`): the same command puts the database
@@ -1778,7 +1781,8 @@ or `versola rollout --abort`, is then the next step.
 so they show damage, not who made it. The dump is run as SQL by the
 deployment's own database role, and the `--registry` and `--auth-url` in the
 printed `configure` come from the archive's record (the output says the command
-is built from it).
+is built from it), and so does `--acme-staging`: if browsers reject the
+certificate after the restore, run `configure` again with `--acme-staging=false`.
 
 **Move to another server.** On the old one `versola backup create`, and copy the
 archive off the server. On the new one (the CLI installed, `versola doctor

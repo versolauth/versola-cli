@@ -234,6 +234,39 @@ different memory checks, not just a different number:
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
   rather than quietly checking the wrong machine's memory.
 
+**`--bundle <file>`** writes one archive for whoever helps you with a failed or
+ailing deployment (and exits as `doctor` would: the checks failing is why it is
+wanted). `<file>` is a name that does not exist yet, or a directory (it then
+makes `versola-diagnostics-<target>-<UTC time>.tar.gz` in it); it never replaces
+a file, is mode 0600 and is packed under a temp name (made before anything is gathered, so a directory that cannot be written fails at once) and moved into place at the end without replacing anything.
+The target is the one of the deployment on this machine unless `--target` is
+given. It holds no password or key (see below for how that is kept), but it identifies the server: it names your domain, the addresses the names resolve to, your database host and user name when the database is your own, the paths under your home directory, and the user you ran it as. It holds:
+
+| Member | What |
+|---|---|
+| `manifest.json` | CLI version, OS and architecture, time, target, Versola version, size and SHA-256 of every member, what could not be made and why, and what was left out |
+| `doctor.txt` | what `doctor` printed |
+| `versions.txt` | this CLI, the OS, Docker and Compose (a call that fails is a line saying so) |
+| `state.json` | the CLI's record of the deployment (versions, the auth URL and public names, the proxy mode, the Postgres mode and, for your own Postgres, its host and database name; no secret) |
+| `status.json`, `stats.json` | `status --json` and `stats --json`, as those commands run: `status` probes the certificates over the network, and `stats` on a vps may start a throw-away `psql` container to count the Postgres connections, which reads the live database |
+| `files/compose.yml`, `files/replicas.yml`, `files/proxy.yml`, `files/release.json` | the generated files of the deployment's bundle that hold no secret, a fixed list; whatever looks like a secret in them (a private key block, the rest of a line after a password, secret, token, key or credential name, a bearer token, the password of a URL) is blanked as a second line of defence, a best effort that does not promise to catch everything |
+
+Never in it: the `*.secrets.env` files, OpenBao's data and
+`~/.versola/openbao` (credentials and keys), the containers' environment, the
+database. A member that cannot be made (Docker is down: the usual reason for
+the archive; no deployment yet) is listed in the manifest and the output with
+the reason, and the rest is written. A member over 8 MiB is cut there.
+
+**`--logs`** (with `--bundle` only) adds `logs/<service>.log`: the last 200
+lines of every service, with timestamps, as `versola logs` shows them. They are
+**not redacted**: they can hold addresses, names and ids of your users, and
+credentials too (Postgres logs the text of a failed statement, `CREATE ROLE ...
+PASSWORD` included; the verifier and the quoted password of such a statement
+are blanked, as a best effort, and nothing else is). They are left out by
+default for that reason; read them before you send the file. The rest of the
+archive is also scrubbed of a password a flag you typed may have carried (a
+URL in `--postgres-host`, say) in `doctor.txt`, the record, status and stats.
+
 Exits 3 if any check fails (see "Exit codes"). `bootstrap`/`configure` run the
 machine checks themselves before doing anything (Docker, memory, disk,
 the proxy's ports, port 5432 for the Postgres container); the name of

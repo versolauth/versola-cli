@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -27,6 +28,13 @@ import (
 var doctorTarget, doctorAuthURL, doctorCentralURL string
 var doctorMTLSDomain, doctorCentralMTLSDomain, doctorCentralDomain string
 var doctorProxy, doctorPostgresHost, doctorPostgresCA, doctorRegistry string
+var doctorBundle string
+var doctorLogs bool
+
+// doctorDockerOK is whether doctorChecks found the Docker daemon answering: the
+// diagnostics archive skips what needs Docker when it did not, instead of
+// waiting on a daemon that accepts a connection and never replies.
+var doctorDockerOK = true
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor",
@@ -72,6 +80,8 @@ func addDoctorFlags(cmd *cobra.Command) {
 	f.StringVar(&doctorPostgresHost, "postgres-host", "", "vps only: the --postgres-host you will deploy with, if you use a Postgres of your own (without it, port 5432 is checked for the Postgres container)")
 	f.StringVar(&doctorPostgresCA, "postgres-ca", "", "vps only: the --postgres-ca you will deploy with (PEM file); the CA the connection to your Postgres is verified against")
 	f.StringVar(&doctorRegistry, "registry", "", "vps only: the --registry you will deploy with; the registry whose answer over HTTPS is checked (default: ghcr.io)")
+	f.StringVar(&doctorBundle, "bundle", "", "write a diagnostics archive for whoever helps you: what doctor says, versions, the deployment's record, status and stats, and generated files without secrets, to this file (or into this directory), never replacing a file. Checks as the deployment on this machine unless --target is given. Holds no secret value; see the README, \"doctor --bundle\"")
+	f.BoolVar(&doctorLogs, "logs", false, "with --bundle: add the last lines of every service's log (not redacted: read them before you send the file)")
 	f.StringVar(&doctorTarget, "target", "local", `"local" or "vps": the target you will deploy to (the memory and port checks differ)`)
 	// The public names, and the registry, are for remote edges and test
 	// registries: under --help-all (see help.go), as in configure.
@@ -79,6 +89,51 @@ func addDoctorFlags(cmd *cobra.Command) {
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
+	if doctorBundle == "" {
+		if doctorLogs {
+			return exitcode.With(exitcode.Usage, fmt.Errorf("--logs goes with --bundle: it adds the services' logs to the archive"))
+		}
+		return doctorChecks(cmd, os.Stdout, false)
+	}
+	// Before any check: a name that is taken is a usage error, not something to
+	// find out after the checks have run.
+	if err := deploy.CheckDiagTarget(doctorBundle); err != nil {
+		return exitcode.With(exitcode.Usage, err)
+	}
+	// What doctor says goes into the archive as it was printed.
+	var said bytes.Buffer
+	doctorDockerOK = true
+	checkErr := doctorChecks(cmd, io.MultiWriter(os.Stdout, &said), true)
+	// The archive is made when the checks ran: they passed, or found problems
+	// (exit code 3), which is why it is wanted. Any other error is a flag or an
+	// input doctor refused before it checked anything (a usage error, a name
+	// that does not parse): there the customer needs the message, not a file
+	// whose name is then taken when they run it again.
+	if checkErr != nil && exitcode.Code(checkErr) != exitcode.Prerequisites {
+		return checkErr
+	}
+	fmt.Fprintln(os.Stdout, "\nCollecting the diagnostics archive (the Docker calls in it can take a while)...")
+	if err := writeDiagBundle(os.Stdout, said.String(), doctorDockerOK); err != nil {
+		// Its own code: a script must tell "the archive could not be written"
+		// from "the machine is not ready", which checkErr says.
+		return exitcode.With(exitcode.Failure, errors.Join(err, checkErr))
+	}
+	return checkErr
+}
+
+// doctorChecks is doctor: it writes what it says to w. bundling is whether
+// the output is also going into a diagnostics archive (--bundle): then the
+// target defaults to the one of the deployment on this machine, and nothing
+// interactive is offered.
+func doctorChecks(cmd *cobra.Command, w io.Writer, bundling bool) error {
+	// A support archive is for the deployment that is there: when --target is
+	// left out, check as that one, not as a first local run.
+	if bundling && !cmd.Flags().Changed("target") {
+		if st, err := state.Load(); err == nil && (st.Target == "vps" || st.Target == "local") {
+			doctorTarget = st.Target
+			fmt.Fprintf(w, "Checking as the %s deployment on this machine.\n\n", st.Target)
+		}
+	}
 	// Same two values deploy.Configure itself accepts (see its own check) --
 	// validated here too, not left to fall through: DockerMemory/PortFree's
 	// own target branches only ever recognize "vps" explicitly and treat
@@ -104,7 +159,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 		vps.postgresCA = doctorPostgresCA
 		if len(fill) > 0 {
-			fmt.Printf("From the deployment on this machine, as configure takes them: %s\n\n", describeRecorded(fill))
+			fmt.Fprintf(w, "From the deployment on this machine, as configure takes them: %s\n\n", describeRecorded(fill))
 		}
 	} else {
 		for _, name := range doctorVpsOnlyFlags {
@@ -115,6 +170,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	dockerDaemon := checks.DockerDaemon()
+	doctorDockerOK = dockerDaemon.OK
 	results := []checks.Result{
 		dockerDaemon,
 		checks.ComposePlugin(),
@@ -147,7 +203,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	failed, warned := 0, 0
 	for _, r := range results {
-		fmt.Println(r.String())
+		fmt.Fprintln(w, r.String())
 		if !r.OK {
 			failed++
 		} else if r.Warn {
@@ -155,34 +211,41 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if doctorTarget == "vps" && doctorAuthURL == "" {
-		fmt.Println("\nPass --auth-url (and --proxy, if you deploy behind a web server of your own) to check its DNS name and the proxy's ports too.")
+		fmt.Fprintln(w, "\nPass --auth-url (and --proxy, if you deploy behind a web server of your own) to check its DNS name and the proxy's ports too.")
 	}
 
-	if !dockerDaemon.OK {
+	if !dockerDaemon.OK && !bundling {
 		offerDockerHelp()
+	} else if !dockerDaemon.OK {
+		// Nothing interactive in an archive run, but the hint that says what to
+		// do about a daemon that is installed and not reachable is kept.
+		if path, err := exec.LookPath("docker"); err == nil {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, daemonUnreachableHint(path))
+		}
 	}
 
 	// The certificates of a deployment on this host, each with its notAfter.
 	if st, err := state.Load(); err == nil && st.Target == doctorTarget {
-		fmt.Println()
-		deploy.PrintCertificates(os.Stdout, st, time.Now())
-		printCertsWarnings(os.Stdout, st)
+		fmt.Fprintln(w)
+		deploy.PrintCertificates(w, st, time.Now())
+		printCertsWarnings(w, st)
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 	if failed == 0 {
 		// Target-specific, not hardcoded to local's own command -- a
 		// successful `doctor --target vps` used to print this same local
 		// suggestion regardless, telling someone who just checked a server
 		// to go run a local deployment instead (flagged in review).
 		if warned > 0 {
-			fmt.Printf("%d warning(s) above: read them before going on.\n", warned)
+			fmt.Fprintf(w, "%d warning(s) above: read them before going on.\n", warned)
 		}
-		printDoctorReady(os.Stdout, cmd)
+		printDoctorReady(w, cmd)
 		return nil
 	}
 
-	fmt.Printf("%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
+	fmt.Fprintf(w, "%d check(s) failed. Fix the issue(s) above before running bootstrap.\n", failed)
 	// Exit code 3 (exitcode.Prerequisites), the same as configure's own
 	// prerequisite check: a script running doctor first can tell "this
 	// machine isn't ready" from doctor itself failing.

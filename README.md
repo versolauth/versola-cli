@@ -15,6 +15,14 @@ about Versola's own service topology (ports, service names, config schema)
 
 ## Status
 
+The 0.3.3 release candidate targets Versola 0.7.5 and is based on CLI
+0.3.2 with selected fixes; see [the release audit](release-0.3.3.md).
+On local, ordinary `down` keeps stopped containers so older tools bundles'
+anonymous Postgres data volume is reused by `up`. `down --volumes` removes
+the containers and volumes explicitly. A deployment whose container was
+already removed by an older CLI may have an orphaned data volume: do not
+run migrations into its replacement empty database to recover it.
+
 `doctor`, `bootstrap`, `configure`, `migrate`, `up`, `status`, `down`,
 `secrets`, `uninstall`, and `version` are all implemented and have been
 tested end-to-end against a real local deployment (Postgres + auth +
@@ -301,7 +309,9 @@ ignores the setting and would deploy from ghcr.io), or its tag is not
 
 The CLI does not log in to a registry. A refusal by the registry
 (`unauthorized`, `pull access denied`) when `versola-tools` is pulled is
-reported as such, with `docker login <host>` as the next step. Pulling
+reported as such, with `docker login <host>` as the next step (Yandex
+Container Registry answers `401 Unauthorized` for a tag that does not exist
+as well, so the same message can mean a typo in the version). Pulling
 central, auth and edge themselves is done by Docker Compose (`up`, and
 `rollout`'s pull step) and reports Compose's own message.
 
@@ -476,7 +486,26 @@ On `vps`, Versola is exposed through its own reverse proxy: the official
 by this CLI. `configure vps` writes it into the deployment next to
 versola-tools' files; `up` starts it last, once auth and edge are ready,
 and waits until a request through it actually reaches auth. It also
-serves the admin console at `/central/admin/`.
+serves the admin console at `/central/admin/`, with the security headers
+(`X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, a `frame-ancestors`
+Content-Security-Policy) and, when the browser used https, `Strict-Transport-Security`
+(with `--proxy external`, as `X-Forwarded-Proto` says).
+
+Its access log (`versola logs proxy`, on `local` and on `vps`) records the method, the path and the
+protocol of a request, and the Referer, never with a query string: the
+one-time first-login link (`?link_token=...`), OAuth codes and signed request
+objects would otherwise reach `docker logs` and whatever collects it. The
+path is the one after the proxy's own rewrites, and the query (`client_id`,
+`redirect_uri`, ...) is not kept. A deployment configured before this change
+picks the format up on its next `configure` followed by `up` (`bootstrap`
+does both); old log lines stay.
+
+What this does not cover: nginx's error log. On an upstream failure (a
+restart, a rolling upgrade, edge still starting) and when a rate limit
+refuses a request, it prints the request line, the upstream URL and the
+Referer, all with their query strings, and nginx cannot strip them. Treat
+`versola logs proxy` as sensitive until the first-login link is used. With
+`--proxy external` the proxy in front keeps its own log.
 
 `--proxy` picks how it's exposed:
 
@@ -871,7 +900,7 @@ neither):
   would have to try again. Not measured with the real edge yet; in a local
   run of the e2e client (`e2e/rollout`, three reloads) it saw one per reload
   on a request kept always in flight and none on short ones. The listener
-  is on by default; nothing on id.versola.kz uses it today.
+  is on by default; nothing on id.versola.io uses it today.
 - every edge replica the rollout starts (the stand-in, each recreated
   slot, again on an abort) gets its own client certificate through
   central.

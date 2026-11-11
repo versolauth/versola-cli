@@ -17,7 +17,7 @@ go test ./internal/deploy -run TestName    # single test
 
 On Windows, run `go test ./...` without `./internal/proxy` (its tests need symlink privileges and POSIX paths); that package is covered by CI on Linux.
 
-CI (`.github/workflows/ci.yml`) runs vet, cross-compiles windows/darwin(amd64,arm64)/linux, then `go test ./...`. Keep code building on all four targets — OS-specific code lives in `*_unix.go` / `*_windows.go` pairs (`internal/docker/shield_*.go`, `internal/state/lock_*.go`; `internal/proxy` has `umask_*_test.go` pairs). Releases: pushing a bare version tag (no leading `v`) triggers `release.yml`; the version is injected via ldflags.
+CI (`.github/workflows/ci.yml`) runs gofmt, vet, staticcheck (`staticcheck.conf`), govulncheck, cross-compiles windows/darwin(amd64,arm64)/linux, then `go test ./...`; a second job runs the tests on Windows without `./internal/proxy`. CI and releases build with the newest Go 1.26.x (`GOTOOLCHAIN=local`), not the `go` line of `go.mod`, which is only the minimum: the release Go is the standard library shipped in the binaries. Keep code building on all four targets — OS-specific code lives in `*_unix.go` / `*_windows.go` pairs (`internal/docker/shield_*.go`, `internal/state/lock_*.go`; `internal/proxy` has `umask_*_test.go` pairs). Releases: pushing a bare version tag (no leading `v`) triggers `release.yml`; the version is injected via ldflags.
 
 Rollout end-to-end test (needs Docker; uses stub services instead of real Versola): `e2e/rollout/run.sh` — see `e2e/rollout/README.md`. Not verified: this script has not been run. It is a separate set of Go modules (`stub`, `traffic`).
 

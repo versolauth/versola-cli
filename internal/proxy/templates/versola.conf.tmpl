@@ -30,6 +30,14 @@ map $scheme $versola_forwarded_proto {
     default $scheme;
 }
 {{- end }}
+
+# Strict-Transport-Security for the console's static files: only when the browser used
+# https (directly, or as the external proxy in front says), where it is acted on. The
+# services send their own on what they answer.
+map $versola_forwarded_proto $versola_hsts {
+    default "";
+    https "max-age=31536000; includeSubDomains";
+}
 {{- if .TLS }}
 
 # TLS: nginx's ACME module issues and renews the certificate itself.

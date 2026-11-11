@@ -30,8 +30,21 @@ http {
     include       /etc/nginx/mime.types;
     default_type  application/octet-stream;
 
-    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                      '$status $body_bytes_sent "$http_referer" '
+    # The request line is logged without its query string: a one-time
+    # first-login link (?link_token=...), an OAuth callback (?code=...) or a
+    # signed request object travel there, and this log reaches `docker logs`
+    # and whatever collects it. $uri is the path after the proxy's own
+    # rewrites (/central/x shows as /resources/central/x), never the
+    # arguments. The Referer of a same-origin request is the whole previous
+    # URL, query included, so it is cut at the "?" too. Do not put $request,
+    # $request_uri or $http_referer back.
+    map $http_referer $versola_logged_referer {
+        default "";
+        "~^(?<versola_referer_path>[^?]*)" $versola_referer_path;
+    }
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" '
+                      '$status $body_bytes_sent "$versola_logged_referer" '
                       '"$http_user_agent" "$http_x_forwarded_for"';
 
     access_log  /var/log/nginx/access.log  main;

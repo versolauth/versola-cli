@@ -226,6 +226,89 @@ func TestFiles(t *testing.T) {
 	}
 }
 
+// The access log must never carry a query string: the first-login link's token (?link_token=...),
+// OAuth codes and signed request objects travel there. The format logs method, $uri and protocol.
+func TestAccessLogHasNoQueryString(t *testing.T) {
+	for _, c := range renderCases() {
+		t.Run(c.name, func(t *testing.T) {
+			files, err := c.config(t).Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Directives only: the template explains in a comment which variables not to use.
+			conf := strings.Join(directives(files["proxy/nginx.conf"]), " ")
+			if !strings.Contains(conf, `"$request_method $uri $server_protocol"`) {
+				t.Errorf("nginx.conf's log_format does not log method, $uri and protocol:\n%s", conf)
+			}
+			// The Referer is cut at the "?" by a map; pin it, or `.*` or a pass-through
+			// default would keep the format line unchanged and the test green.
+			for _, want := range []string{
+				"map $http_referer $versola_logged_referer {",
+				`"~^(?<versola_referer_path>[^?]*)" $versola_referer_path;`,
+				`"$versola_logged_referer"`,
+			} {
+				if !strings.Contains(conf, want) {
+					t.Errorf("nginx.conf lacks %q", want)
+				}
+			}
+			for _, bad := range []string{`$request"`, "$request_uri", "$args", "$query_string", "$is_args", `"$http_referer"`} {
+				if strings.Contains(conf, bad) {
+					t.Errorf("nginx.conf mentions %s, which carries the query string", bad)
+				}
+			}
+		})
+	}
+}
+
+// The console's static files are the one thing this proxy answers itself; everything else carries the
+// services' own security headers. An add_header in a location replaces the server-level ones, so the
+// console's location must carry the whole set, in every mode. The first four are the headers versola's
+// own docker/versola-tools/nginx.conf.template sends (a header added there belongs here too, the CSP is
+// the same string on purpose); HSTS is added here and in versola's chart, not in that plain-http template.
+func TestConsoleLocationCarriesSecurityHeaders(t *testing.T) {
+	want := []string{
+		`add_header X-Content-Type-Options "nosniff" always;`,
+		`add_header Referrer-Policy "no-referrer" always;`,
+		`add_header X-Frame-Options "DENY" always;`,
+		`add_header Content-Security-Policy "frame-ancestors 'none'; base-uri 'none'; object-src 'none'" always;`,
+		`add_header Strict-Transport-Security $versola_hsts always;`,
+	}
+	for _, c := range renderCases() {
+		t.Run(c.name, func(t *testing.T) {
+			files, err := c.config(t).Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			all := directives(files["proxy/conf.d/versola.conf"])
+			start := -1
+			for i, l := range all {
+				if l == "location /central/admin/ {" {
+					start = i
+				}
+			}
+			if start < 0 {
+				t.Fatal("no console location")
+			}
+			var block []string
+			for _, l := range all[start+1:] {
+				if l == "}" {
+					break
+				}
+				block = append(block, l)
+			}
+			for _, w := range want {
+				if !has(block, w) {
+					t.Errorf("the console location lacks %q; it has %q", w, block)
+				}
+			}
+			// HSTS is conditional on https through a map that must exist, or nginx refuses the config.
+			if !hasSub(all, "map $versola_forwarded_proto $versola_hsts {") || !has(all, `https "max-age=31536000; includeSubDomains";`) || !has(all, `default "";`) {
+				t.Error("versola.conf lacks the $versola_hsts map")
+			}
+		})
+	}
+}
+
 func TestFilesRejectsBadConfig(t *testing.T) {
 	tlsURL := mustURL(t, "https://id.example.com", ModeNginx)
 	for name, c := range map[string]Config{

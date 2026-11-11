@@ -372,6 +372,42 @@ func TestInstallPinnedMissingReleaseSaysSo(t *testing.T) {
 	}
 }
 
+// The whole pinned path on a layout-5 deployment: the warning and the
+// question come before anything is downloaded, an unanswered question (end of
+// input, no --yes) is "no" -- exit code Aborted, the binary untouched -- and
+// the state record is not changed.
+func TestUpgradeOlderOverLayout5AsksAndChangesNothing(t *testing.T) {
+	resetUpgradeFlags(t)
+	setVersion(t, "0.8.0")
+	writeVpsState(t, `{"schemaVersion":5,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1","postgresMode":"bundled"}`)
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".versola", "active", "state.json")
+	before, _ := os.ReadFile(path)
+	// A download would have nowhere to go: this host does not exist.
+	old := upgradeDownloadHost
+	upgradeDownloadHost = "http://127.0.0.1:1"
+	t.Cleanup(func() { upgradeDownloadHost = old })
+	if err := upgradeCmd.Flags().Set("version", "0.3.2"); err != nil {
+		t.Fatal(err)
+	}
+	// End of input: a closed pipe, never the terminal or a hanging stdin.
+	r, w, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	w.Close()
+	oldIn := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldIn; r.Close() })
+	err := runUpgrade(upgradeCmd, nil)
+	if err == nil || exitcode.Code(err) != exitcode.Aborted {
+		t.Fatalf("err = %v (code %d), want an aborted question", err, exitcode.Code(err))
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Error("the record changed")
+	}
+}
+
 func TestUpgradeAlreadyCurrentOrAheadOffersNothing(t *testing.T) {
 	resetUpgradeFlags(t)
 	latestReleaseAPI(t, "0.3.3")

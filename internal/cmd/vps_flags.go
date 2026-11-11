@@ -188,10 +188,24 @@ func confirmVpsRun(w io.Writer, v vpsFlags, yes bool, action string) error {
 
 const authURLUsage = "vps: public URL of auth, e.g. https://id.example.com (needed the first time, then remembered)"
 
-const postgresHostUsage = "vps: host:port of your own Postgres (default: bundled; remembered)"
+const postgresHostUsage = "vps: host or host:port of your own Postgres, IPv6 in brackets (default: bundled; remembered)"
 
 const proxyUsage = "vps: \"nginx\" (Versola's nginx serves 80/443) or \"external\" (behind your web server, on 127.0.0.1:2821); remembered"
 
 const acmeStagingUsage = "vps only: get the certificate from Let's Encrypt's staging environment (untrusted, but no rate limits) -- for test deployments. Remembered from the last configure vps (left out when --proxy or --auth-url no longer let Versola's proxy get the certificate); --acme-staging=false goes back to a trusted certificate"
 
 const setupOpenBaoUsage = "vps only: OpenBao is already set up yourself — skip auto-provisioning and require credentials from \"versola secrets login vps\". Remembered from the last configure vps (a deployment whose OpenBao this CLI did not provision); --setup-openbao=false goes back to auto-provisioning"
+
+// checkPostgresHostFlag refuses a --postgres-host that is not host[:port]
+// as a usage error, before the lock and any question. Only a value given on
+// this command line is checked: one recorded by an earlier run is not
+// refused again. The error never repeats the value (deploy.ParsePostgresHost).
+func checkPostgresHostFlag(cmd *cobra.Command, value string) error {
+	if !cmd.Flags().Changed("postgres-host") {
+		return nil
+	}
+	if _, err := deploy.ParsePostgresHost(value); err != nil {
+		return exitcode.With(exitcode.Usage, err)
+	}
+	return nil
+}

@@ -148,6 +148,9 @@ func doctorChecks(cmd *cobra.Command, w io.Writer, bundling bool) error {
 	// refuse is refused here first, and a vps flag on local is not ignored.
 	var vps vpsInputs
 	if doctorTarget == "vps" {
+		if err := checkPostgresHostFlag(cmd, doctorPostgresHost); err != nil {
+			return err
+		}
 		// What configure takes from the deployment on this machine when the
 		// flag is left out, doctor takes too: a redeploy is checked as it
 		// will run, not as a first install with the defaults.

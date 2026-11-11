@@ -444,7 +444,7 @@ from Let's Encrypt staging) and, when it was set up by hand, OpenBao.
 
 **A release that cannot be upgraded in place.** After versola-tools has
 written the new version's configs, and before any secret is written or the
-record replaced, `configure vps` reads the release's manifest (`release.json`,
+record replaced, `configure` (vps and local) reads the release's manifest (`release.json`,
 see `rollout`) and compares it with the version recorded here. If the release
 lists that version in `freshDatabaseFrom` (0.6.* to 0.7.0, say), `configure`
 stops with the release notes and the way on -- a backup, `uninstall --purge`,
@@ -454,7 +454,7 @@ someone who has already put a new, empty database behind the deployment; it
 is refused on `local`. It is for a deployment on your own Postgres (the refusal
 names `--postgres-host` and `--postgres-db` for it); with the bundled Postgres
 there is no other database to put behind the deployment, so the refusal names
-only `uninstall --purge` and `bootstrap`. Anything else the manifest says, or no manifest at all
+only `uninstall --purge` and `bootstrap`. On `local` the refusal names `uninstall` (a plain one removes its Postgres data) and `bootstrap local`; there is no flag to go on. Anything else the manifest says, or no manifest at all
 (an older release), changes nothing here, and a first deployment has no
 version to upgrade from. `bootstrap` has no such flag: it is for a first
 deployment, and a refusal there (own Postgres only) tells you to run `configure --allow-fresh-database`, then `migrate` and `up`.

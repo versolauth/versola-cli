@@ -321,7 +321,14 @@ func configure(target, version, authURL, postgresHost string, pg PostgresOptions
 	// same question before it got here (RolloutCompatibility), and is not asked
 	// again. A first deployment has no version to upgrade from.
 	if staged == nil && stored != nil {
-		if err := checkFreshDatabase(dir, stored.Version, version, stored.PostgresMode == PostgresModeBundled, allowFreshDatabase); err != nil {
+		if err := checkFreshDatabase(dir, stored.Version, version, "vps", stored.PostgresMode == PostgresModeBundled, allowFreshDatabase); err != nil {
+			return ConfigureResult{}, err
+		}
+	}
+	// The same on local, from its own record: `stored` above is vps-only (it
+	// also decides the Postgres mode, which must not change for local).
+	if staged == nil && target == "local" {
+		if err := checkFreshDatabaseLocal(dir, version); err != nil {
 			return ConfigureResult{}, err
 		}
 	}

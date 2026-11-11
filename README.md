@@ -690,16 +690,26 @@ refuses then unless you pass this flag.
 
 #### Upgrading the CLI
 
-This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
-added the schema revision; layout 3 the Postgres host and the records a
-rolling upgrade needs; layout 4 the Postgres database name and CA, from
-`--postgres-db` and `--postgres-ca`; a deployment that runs its own Postgres
-also records `postgresMode`, an optional key that changes no layout). It
-reads the layouts older CLIs wrote, but an older CLI cannot read layout 4
-and stops with a "newer schema" error (`state layout 4, this one reads up
-to N`): after the first command that saves state with this CLI, do not go
-back to an older one on the same machine. If you may need to, copy
-`~/.versola/active/state.json` first.
+This CLI writes its state file in `~/.versola` in **layout 4**, or in
+**layout 5** when the deployment runs its own Postgres in a container or has
+EST on (layout 2 added the schema revision; layout 3 the Postgres host and the
+records a rolling upgrade needs; layout 4 the Postgres database name and CA,
+from `--postgres-db` and `--postgres-ca`; layout 5 `postgresMode` and
+`estEnabled`). A record is in layout 4 unless it carries one of those two: a
+CLI that did not know them would read the record, ignore the key and drop it at
+its next save, so a deployment with its own Postgres would come back as a
+Postgres of your own on the loopback address with no Postgres container in the
+compose file it generates, and EST would be off after the next rollout. It
+reads the layouts older CLIs wrote, but an older CLI cannot read a layout
+newer than its own and stops with a "newer schema" error (`state layout 5,
+this one reads up to 4`) before it changes anything: after the first command
+that saves state with this CLI, do not go back to an older one on the same
+machine. A deployment in layout 5 cannot go back at all (an older CLI would
+not know how to run its Postgres, and a copy of `state.json` is in layout 5
+too): the error touches nothing in Docker or in `~/.versola`, and installing
+the newer release again (`versola upgrade`, or the install script with its
+version) brings the commands back. For any other deployment, copy
+`~/.versola/active/state.json` first if you may need to go back.
 
 Deployments made by much older versola-clis -- before `state.json`, before
 bundle directories, before the CLI's own reverse proxy, before replicas
@@ -2107,7 +2117,7 @@ internal/secrets/       the secret schema reader and the plan (secrets plan / co
 internal/openbao/       OpenBao client, provisioning, stored credentials
 internal/proxy/         the reverse proxy's generated nginx config (local, vps nginx/external)
 internal/topology/      ports and slots read from the compose file (docker compose config)
-internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
+internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4 or 5)
 internal/docker/        thin wrappers around the docker CLI
 internal/fsutil/        atomic file writes
 internal/release/       GitHub releases API: the latest release and a list (upgrade, versions, bootstrap local without a version)

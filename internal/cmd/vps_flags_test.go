@@ -107,7 +107,7 @@ func TestResolveVpsFlagsFromRecord(t *testing.T) {
 }
 
 func TestResolveVpsFlagsOverrides(t *testing.T) {
-	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1",
+	writeVpsState(t, `{"schemaVersion":5,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1",
 		"authUrl":"https://id.example.com","proxyMode":"nginx","postgresMode":"bundled","postgresHost":"127.0.0.1:5432"}`)
 	stagingBundle(t)
 	// No admin credentials: OpenBao was set up by hand.
@@ -139,7 +139,7 @@ func TestResolveVpsFlagsOverrides(t *testing.T) {
 }
 
 func TestPrintVpsSettings(t *testing.T) {
-	writeVpsState(t, `{"schemaVersion":4,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1",
+	writeVpsState(t, `{"schemaVersion":5,"target":"vps","version":"0.8.0","bundleDir":"bundles/b1",
 		"authUrl":"https://id.example.com","proxyMode":"nginx","postgresMode":"bundled","postgresHost":"127.0.0.1:5432"}`)
 	stagingBundle(t)
 	v, err := resolveVpsFlags(newVpsFlagsCmd("--auth-url", "https://login.example.com"), "vps")

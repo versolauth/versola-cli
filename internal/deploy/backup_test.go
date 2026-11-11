@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/versolauth/versola-cli/internal/proxy"
 	"github.com/versolauth/versola-cli/internal/state"
 )
 
@@ -101,6 +102,52 @@ func readArchive(t *testing.T, path string) ([]string, map[string]string) {
 		content[h.Name] = string(b)
 	}
 	return names, content
+}
+
+// A deployment on Let's Encrypt staging says so in the manifest (read from the
+// bundle's proxy configuration, as StoredVps reads it); any other does not
+// carry the field at all, so that the format and old archives are unchanged,
+// and neither does a local one.
+func TestCreateBackupRecordsACMEStaging(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		target  string
+		staging bool
+		want    bool
+	}{
+		{"vps staging", "vps", true, true},
+		{"vps production", "vps", false, false},
+		{"local", "local", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st, ops, out := backupFixture(t, c.target, PostgresModeBundled)
+			if c.staging {
+				home, _ := os.UserHomeDir()
+				conf := filepath.Join(home, ".versola", "active", "bundle-1", "proxy", "conf.d")
+				if err := os.MkdirAll(conf, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(conf, "versola.conf"), []byte("acme_directory "+proxy.ACMEStaging+";\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := createBackup(st, BackupOptions{OutDir: out, CLIVersion: "1.2.3"}, io.Discard, ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err := ReadBackupManifest(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.ACMEStaging != c.want {
+				t.Errorf("ACMEStaging = %v, want %v", m.ACMEStaging, c.want)
+			}
+			_, content := readArchive(t, path)
+			if has := strings.Contains(content["manifest.json"], "acmeStaging"); has != c.want {
+				t.Errorf("manifest has the field: %v, want %v", has, c.want)
+			}
+		})
+	}
 }
 
 func TestCreateBackupLayoutAndManifest(t *testing.T) {

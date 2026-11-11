@@ -398,15 +398,23 @@ func TestRestoredConfigureCommand(t *testing.T) {
 	rec := &state.State{AuthURL: "https://id.example.com", ProxyMode: "external", CentralURL: "https://c.example.com:8093",
 		MTLSDomain: "mtls.example.com", CentralMTLSDomain: "cm.example.com", CentralDomain: "central.example.com",
 		CertLifetimeDays: &days, EstEnabled: true, ImageRegistry: "cr.example.com/versola", PostgresDB: "versola"}
-	got := RestoredConfigureCommand("0.7.6", rec, true)
+	got := RestoredConfigureCommand("0.7.6", rec, true, false)
 	want := "versola configure vps 0.7.6 --auth-url https://id.example.com --proxy external --central-url https://c.example.com:8093" +
 		" --mtls-domain mtls.example.com --central-mtls-domain cm.example.com --central-domain central.example.com" +
 		" --cert-lifetime-days 0 --est --registry cr.example.com/versola --postgres-db versola --setup-openbao"
 	if got != want {
 		t.Errorf("\n got %s\nwant %s", got, want)
 	}
+	// --acme-staging only when the archive says the deployment used it, and
+	// it comes last, after --setup-openbao.
+	if strings.Contains(got, "--acme-staging") {
+		t.Errorf("staging flag without staging: %s", got)
+	}
+	if staged := RestoredConfigureCommand("0.7.6", rec, true, true); staged != got+" --acme-staging" {
+		t.Errorf("staging: %s", staged)
+	}
 	// Values come from a file: whatever would end the command or escape the terminal is neutralised.
-	evil := RestoredConfigureCommand("0.7.6", &state.State{AuthURL: "https://x.example.com'; rm -rf ~; echo '\x1b[2J"}, false)
+	evil := RestoredConfigureCommand("0.7.6", &state.State{AuthURL: "https://x.example.com'; rm -rf ~; echo '\x1b[2J"}, false, false)
 	if strings.ContainsAny(evil, "\x1b\n") || strings.Count(evil, "'") != 2 {
 		t.Errorf("the value is not one quoted word: %q", evil)
 	}

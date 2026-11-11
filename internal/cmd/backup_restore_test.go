@@ -17,7 +17,7 @@ func TestRestoreNextStepNamesRealConfigureFlags(t *testing.T) {
 	rec := &state.State{AuthURL: "https://id.example.com", ProxyMode: "nginx", CentralURL: "https://c.example.com:8093",
 		MTLSDomain: "mtls.example.com", CentralMTLSDomain: "cm.example.com", CentralDomain: "central.example.com",
 		CertLifetimeDays: &days, EstEnabled: true, ImageRegistry: "cr.example.com/versola", PostgresDB: "versola"}
-	line := deploy.RestoredConfigureCommand("0.7.6", rec, true)
+	line := deploy.RestoredConfigureCommand("0.7.6", rec, true, true)
 	if !strings.HasPrefix(line, "versola configure vps 0.7.6 ") {
 		t.Fatalf("not a configure command: %s", line)
 	}
@@ -31,7 +31,7 @@ func TestRestoreNextStepNamesRealConfigureFlags(t *testing.T) {
 			t.Errorf("configure has no %s: %s", w, line)
 		}
 	}
-	if flags != 11 {
+	if flags != 12 {
 		t.Errorf("%d flags in %s", flags, line)
 	}
 }

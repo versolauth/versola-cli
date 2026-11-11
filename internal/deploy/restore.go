@@ -470,7 +470,7 @@ func restoreIdentity(m *BackupManifest, o RestoreOptions, out io.Writer, ops res
 	sort.Strings(restored)
 	fmt.Fprintf(out, "\nPut back: OpenBao's data (volume %s), its credentials in %s (%s), and an empty Postgres data volume (%s).\n", vol, baoDir, strings.Join(restored, ", "), bundledPostgresVolume)
 	fmt.Fprintf(out, "\nThe database is next. It needs the deployment's Postgres, which `configure` creates, so:\n\n")
-	fmt.Fprintf(out, "  1. %s     (built from the archive's record: read its values before you run it)\n", RestoredConfigureCommand(m.VersolaVersion, rec, byHand))
+	fmt.Fprintf(out, "  1. %s     (built from the archive's record: read its values before you run it)\n", RestoredConfigureCommand(m.VersolaVersion, rec, byHand, m.ACMEStaging))
 	fmt.Fprintf(out, "  2. versola backup restore %s     (the same command: now it puts the database back)\n", quotePath(o.Archive))
 	fmt.Fprintf(out, "  3. versola up\n")
 	fmt.Fprintf(out, "\nThe domain in --auth-url has to point at this server before `up`; `versola doctor --target vps` checks it.\n")
@@ -503,7 +503,7 @@ func archivedRecord(path string) (*state.State, error) {
 // flags the archive's record holds, so that the deployment comes back as it
 // was. What it prints comes from a file: each value is quoted, and printable
 // ASCII only.
-func RestoredConfigureCommand(version string, rec *state.State, openbaoByHand bool) string {
+func RestoredConfigureCommand(version string, rec *state.State, openbaoByHand, acmeStaging bool) string {
 	parts := []string{"versola", "configure", "vps", version}
 	add := func(flag, val string) {
 		if val != "" {
@@ -530,6 +530,12 @@ func RestoredConfigureCommand(version string, rec *state.State, openbaoByHand bo
 	}
 	if openbaoByHand {
 		parts = append(parts, "--setup-openbao")
+	}
+	// Not in the record (see BackupManifest.ACMEStaging): without it the new
+	// server would ask Let's Encrypt for production certificates, and those
+	// have rate limits that a test deployment's retries eat.
+	if acmeStaging {
+		parts = append(parts, "--acme-staging")
 	}
 	return strings.Join(parts, " ")
 }

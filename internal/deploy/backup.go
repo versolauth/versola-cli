@@ -85,6 +85,13 @@ type BackupManifest struct {
 	// ProxyGeneration is the vps proxy's configuration in use, for
 	// reference only: `configure` builds a new one.
 	ProxyGeneration string `json:"proxyGeneration,omitempty"`
+	// ACMEStaging: the vps deployment gets its certificate from Let's Encrypt
+	// staging (configure's --acme-staging). The record has no such field --
+	// it is read from the bundle's proxy configuration, as StoredVps does --
+	// so the archive says it here, and `backup restore` puts the flag back in
+	// the `configure` it prints. Optional: an archive without it is a
+	// deployment on production certificates, and the format does not change.
+	ACMEStaging bool `json:"acmeStaging,omitempty"`
 	// UnfinishedRollout says why the deployment was not one plain version
 	// when it was backed up (a rolling upgrade under way or cut off): the
 	// dump may already carry VersolaVersion's schema while older replicas
@@ -185,6 +192,9 @@ func createBackup(st *state.State, o BackupOptions, out io.Writer, ops backupOps
 	}
 	if st.Target == "vps" {
 		m.ProxyGeneration = ops.proxyGeneration()
+		if dir, err := bundleDirOf(st); err == nil {
+			m.ACMEStaging = usesACMEStaging(dir)
+		}
 	}
 	if why, schema := unfinishedRollout(st); why != "" {
 		m.UnfinishedRollout = why

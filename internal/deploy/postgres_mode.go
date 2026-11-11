@@ -119,6 +119,18 @@ func storedVps() (*state.State, error) {
 	return st, nil
 }
 
+// storedLocal is the recorded deployment when it is a local one, nil when there
+// is none or it cannot be read: configure only uses it to ask the release
+// whether an upgrade from that version exists, and a record it cannot read
+// gives no version to ask about (as before this check existed).
+func storedLocal() *state.State {
+	st, err := state.Load()
+	if err != nil || st.Target != "local" {
+		return nil
+	}
+	return st
+}
+
 // refuseBundledDBChange: the container creates the database once, under the
 // name --postgres-db had at the first start (auth by default); asking for
 // another name later would leave the services pointing at a database that

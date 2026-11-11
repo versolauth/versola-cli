@@ -30,18 +30,49 @@ import (
 	"github.com/versolauth/versola-cli/internal/proxy"
 )
 
-// SchemaVersion is the layout version of state.json as written by this
-// build of the CLI. It's recorded in the file so a future CLI reading an
-// older deployment's state can tell what it's looking at instead of
+// SchemaVersion is the newest layout version of state.json that this build of
+// the CLI reads and writes. It's recorded in the file so a future CLI reading
+// an older deployment's state can tell what it's looking at instead of
 // guessing from which fields happen to be present.
 //
 // Version 2 added SecretsRevision. Version 3 added PostgresHost,
 // PreviousVersion, Surge and RollingBack (rolling upgrades and their abort). Version 4 added
-// PostgresDB and PostgresCA (--postgres-db, --postgres-ca). A CLI refuses a file of a
+// PostgresDB and PostgresCA (--postgres-db, --postgres-ca). Version 5 added
+// PostgresMode (a deployment that runs its own Postgres in a container) and EstEnabled (--est). A CLI refuses a file of a
 // newer layout than its own (see Load) rather than load it and drop the
 // fields it does not know on its next Save; an older layout is read, with
 // the fields it lacks left empty.
-const SchemaVersion = 4
+//
+// A record is written in layout 4 unless it carries a layout-5 field
+// (layoutOf), not always in the newest: see BaseSchemaVersion.
+const SchemaVersion = 5
+
+// BaseSchemaVersion is the layout a record is written in unless it carries a
+// field of layout 5. A CLI built before layout 5 reads such a record, ignores
+// the field, and drops it at its next Save: PostgresMode turns a deployment with
+// its own Postgres in a container into an external Postgres on loopback, with
+// no container in the compose file it generates, and EstEnabled switches EST
+// off at the next rollout. So a record that has one of them is written in
+// layout 5, which an older CLI refuses to read ("upgrade versola") rather than
+// damage, and every other record stays in layout 4, which 0.2.10 and later
+// read: a customer who goes back to an older CLI is locked out only of a
+// deployment that could not survive it.
+//
+// Every field added to State must say here, in layoutOf, whether it is a
+// layout-5 field (TestEveryRecordFieldHasALayout fails until it does).
+const BaseSchemaVersion = 4
+
+// layout5 is the layout of a record that carries PostgresMode or EstEnabled.
+const layout5 = 5
+
+// layoutOf is the layout s is written in: layout 4 unless it carries a layout-5
+// field.
+func layoutOf(s *State) int {
+	if s.PostgresMode != "" || s.EstEnabled {
+		return layout5
+	}
+	return BaseSchemaVersion
+}
 
 // PostgresCAFileName is where Finalize keeps a copy of --postgres-ca's file,
 // in Dir() next to state.json, so that later steps do not depend on the
@@ -195,9 +226,10 @@ type State struct {
 	// PostgresMode is "bundled" when the deployment runs its own Postgres as a
 	// container of the compose file (vps only), "" for an external one (the
 	// server's own, a managed one) and for local. PostgresHost is then
-	// 127.0.0.1:5432, so everything that reads it keeps working. Not a layout
-	// bump: an older CLI ignores the field and sees an external Postgres on
-	// loopback, which is what it reaches the container as.
+	// 127.0.0.1:5432, so everything that reads it keeps working. Layout 5 (see
+	// BaseSchemaVersion): a CLI that does not know the field would read the
+	// record as an external Postgres on loopback, then drop the key at its next
+	// Save, so a record that has it is written in a layout such a CLI refuses.
 	PostgresMode string `json:"postgresMode,omitempty"`
 
 	// PostgresCA is the name, inside Dir(), of the copy of --postgres-ca's
@@ -523,13 +555,12 @@ func Finalize(o FinalizeOptions) error {
 
 	target := o.Target
 	s := &State{
-		SchemaVersion: SchemaVersion,
-		Target:        target,
-		Version:       o.Version,
-		ConfiguredAt:  time.Now().UTC(),
-		BundleDir:     filepath.Base(o.BundleDir),
-		AuthURL:       o.AuthURL,
-		CentralURL:    o.CentralURL,
+		Target:       target,
+		Version:      o.Version,
+		ConfiguredAt: time.Now().UTC(),
+		BundleDir:    filepath.Base(o.BundleDir),
+		AuthURL:      o.AuthURL,
+		CentralURL:   o.CentralURL,
 
 		MTLSDomain:        o.MTLSDomain,
 		CentralMTLSDomain: o.CentralMTLSDomain,
@@ -616,10 +647,10 @@ func (s *State) PostgresCAPath() string {
 }
 
 // Save writes the state record, replacing whatever was there. It is written
-// in this build's layout, whatever layout it was read in: it is this build
+// in the layout its content needs (layoutOf), whatever layout it was read in: it is this build
 // writing the file.
 func (s *State) Save() error {
-	s.SchemaVersion = SchemaVersion
+	s.SchemaVersion = layoutOf(s)
 	dir, err := Dir()
 	if err != nil {
 		return err

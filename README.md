@@ -234,6 +234,39 @@ different memory checks, not just a different number:
   (`DOCKER_HOST`, or a non-local context) or the process isn't on Linux,
   rather than quietly checking the wrong machine's memory.
 
+**`--bundle <file>`** writes one archive for whoever helps you with a failed or
+ailing deployment (and exits as `doctor` would: the checks failing is why it is
+wanted). `<file>` is a name that does not exist yet, or a directory (it then
+makes `versola-diagnostics-<target>-<UTC time>.tar.gz` in it); it never replaces
+a file, is mode 0600 and is packed under a temp name (made before anything is gathered, so a directory that cannot be written fails at once) and moved into place at the end without replacing anything.
+The target is the one of the deployment on this machine unless `--target` is
+given. It holds no password or key (see below for how that is kept), but it identifies the server: it names your domain, the addresses the names resolve to, your database host and user name when the database is your own, the paths under your home directory, and the user you ran it as. It holds:
+
+| Member | What |
+|---|---|
+| `manifest.json` | CLI version, OS and architecture, time, target, Versola version, size and SHA-256 of every member, what could not be made and why, and what was left out |
+| `doctor.txt` | what `doctor` printed |
+| `versions.txt` | this CLI, the OS, Docker and Compose (a call that fails is a line saying so) |
+| `state.json` | the CLI's record of the deployment (versions, the auth URL and public names, the proxy mode, the Postgres mode and, for your own Postgres, its host and database name; no secret) |
+| `status.json`, `stats.json` | `status --json` and `stats --json`, as those commands run: `status` probes the certificates over the network, and `stats` on a vps may start a throw-away `psql` container to count the Postgres connections, which reads the live database |
+| `files/compose.yml`, `files/replicas.yml`, `files/proxy.yml`, `files/release.json` | the generated files of the deployment's bundle that hold no secret, a fixed list; whatever looks like a secret in them (a private key block, the rest of a line after a password, secret, token, key or credential name, a bearer token, the password of a URL) is blanked as a second line of defence, a best effort that does not promise to catch everything |
+
+Never in it: the `*.secrets.env` files, OpenBao's data and
+`~/.versola/openbao` (credentials and keys), the containers' environment, the
+database. A member that cannot be made (Docker is down: the usual reason for
+the archive; no deployment yet) is listed in the manifest and the output with
+the reason, and the rest is written. A member over 8 MiB is cut there.
+
+**`--logs`** (with `--bundle` only) adds `logs/<service>.log`: the last 200
+lines of every service, with timestamps, as `versola logs` shows them. They are
+**not redacted**: they can hold addresses, names and ids of your users, and
+credentials too (Postgres logs the text of a failed statement, `CREATE ROLE ...
+PASSWORD` included; the verifier and the quoted password of such a statement
+are blanked, as a best effort, and nothing else is). They are left out by
+default for that reason; read them before you send the file. The rest of the
+archive is also scrubbed of a password a flag you typed may have carried (a
+URL in `--postgres-host`, say) in `doctor.txt`, the record, status and stats.
+
 Exits 3 if any check fails (see "Exit codes"). `bootstrap`/`configure` run the
 machine checks themselves before doing anything (Docker, memory, disk,
 the proxy's ports, port 5432 for the Postgres container); the name of
@@ -444,7 +477,7 @@ from Let's Encrypt staging) and, when it was set up by hand, OpenBao.
 
 **A release that cannot be upgraded in place.** After versola-tools has
 written the new version's configs, and before any secret is written or the
-record replaced, `configure vps` reads the release's manifest (`release.json`,
+record replaced, `configure` (vps and local) reads the release's manifest (`release.json`,
 see `rollout`) and compares it with the version recorded here. If the release
 lists that version in `freshDatabaseFrom` (0.6.* to 0.7.0, say), `configure`
 stops with the release notes and the way on -- a backup, `uninstall --purge`,
@@ -454,7 +487,7 @@ someone who has already put a new, empty database behind the deployment; it
 is refused on `local`. It is for a deployment on your own Postgres (the refusal
 names `--postgres-host` and `--postgres-db` for it); with the bundled Postgres
 there is no other database to put behind the deployment, so the refusal names
-only `uninstall --purge` and `bootstrap`. The flag itself is refused over a
+only `uninstall --purge` and `bootstrap`. On `local` the refusal names `uninstall` (a plain one removes its Postgres data) and `bootstrap local`; there is no flag to go on. The flag itself is refused over a
 deployment recorded as running the bundled Postgres at once, before the
 confirmation question and whatever the release says (leave it out: `configure`
 finds out by itself whether the release can be upgraded in place), with the
@@ -694,16 +727,26 @@ refuses then unless you pass this flag.
 
 #### Upgrading the CLI
 
-This CLI writes its state file in `~/.versola` in **layout 4** (layout 2
-added the schema revision; layout 3 the Postgres host and the records a
-rolling upgrade needs; layout 4 the Postgres database name and CA, from
-`--postgres-db` and `--postgres-ca`; a deployment that runs its own Postgres
-also records `postgresMode`, an optional key that changes no layout). It
-reads the layouts older CLIs wrote, but an older CLI cannot read layout 4
-and stops with a "newer schema" error (`state layout 4, this one reads up
-to N`): after the first command that saves state with this CLI, do not go
-back to an older one on the same machine. If you may need to, copy
-`~/.versola/active/state.json` first.
+This CLI writes its state file in `~/.versola` in **layout 4**, or in
+**layout 5** when the deployment runs its own Postgres in a container or has
+EST on (layout 2 added the schema revision; layout 3 the Postgres host and the
+records a rolling upgrade needs; layout 4 the Postgres database name and CA,
+from `--postgres-db` and `--postgres-ca`; layout 5 `postgresMode` and
+`estEnabled`). A record is in layout 4 unless it carries one of those two: a
+CLI that did not know them would read the record, ignore the key and drop it at
+its next save, so a deployment with its own Postgres would come back as a
+Postgres of your own on the loopback address with no Postgres container in the
+compose file it generates, and EST would be off after the next rollout. It
+reads the layouts older CLIs wrote, but an older CLI cannot read a layout
+newer than its own and stops with a "newer schema" error (`state layout 5,
+this one reads up to 4`) before it changes anything: after the first command
+that saves state with this CLI, do not go back to an older one on the same
+machine. A deployment in layout 5 cannot go back at all (an older CLI would
+not know how to run its Postgres, and a copy of `state.json` is in layout 5
+too): the error touches nothing in Docker or in `~/.versola`, and installing
+the newer release again (`versola upgrade`, or the install script with its
+version) brings the commands back. For any other deployment, copy
+`~/.versola/active/state.json` first if you may need to go back.
 
 Deployments made by much older versola-clis -- before `state.json`, before
 bundle directories, before the CLI's own reverse proxy, before replicas
@@ -788,7 +831,7 @@ stops the container from starting). Nothing in this mode is done by hand:
   `--postgres-host`.
 
 **Back it up.** The volume is the database, on one server: `versola backup
-create` (see [`backup create`](#backup-create--backup-list)) dumps it through
+create` (see [`backup create`](#backup-create--backup-list--backup-restore)) dumps it through
 the container, together with what the dump needs to be readable.
 
 `uninstall` keeps the data volume; `uninstall --purge` destroys it together
@@ -1441,8 +1484,13 @@ the renewal.
 Going back: `versola rollout --abort` while the rollout is unfinished
 (add `--no-surge` if the rollout needed it); once it finished, roll the
 earlier version out the same way. If the old version can't run on the
-migrated schema at all, restore the database from step 2 and deploy the
-old version with `configure` / `migrate` / `up`.
+migrated schema at all, put the database of step 2 back: `versola down`,
+`versola configure vps <the old version>`, `versola backup restore <archive>
+--replace-database`, `versola up` (see [`backup restore`](#backup-restore),
+"Go back after a failed upgrade"). A Ctrl-C while a restore runs does not stop
+it half way: the command says whether the database was replaced when it ends
+(with a Postgres that was already running, it ends at once and the restore may
+still finish inside the container: look at the tables before going on).
 
 ### `certs renew` (vps and local)
 
@@ -1608,11 +1656,12 @@ the files and stops. A partner's edge does not use any of this: it has no
 connection to central. (Central's own `edge-identity` setting only matters for
 partners' edges; an operator's own, first-party, edges are always extended by central.)
 
-### `backup create` / `backup list`
+### `backup create` / `backup list` / `backup restore`
 
 ```bash
 versola backup create [--out <dir>] [--skip-database]
 versola backup list [--out <dir>]
+versola backup restore <archive> [--replace-database] [--yes]
 ```
 
 `backup create` writes one archive of the deployment this machine tracks
@@ -1655,7 +1704,94 @@ deployment is locked like for `configure`, and the dump is staged on disk
 before packing, so `--out` needs about twice the dump's size free.
 
 `backup list` shows the archives in `--out`, newest first, with the summary
-from each manifest. `backup restore` does not exist yet.
+from each manifest.
+
+#### `backup restore`
+
+```bash
+versola backup restore <archive> [--replace-database] [--yes]
+```
+
+`backup restore` puts an archive of `backup create` back. `<archive>` is a file
+path, or the name of a file in `~/versola-backups` (what `backup list` shows).
+Only an archive of a **vps** deployment on **its own Postgres** is restored (the
+manifest's `postgresMode` is `bundled`); with a Postgres of your own the command
+says so and how to restore `database.dump` with `pg_restore` yourself, and
+`local` is refused. The deployment is locked like for `configure`.
+
+Before anything on the machine changes, the archive is read from end to end
+against the sizes and SHA-256 of its manifest. A member that does not match, a
+file that is cut short, a member the manifest does not list or this CLI does not
+write, anything that is not a plain file, a newer archive format: refused. What
+the manifest says (a version, a database name) is shown only when it is a plain
+word, so an archive cannot put control characters on the terminal or arguments
+into a command it prints.
+
+It is one command that does what the machine needs, because the database cannot
+be put back before the deployment's own Postgres container exists, and that
+container comes from the bundle `configure` writes. So there are two steps, and
+the output of the first names the next:
+
+1. **A machine with nothing deployed** (a new server, or after `uninstall
+   --purge`): OpenBao's data volume, its credentials in `~/.versola/openbao`
+   (mode 0600) and an empty Postgres data volume (so that `configure` does not
+   take the machine for one that lost its database). It replaces nothing: if
+   the machine already has any of these (a credentials file, a volume, a
+   container, an unfinished first install) it lists them and stops, naming
+   `versola uninstall --purge` (which asks first). A failure, or a Ctrl-C,
+   removes what the run had put back. It prints the `versola configure vps
+   <version> ...` to run next, with the flags the archive's record holds
+   (`--auth-url`, `--proxy`, `--central-url`, the public names,
+   `--cert-lifetime-days`, `--est`, `--registry`, `--postgres-db`, and
+   `--setup-openbao` when OpenBao was set up by hand). The record itself is not
+   put back: `configure` writes a new one.
+2. **After that `configure`**, on the same Versola version as the archive, with
+   the services stopped (`versola down`): the same command puts the database
+   back. Another version is refused (a newer one would need migrations, an
+   older one cannot read the schema), and so is a deployment whose OpenBao
+   keys are not the archive's (the dump holds values only those keys open;
+   compared by the unseal key, never shown), a rolling upgrade that is not
+   finished, and running services. The deployment's own Postgres is started for
+   it alone and stopped again after, as `backup create` does. The dump goes in
+   through `docker exec` into the container, the password read from the
+   container's own environment, never from a command line. The database is
+   emptied first (every schema but the system ones is dropped with what is in
+   it: a table a newer version made would otherwise stay, and the old
+   version's migrations would fail on it) and the dump applied by
+   `pg_restore --no-owner`, all between one `BEGIN` and one `COMMIT`, which is
+   sent only when `pg_restore` has finished. When anything fails, a broken
+   dump included, nothing is committed and the database is as it was. An empty
+   database asks a plain
+   `Continue? [y/N]` (`--yes` answers it). A database with data in it is
+   refused unless `--replace-database` is given, and then asks you to type
+   `vps`, which `--yes` does not answer (exit code 4); say what it would
+   replace first and take a `backup create` if you want a copy.
+
+Then `versola up`. `migrate` is not needed: the schema is the archive's, which
+is the deployment's version (`up` prints its note that no migration is recorded,
+because `configure` wrote a new record; the services check their schema at
+start). For an archive taken during an unfinished rolling upgrade (the output
+says so) the schema may be the older or the newer version's: `versola migrate`,
+or `versola rollout --abort`, is then the next step.
+
+**Restore only archives you made or trust.** The checksums are in the archive,
+so they show damage, not who made it. The dump is run as SQL by the
+deployment's own database role, and the `--registry` and `--auth-url` in the
+printed `configure` come from the archive's record (the output says the command
+is built from it).
+
+**Move to another server.** On the old one `versola backup create`, and copy the
+archive off the server. On the new one (the CLI installed, `versola doctor
+--target vps ...` happy, the domain pointing at it): `versola backup restore
+<archive>`, the `versola configure vps ...` it prints, `versola backup restore
+<archive>` again, `versola up`.
+
+**Go back after a failed upgrade.** With the archive taken before it:
+`versola down`, `versola configure vps <the old version>`, `versola backup
+restore <archive> --replace-database` (type `vps`), `versola up`.
+
+Not restored: the generated bundle (`configure` writes it again), the ACME
+certificate and mutual-TLS volumes (reissued), a Postgres of your own.
 
 ### `status`
 
@@ -2066,9 +2202,9 @@ script can act on:
 | 1 | Failure not listed below | a docker command failed, a migration failed, a service never got ready |
 | 2 | Wrong arguments or flags | unknown command or flag, wrong number of arguments, an unknown target for `configure`/`bootstrap` or `doctor --target`, a flag that only applies to vps given on `local`, a missing `--auth-url` on vps, a bad value (`--service`, `--cert-lifetime-days`, a replica count) |
 | 3 | The machine isn't ready | `doctor` found problems; `configure`'s/`bootstrap`'s prerequisite checks failed (Docker, memory, disk, a port already in use) |
-| 4 | Not confirmed | anything but yes at a `Continue? [y/N]` (or no terminal and no `--yes`), at `uninstall`'s or `upgrade`'s question, at `postgres init`'s, or a purge without `vps` typed |
+| 4 | Not confirmed | anything but yes at a `Continue? [y/N]` (or no terminal and no `--yes`), at `uninstall`'s or `upgrade`'s question, at `postgres init`'s, or a purge or a `backup restore --replace-database` without `vps` typed |
 | 5 | The secrets plan has problems | `secrets plan`; `configure`, `bootstrap` and `rollout` when their secrets plan has problems (nothing is written to OpenBao) |
-| 130 | Interrupted | Ctrl-C during `rollout` (the first one stops between two steps, later ones leave sooner) or during `backup create`'s OpenBao copy |
+| 130 | Interrupted | Ctrl-C during `rollout` (the first one stops between two steps, later ones leave sooner), during `backup create`'s OpenBao copy, or between the steps of `backup restore` (what it had put back is removed) |
 
 A problem found inside a command that has no code of its own is 1.
 
@@ -2111,7 +2247,7 @@ internal/secrets/       the secret schema reader and the plan (secrets plan / co
 internal/openbao/       OpenBao client, provisioning, stored credentials
 internal/proxy/         the reverse proxy's generated nginx config (local, vps nginx/external)
 internal/topology/      ports and slots read from the compose file (docker compose config)
-internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4)
+internal/state/         locates ~/.versola/active, the on-disk state configure writes (state.json, layout 4 or 5)
 internal/docker/        thin wrappers around the docker CLI
 internal/fsutil/        atomic file writes
 internal/release/       GitHub releases API: the latest release and a list (upgrade, versions, bootstrap local without a version)

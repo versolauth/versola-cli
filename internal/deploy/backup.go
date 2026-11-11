@@ -641,16 +641,40 @@ func bundledPgStopArgs() []string  { return []string{"stop", "postgres"} }
 // that end a session are held until it is stopped again, like OpenBao's stop
 // in the same command: leaving it running is the one thing this must not do.
 func withBundledPostgres(c bundledPgCtl, composePath string, out io.Writer, dump func(container string) error) error {
+	return withBundledPostgresFor(pgUseDump, c, composePath, out, func(container string, _ pgSession) error { return dump(container) })
+}
+
+// pgUse words what withBundledPostgresFor says about why it started Postgres
+// and what an interruption cost: the dump of `backup create`, or the restore of
+// `backup restore`.
+type pgUse struct {
+	// purpose completes "starting it for ...".
+	purpose string
+	// interrupted completes "interrupted -- Postgres is stopped again; ...".
+	interrupted string
+	// interruptedDone completes it instead when the work had succeeded by the
+	// time the signal was acted on; "" says the same as interrupted.
+	interruptedDone string
+	// holding is what is said when the signal arrives and is held; "" is the
+	// default, which suits a work that can be stopped between steps.
+	holding string
+}
+
+var pgUseDump = pgUse{purpose: "the dump", interrupted: "no archive was written"}
+
+// withBundledPostgresFor is withBundledPostgres for any use of the container.
+func withBundledPostgresFor(use pgUse, c bundledPgCtl, composePath string, out io.Writer, dump func(container string, s pgSession) error) error {
 	id, err := c.runningID(composePath)
 	if err != nil {
 		return err
 	}
 	if id != "" {
-		return dump(id)
+		return dump(id, pgSession{Heard: func() bool { return false }})
 	}
 	sigs, release := c.signals()
 	defer release()
 	var heard atomic.Bool
+	heardCh := make(chan struct{})
 	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(stopped)
@@ -658,7 +682,12 @@ func withBundledPostgres(c bundledPgCtl, composePath string, out io.Writer, dump
 			select {
 			case <-sigs:
 				if !heard.Swap(true) {
-					fmt.Fprintln(out, "Interrupted -- stopping once Postgres is stopped again.")
+					close(heardCh)
+					if use.holding != "" {
+						fmt.Fprintln(out, use.holding)
+					} else {
+						fmt.Fprintln(out, "Interrupted -- stopping once Postgres is stopped again.")
+					}
 				}
 			case <-done:
 				return
@@ -668,15 +697,15 @@ func withBundledPostgres(c bundledPgCtl, composePath string, out io.Writer, dump
 	docker.SetShielded(true)
 	defer docker.SetShielded(false)
 
-	fmt.Fprintln(out, "The deployment's Postgres is not running; starting it for the dump (and stopping it again after)...")
+	fmt.Fprintf(out, "The deployment's Postgres is not running; starting it for %s (and stopping it again after)...\n", use.purpose)
 	if serr := c.start(composePath); serr != nil {
-		err = fmt.Errorf("couldn't start the deployment's Postgres for the dump (`versola logs postgres` says what it failed on): %w", serr)
+		err = fmt.Errorf("couldn't start the deployment's Postgres for %s (`versola logs postgres` says what it failed on): %w", use.purpose, serr)
 	} else if id, rerr := c.runningID(composePath); rerr != nil {
 		err = rerr
 	} else if id == "" {
 		err = errors.New("the deployment's Postgres was started but its container isn't there -- `versola logs postgres` says why")
 	} else {
-		err = dump(id)
+		err = dump(id, pgSession{Heard: heard.Load, HeardCh: heardCh})
 	}
 	// Stopped also when the start failed: a service that never became
 	// healthy is still running.
@@ -689,13 +718,33 @@ func withBundledPostgres(c bundledPgCtl, composePath string, out io.Writer, dump
 	<-stopped
 	select {
 	case <-sigs:
-		heard.Store(true)
+		if !heard.Swap(true) {
+			close(heardCh)
+		}
 	default:
 	}
 	if heard.Load() {
-		return exitcode.With(exitcode.Interrupted, errors.New("interrupted -- Postgres is stopped again; no archive was written"))
+		// What was done is said as it is: a use whose work had already
+		// succeeded when the signal was acted on (a restore that committed)
+		// must not claim nothing happened.
+		if err == nil && use.interruptedDone != "" {
+			return exitcode.With(exitcode.Interrupted, errors.New("interrupted -- Postgres is stopped again; "+use.interruptedDone))
+		}
+		return exitcode.With(exitcode.Interrupted, errors.New("interrupted -- Postgres is stopped again; "+use.interrupted))
 	}
 	return err
+}
+
+// pgSession is what the work done while Postgres is started (withBundledPostgresFor)
+// can ask about the signals that end a session, which are held until Postgres
+// is stopped again: without it a Ctrl-C at a question is swallowed and the
+// work goes on after it.
+type pgSession struct {
+	// Heard says whether such a signal has arrived.
+	Heard func() bool
+	// HeardCh is closed when the first one arrives; nil when none are held
+	// (Postgres was already running: a Ctrl-C then ends the process).
+	HeardCh <-chan struct{}
 }
 
 func runPgDump(w io.Writer, args []string) error {

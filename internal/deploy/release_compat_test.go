@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/versolauth/versola-cli/internal/manifest"
+	"github.com/versolauth/versola-cli/internal/state"
 )
 
 // compatManifest says what 0.7.6 states: rolling from 0.7.5, no way in from 0.6.*.
@@ -128,7 +129,7 @@ func TestCheckFreshDatabase(t *testing.T) {
 	dir := writeManifest(t, compatManifest)
 
 	// configure from a version the release cannot be reached from: refused, with the flag in the message.
-	err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false, false)
+	err := checkFreshDatabase(dir, "0.6.2", "0.7.6", "vps", false, false)
 	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || !strings.Contains(err.Error(), "`versola configure vps 0.7.6 ... --allow-fresh-database`, then `versola migrate` and `versola up`") {
 		t.Errorf("a fresh-database upgrade was not refused with the way out: %v", err)
 	}
@@ -137,36 +138,44 @@ func TestCheckFreshDatabase(t *testing.T) {
 		t.Errorf("own Postgres: the refusal does not name the flags: %v", err)
 	}
 	// The bundled Postgres cannot be swapped by configure: the flag is not offered, nor the own-Postgres hint.
-	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", true, false)
+	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", "vps", true, false)
 	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || !strings.Contains(err.Error(), "`versola uninstall --purge`") || !strings.Contains(err.Error(), "`versola bootstrap vps 0.7.6 ...`.") {
 		t.Errorf("bundled: the refusal lacks the way out: %v", err)
 	}
 	if err != nil && (strings.Contains(err.Error(), "--allow-fresh-database") || strings.Contains(err.Error(), "--postgres-host")) {
 		t.Errorf("bundled: the refusal offers a flag that cannot work:\n%v", err)
 	}
+	// local: its own way out -- a plain uninstall and bootstrap local, no --purge, no flags, no vps.
+	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", "local", true, false)
+	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || !strings.Contains(err.Error(), "`versola uninstall`") || !strings.Contains(err.Error(), "`versola bootstrap local 0.7.6`") {
+		t.Errorf("local: the refusal lacks the way out: %v", err)
+	}
+	if err != nil && (strings.Contains(err.Error(), "--purge") || strings.Contains(err.Error(), "vps") || strings.Contains(err.Error(), "--allow-fresh-database") || strings.Contains(err.Error(), "--postgres-host")) {
+		t.Errorf("local: the refusal names something that does not exist there:\n%v", err)
+	}
 	// The flag lets someone who has a new database through.
-	if err := checkFreshDatabase(dir, "0.6.2", "0.7.6", false, true); err != nil {
+	if err := checkFreshDatabase(dir, "0.6.2", "0.7.6", "vps", false, true); err != nil {
 		t.Errorf("--allow-fresh-database: %v", err)
 	}
 	// ... but never over the bundled Postgres, where there is no other database to have: the refusal stands.
-	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", true, true)
+	err = checkFreshDatabase(dir, "0.6.2", "0.7.6", "vps", true, true)
 	if err == nil || !strings.Contains(err.Error(), "needs a fresh database") || strings.Contains(err.Error(), "--allow-fresh-database") {
 		t.Errorf("bundled with the flag: the flag must not let the release through: %v", err)
 	}
 	// Anything else the manifest says is not configure's business.
 	for _, from := range []string{"0.7.5", "0.7.1", "0.7.6", "0.8.0", "dev"} {
-		if err := checkFreshDatabase(dir, from, "0.7.6", false, false); err != nil {
+		if err := checkFreshDatabase(dir, from, "0.7.6", "vps", false, false); err != nil {
 			t.Errorf("from %s: %v", from, err)
 		}
 	}
 	// No manifest (an older release): as before.
-	if err := checkFreshDatabase(writeManifest(t, ""), "0.6.2", "0.7.0", false, false); err != nil {
+	if err := checkFreshDatabase(writeManifest(t, ""), "0.6.2", "0.7.0", "vps", false, false); err != nil {
 		t.Errorf("a release without a manifest: %v", err)
 	}
 	// A manifest this CLI cannot read is an error that names the problem, flag or not.
 	bad := writeManifest(t, `{"schemaVersion": 9, "releases": []}`)
 	for _, allow := range []bool{false, true} {
-		if err := checkFreshDatabase(bad, "0.6.2", "0.7.6", false, allow); err == nil || !strings.Contains(err.Error(), "schemaVersion 9") {
+		if err := checkFreshDatabase(bad, "0.6.2", "0.7.6", "vps", false, allow); err == nil || !strings.Contains(err.Error(), "schemaVersion 9") {
 			t.Errorf("an unknown schema (allow=%v): %v", allow, err)
 		}
 	}
@@ -178,5 +187,78 @@ func TestPlanCompatibilityLeavesOutWhatItCannotSay(t *testing.T) {
 	// local has no manifest verdict: the report is the secrets plan alone.
 	if got := planCompatibility(&log, dir, "local", "0.7.6"); got != nil {
 		t.Errorf("local: %+v", got)
+	}
+}
+
+// storedLocal is what `configure local` asks the release about: the recorded
+// local deployment, and nothing for no record or one of another target (vps
+// has its own path, storedVps).
+func TestStoredLocalSeesOnlyALocalRecord(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if st := storedLocal(); st != nil {
+		t.Fatalf("no record: %+v", st)
+	}
+	dir, err := state.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := &state.State{Target: "vps", Version: "0.6.2"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedLocal(); got != nil {
+		t.Errorf("a vps record: %+v", got)
+	}
+	st = &state.State{Target: "local", Version: "0.6.2"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedLocal(); got == nil || got.Version != "0.6.2" {
+		t.Errorf("a local record: %+v", got)
+	}
+}
+
+// What configure local calls: refuses over a local record the release cannot be
+// reached from, and asks nothing for no record or a record of another target.
+func TestCheckFreshDatabaseLocalFollowsTheRecord(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := writeManifest(t, compatManifest)
+	if err := checkFreshDatabaseLocal(dir, "0.7.6"); err != nil {
+		t.Errorf("no record: %v", err)
+	}
+	sd, err := state.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := &state.State{Target: "vps", Version: "0.6.2"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFreshDatabaseLocal(dir, "0.7.6"); err != nil {
+		t.Errorf("a vps record: %v", err)
+	}
+	st = &state.State{Target: "local", Version: "0.6.2"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFreshDatabaseLocal(dir, "0.7.6"); err == nil || !strings.Contains(err.Error(), "`versola bootstrap local 0.7.6`") {
+		t.Errorf("a local record on 0.6.2: %v", err)
+	}
+	st = &state.State{Target: "local", Version: "0.7.5"}
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFreshDatabaseLocal(dir, "0.7.6"); err != nil {
+		t.Errorf("a local record on 0.7.5: %v", err)
 	}
 }

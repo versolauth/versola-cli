@@ -28,7 +28,7 @@ func TestFinalizeRecordsTheImageRegistry(t *testing.T) {
 	if st.ImageRegistry != "cr.yandex/crp1a2b3c" {
 		t.Errorf("recorded %q", st.ImageRegistry)
 	}
-	if st.SchemaVersion != SchemaVersion {
+	if st.SchemaVersion != BaseSchemaVersion {
 		t.Errorf("layout %d: the registry is an optional field, the layout stays", st.SchemaVersion)
 	}
 

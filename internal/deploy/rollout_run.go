@@ -162,7 +162,7 @@ func RequireCompatible(st *state.State, version string, o RolloutOptions) error 
 	}
 	switch o.Compat.Verdict {
 	case manifest.FreshDatabase:
-		return freshDatabaseError(o.Compat, true, st.PostgresMode == PostgresModeBundled)
+		return freshDatabaseError(o.Compat, true, "vps", st.PostgresMode == PostgresModeBundled)
 	case manifest.Rolling:
 		return nil
 	}
@@ -185,10 +185,15 @@ func RequireCompatible(st *state.State, version string, o RolloutOptions) error 
 // refuses --postgres-host and another --postgres-db on it, so there is no new
 // database to put behind it short of `uninstall --purge`, and the flag would
 // lead nowhere. bundled is State.PostgresMode == PostgresModeBundled.
-func freshDatabaseError(r manifest.Result, rollout, bundled bool) error {
+func freshDatabaseError(r manifest.Result, rollout bool, target string, bundled bool) error {
 	notes := ""
 	if r.Notes != "" {
 		notes = " (release notes: " + r.Notes + ")"
+	}
+	if target == "local" {
+		// local: a plain uninstall removes the Postgres and OpenBao volumes,
+		// there is no --purge and no flag to point at another database.
+		return fmt.Errorf("version %s cannot be upgraded in place from %s: the release says it needs a fresh database%s, so `configure` followed by `migrate` cannot work. Back the data up with `versola backup create` if you want the old one kept, then start over: `versola uninstall` (it asks first and removes this deployment's data) and `versola bootstrap local %s`.", r.To, r.From, notes, r.To)
 	}
 	own := ""
 	if !bundled {
@@ -935,7 +940,7 @@ func RolloutDryRun(st *state.State, version string, o RolloutOptions) error {
 	fmt.Print(RolloutPlan(st, version, o))
 	fmt.Println()
 	if o.Compat.Verdict == manifest.FreshDatabase && !st.RolloutUnderway() {
-		err := freshDatabaseError(o.Compat, true, st.PostgresMode == PostgresModeBundled)
+		err := freshDatabaseError(o.Compat, true, "vps", st.PostgresMode == PostgresModeBundled)
 		fmt.Printf("Would stop before changing anything: %v\n", err)
 		return err
 	}

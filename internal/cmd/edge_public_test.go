@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,10 +280,17 @@ func TestEdgeCommandsAreWired(t *testing.T) {
 			t.Errorf("edge add has no --%s", name)
 		}
 	}
-	for _, name := range []string{"dir", "key-file", "version", "no-start"} {
+	for _, name := range []string{"dir", "key-file", "version", "no-start", "edge-url", "postgres-url", "postgres-user", "postgres-password-file"} {
 		if sub["bootstrap"].Flags().Lookup(name) == nil {
 			t.Errorf("edge bootstrap has no --%s", name)
 		}
+	}
+	if f := sub["bootstrap"].Flags().Lookup("postgres-user"); f == nil || f.DefValue != "edge" {
+		t.Errorf("--postgres-user = %+v, want the default edge", f)
+	}
+	// The help says what a partner's edge is, not the stale "no connection to central".
+	if long := sub["bootstrap"].Long; strings.Contains(long, "no connection to central") || !strings.Contains(long, `mode = "partner"`) {
+		t.Errorf("edge bootstrap's help on partners' edges:\n%s", long)
 	}
 	if err := sub["add"].Args(sub["add"], nil); err == nil {
 		t.Error("edge add without an id")
@@ -305,5 +313,51 @@ func TestEdgeAddWritesKeyEvenWhenTheTokenFails(t *testing.T) {
 	}
 	if b, rerr := os.ReadFile(keyPath); rerr != nil || !strings.Contains(string(b), "PRIVATE-KEY-VALUE") {
 		t.Errorf("key file = %q, %v", b, rerr)
+	}
+}
+
+// What `edge bootstrap` says: started, written only, or written but not
+// started for want of a secret -- then on stderr, with what to add.
+func TestEdgeBootstrapReports(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "eu")
+	for name, tc := range map[string]struct {
+		res              deploy.EdgeBootstrapResult
+		noStart          bool
+		stdout, stderr   string
+		noStdout, noErrs bool
+	}{
+		"started":  {res: deploy.EdgeBootstrapResult{Dir: dir, Started: true}, stdout: "The edge is starting from", noErrs: true},
+		"no-start": {res: deploy.EdgeBootstrapResult{Dir: dir}, noStart: true, stdout: "Start it with: docker compose -f", noErrs: true},
+		"missing": {res: deploy.EdgeBootstrapResult{Dir: dir, Missing: []string{"POSTGRES_PASSWORD (pass --postgres-password-file <file>)"}},
+			stderr: "The edge was not started", noStdout: true},
+		"missing, no-start": {res: deploy.EdgeBootstrapResult{Dir: dir, Missing: []string{"POSTGRES_PASSWORD (pass --postgres-password-file <file>)"}}, noStart: true,
+			stderr: "--postgres-password-file", noStdout: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			var got deploy.EdgeBootstrapOptions
+			err := edgeBootstrap(&stdout, &stderr, deploy.EdgeBootstrapOptions{File: "b.json", NoStart: tc.noStart, EdgeURL: "https://e.example.com"},
+				func(o deploy.EdgeBootstrapOptions, _ time.Time) (deploy.EdgeBootstrapResult, error) {
+					got = o
+					return tc.res, nil
+				})
+			if err != nil || got.File != "b.json" || got.EdgeURL != "https://e.example.com" {
+				t.Fatalf("err = %v, options = %+v", err, got)
+			}
+			if !strings.Contains(stdout.String()+stderr.String(), tc.stdout+tc.stderr) {
+				t.Errorf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+			}
+			if tc.stderr != "" && !strings.Contains(stderr.String(), tc.stderr) {
+				t.Errorf("stderr = %q", stderr.String())
+			}
+			if (tc.noStdout && stdout.Len() != 0) || (tc.noErrs && stderr.Len() != 0) {
+				t.Errorf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+			}
+		})
+	}
+	if err := edgeBootstrap(io.Discard, io.Discard, deploy.EdgeBootstrapOptions{}, func(deploy.EdgeBootstrapOptions, time.Time) (deploy.EdgeBootstrapResult, error) {
+		return deploy.EdgeBootstrapResult{}, errors.New("refused")
+	}); err == nil {
+		t.Error("an error was swallowed")
 	}
 }

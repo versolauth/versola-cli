@@ -23,6 +23,11 @@ var (
 	edgeBootstrapKeyFile string
 	edgeBootstrapVersion string
 	edgeBootstrapNoStart bool
+
+	edgeBootstrapEdgeURL          string
+	edgeBootstrapPostgresURL      string
+	edgeBootstrapPostgresUser     string
+	edgeBootstrapPostgresPassword string
 )
 
 var edgeCmd = &cobra.Command{
@@ -39,7 +44,8 @@ API, on this host) and prints a bootstrap bundle -- what an operator carries to
 the machine that will run it: the edge's id, a one-time enrollment token
 (valid for an hour, spent by the first enrollment), where to enroll and where
 to connect afterwards, and the certificates of central's and auth's listeners
-to pin. The bundle holds nothing that can be used again.
+to pin, and auth's public URL (the deployment's --auth-url, which the edge
+sends browsers to). The bundle holds nothing that can be used again.
 
   versola edge add eu-central --group eu > eu-central.json
 
@@ -54,7 +60,7 @@ overwritten) -- carry it by another channel than the bundle, and pass it to
 
 --existing issues a new token for an edge that is already registered (its
 identity volume was lost, the token expired); nothing is registered and no key
-is written.
+is written. The bundle carries the group central has for the edge.
 
 A remote edge needs the names it connects to: configure the deployment with
 --central-domain and --central-mtls-domain first (and --mtls-domain, to
@@ -69,23 +75,37 @@ var edgeBootstrapCmd = &cobra.Command{
 	Short: "On a remote machine: set an edge up from its bootstrap bundle and start it",
 	Long: `bootstrap runs on the machine that is to run the edge. It reads the bundle
 "versola edge add" printed and writes the edge's directory
-(~/.versola/edge/<id>, or --dir): its configuration -- where to enroll, where
-to connect, which listener certificates to pin --, the one-time token, a
-compose file with a volume for its identity (the key and certificate it
-enrolls for; keep it: without it the edge enrolls again at every start, and
-the token is spent), and then starts it with Docker Compose.
+(~/.versola/edge/<id>, or --dir): a complete configuration (edge.conf --
+where to enroll and connect, which listener certificates to pin, auth's
+public URL, this edge's own URL and database), the one-time token, a compose
+file with a volume for its identity (the key and certificate it enrolls for;
+keep it: without it the edge enrolls again at every start, and the token is
+spent), and then starts it with Docker Compose.
 
-  versola edge bootstrap eu-central.json --key-file eu-central.edge-key.json
+  versola edge bootstrap eu-central.json --key-file eu-central.edge-key.json \
+    --edge-url https://edge.example.com \
+    --postgres-url 'jdbc:postgresql://db.example.com:5432/edge?sslmode=verify-full' \
+    --postgres-password-file edge-db.password
 
-edge.local.conf and edge.secrets.env in that directory are yours: created
-empty if missing, never overwritten (edge.secrets.env is, only when --key-file
-is given, to carry the key central registered the edge with). Everything
-else the edge needs -- its public URL, keys of its own -- goes into
-edge.local.conf, which edge.conf includes last.
+--edge-url (required) is the public origin clients reach this edge on.
+--postgres-url (required) is the JDBC URL of the edge's own database, which
+the edge migrates at start; a database not on this host must be reached over
+verified TLS (sslmode=verify-full). --postgres-user is the user (default
+edge); --postgres-password-file a file holding its password.
+
+edge.conf is rewritten on every run. edge.local.conf is yours: created with
+comments only if missing, never overwritten, included last by edge.conf, so what you set
+there overrides it. edge.secrets.env (0600) is merged, never replaced: the
+edge's own keys (token encryption, sessions, DPoP nonces, native blobs) are
+generated into it once and kept; --key-file replaces only EDGE_KEY_ID and
+EDGE_PRIVATE_KEY, --postgres-password-file only POSTGRES_PASSWORD. While the
+key or the password is missing, the files are written but the edge is not
+started, and bootstrap says what to add.
 
 The token expires an hour after "edge add": a late bundle is refused, and
 "versola edge add <id> --existing" on the central's machine issues a new
-token. A partner's edge does not use this: it has no connection to central.
+token. A partner's edge is not set up by this command: it enrolls with a
+token of its own and runs another configuration (mode = "partner").
 
 --no-start writes the files and stops.`,
 	Args: cobra.ExactArgs(1),
@@ -101,6 +121,10 @@ func init() {
 	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapKeyFile, "key-file", "", "the key file `versola edge add` wrote: its key goes into the edge's secrets")
 	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapVersion, "version", "", "run this Versola release instead of the one the bundle names")
 	edgeBootstrapCmd.Flags().BoolVar(&edgeBootstrapNoStart, "no-start", false, "write the files and stop")
+	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapEdgeURL, "edge-url", "", "required: the public origin clients reach this edge on (https://edge.<domain>)")
+	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapPostgresURL, "postgres-url", "", "required: the JDBC URL of the edge's own database (jdbc:postgresql://<host>:5432/<db>?sslmode=verify-full)")
+	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapPostgresUser, "postgres-user", "edge", "the user the edge connects to its database as")
+	edgeBootstrapCmd.Flags().StringVar(&edgeBootstrapPostgresPassword, "postgres-password-file", "", "a file holding the database password: it goes into edge.secrets.env (POSTGRES_PASSWORD), never printed")
 	edgeCmd.AddCommand(edgeAddCmd, edgeBootstrapCmd)
 }
 
@@ -168,7 +192,7 @@ func edgeAdd(stdout, stderr io.Writer, id, group string, existing bool, out, key
 		return err
 	}
 	b := res.Bundle
-	fmt.Fprintf(stderr, "\nEdge %s%s: enrolls at %s, connects to %s. The token expires %s and works once.\n", b.EdgeID, groupNote(b.Group), b.EnrollURL, b.CentralURL, b.TokenExpiresAt.Local().Format(time.RFC3339))
+	fmt.Fprintf(stderr, "\nEdge %s%s: enrolls at %s, connects to %s, sends browsers to %s. The token expires %s and works once.\n", b.EdgeID, groupNote(b.Group), b.EnrollURL, b.CentralURL, b.VersolaURL, b.TokenExpiresAt.Local().Format(time.RFC3339))
 	fmt.Fprintln(stderr, "Fingerprints of the pinned certificates (compare them with what the edge machine shows):")
 	for _, p := range b.CentralPins {
 		fmt.Fprintf(stderr, "  central  %s\n", deploy.Fingerprint(p))
@@ -206,16 +230,38 @@ func writeNew(path string, content []byte) error {
 }
 
 func runEdgeBootstrap(cmd *cobra.Command, args []string) error {
-	dir, err := deploy.EdgeBootstrap(deploy.EdgeBootstrapOptions{
+	return edgeBootstrap(os.Stdout, os.Stderr, deploy.EdgeBootstrapOptions{
 		File: args[0], Dir: edgeBootstrapDir, KeyFile: edgeBootstrapKeyFile, Version: edgeBootstrapVersion, NoStart: edgeBootstrapNoStart,
-	}, time.Now())
+		EdgeURL: edgeBootstrapEdgeURL, PostgresURL: edgeBootstrapPostgresURL, PostgresUser: edgeBootstrapPostgresUser,
+		PostgresPasswordFile: edgeBootstrapPostgresPassword,
+	}, deploy.EdgeBootstrap)
+}
+
+// edgeBootstrap does what `edge bootstrap` does and says what came of it:
+// started, written only (--no-start), or written but not started because
+// edge.secrets.env still lacks what the edge cannot start without.
+func edgeBootstrap(stdout, stderr io.Writer, o deploy.EdgeBootstrapOptions, do func(deploy.EdgeBootstrapOptions, time.Time) (deploy.EdgeBootstrapResult, error)) error {
+	res, err := do(o, time.Now())
 	if err != nil {
 		return err
 	}
-	if edgeBootstrapNoStart {
-		fmt.Printf("Wrote the edge's files to %s. Start it with: docker compose -f %s up -d\n", dir, filepath.Join(dir, "compose.yml"))
+	compose := filepath.Join(res.Dir, "compose.yml")
+	secrets := filepath.Join(res.Dir, "edge.secrets.env")
+	if len(res.Missing) > 0 {
+		fmt.Fprintf(stderr, "Wrote the edge's files to %s, but %s still lacks:\n", res.Dir, secrets)
+		for _, m := range res.Missing {
+			fmt.Fprintf(stderr, "  %s\n", m)
+		}
+		if o.NoStart {
+			return nil
+		}
+		fmt.Fprintf(stderr, "The edge was not started: it cannot start without them. Run `versola edge bootstrap` again with the\nflags above (while the bundle's token is valid), or add the lines to %s and start it with:\n  docker compose -f %s up -d\n", secrets, compose)
 		return nil
 	}
-	fmt.Printf("The edge is starting from %s. Its identity volume is edge-identity: keep it.\n", dir)
+	if !res.Started {
+		fmt.Fprintf(stdout, "Wrote the edge's files to %s. Start it with: docker compose -f %s up -d\n", res.Dir, compose)
+		return nil
+	}
+	fmt.Fprintf(stdout, "The edge is starting from %s. Its identity volume is edge-identity: keep it.\n", res.Dir)
 	return nil
 }

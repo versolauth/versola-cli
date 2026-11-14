@@ -34,6 +34,16 @@ var edgeCmd = &cobra.Command{
 	Use:     "edge",
 	GroupID: groupAdvanced,
 	Short:   "Register an edge that runs elsewhere, and set one up",
+	Long: `edge sets up an edge that runs on another machine than the deployment.
+
+The operator's own edge in another network: "edge add" on the deployment's
+machine registers it and prints a bootstrap bundle, "edge bootstrap" on the
+edge's machine sets it up from that bundle.
+
+A partner's edge (an organisation outside the operator, with an enrollment
+token from the operator): "edge partner" on the partner's machine writes its
+configuration and starts it. No bundle, and no "edge add|bootstrap", is
+involved.`,
 }
 
 var edgeAddCmd = &cobra.Command{
@@ -105,7 +115,8 @@ started, and bootstrap says what to add.
 The token expires an hour after "edge add": a late bundle is refused, and
 "versola edge add <id> --existing" on the central's machine issues a new
 token. A partner's edge is not set up by this command: it enrolls with a
-token of its own and runs another configuration (mode = "partner").
+token of its own and runs another configuration (mode = "partner"), which
+"versola edge partner" writes on the partner's machine.
 
 --no-start writes the files and stops.`,
 	Args: cobra.ExactArgs(1),

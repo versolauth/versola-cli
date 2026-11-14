@@ -452,7 +452,7 @@ func (a *httpEdgeAdmin) groupOf(id string) (string, bool, error) {
 		// A partner's edge runs another configuration (mode = "partner"),
 		// which `edge bootstrap` does not write.
 		if e.GroupKind != "" && e.GroupKind != "first_party" {
-			return "", false, fmt.Errorf("the edge %s is in a partner's group (%s): a partner's edge is not set up with `versola edge bootstrap`", id, e.GroupID)
+			return "", false, fmt.Errorf("the edge %s is in a partner's group (%s): a partner's edge is not set up with `versola edge bootstrap` (the partner runs `versola edge partner` with the enrollment token of the partner's edge)", id, e.GroupID)
 		}
 		if e.GroupID == "default" {
 			return "", true, nil
@@ -630,22 +630,28 @@ func checkSite(o EdgeBootstrapOptions) error {
 	if err := checkOrigin(o.EdgeURL, "https", "http"); err != nil {
 		return fmt.Errorf("--edge-url %q %v", o.EdgeURL, err)
 	}
-	if o.PostgresURL == "" {
+	return checkPostgres(o.PostgresURL, o.PostgresUser)
+}
+
+// checkPostgres validates the edge's own database as `edge bootstrap` and
+// `edge partner` are told it: a JDBC URL without a password, and a user.
+func checkPostgres(postgresURL, postgresUser string) error {
+	if postgresURL == "" {
 		return fmt.Errorf("--postgres-url is required: the JDBC URL of the edge's own database (jdbc:postgresql://<host>:5432/<db>?sslmode=verify-full)")
 	}
 	// Not echoed: whatever it holds is the operator's, and may be a secret.
-	authority := strings.TrimPrefix(o.PostgresURL, "jdbc:postgresql://")
+	authority := strings.TrimPrefix(postgresURL, "jdbc:postgresql://")
 	if i := strings.IndexAny(authority, "/?"); i >= 0 {
 		authority = authority[:i]
 	}
-	if jdbcPasswordPattern.MatchString(o.PostgresURL) || strings.Contains(authority, "@") {
+	if jdbcPasswordPattern.MatchString(postgresURL) || strings.Contains(authority, "@") {
 		return fmt.Errorf("--postgres-url holds a password: pass it with --postgres-password-file instead (it goes into edge.secrets.env, not the world-readable edge.conf)")
 	}
-	if !strings.HasPrefix(o.PostgresURL, "jdbc:postgresql://") || strings.ContainsAny(o.PostgresURL, "\"\\\n\r\t $") {
+	if !strings.HasPrefix(postgresURL, "jdbc:postgresql://") || strings.ContainsAny(postgresURL, "\"\\\n\r\t $") {
 		return fmt.Errorf("--postgres-url is not a JDBC URL a config can carry: jdbc:postgresql://<host>:5432/<db>?sslmode=verify-full, without quotes, spaces or '$'")
 	}
-	if !pgUserPattern.MatchString(o.PostgresUser) {
-		return fmt.Errorf("--postgres-user %q: use letters, digits, '_', '.', '@' and '-', starting with a letter or '_', up to 63 characters", o.PostgresUser)
+	if !pgUserPattern.MatchString(postgresUser) {
+		return fmt.Errorf("--postgres-user %q: use letters, digits, '_', '.', '@' and '-', starting with a letter or '_', up to 63 characters", postgresUser)
 	}
 	return nil
 }
@@ -725,7 +731,42 @@ central {
   }
 }
 
-security {
+%[11]s`, b.EdgeID, b.EdgeID, b.VersolaURL, site.EdgeURL,
+		b.CentralURL, pinList("central", centralPins), edgeIdentityDir, group, b.EnrollURL, edgeConfigDir+"/token",
+		edgeCommonConf(site.PostgresURL, site.PostgresUser))
+	if b.AuthURL != "" {
+		// The native flow is DPoP end to end: the edge refuses a native block
+		// without a dpop one.
+		fmt.Fprintf(&conf, `
+# The native-app back channel, straight to auth's mutual-TLS listener. The pin
+# is a list so auth's listener certificate can be rotated with an overlap window.
+native {
+  auth-mutual-tls-url  = %q
+  trusted-certificates = [%s]
+  blob-key             = ${EDGE_NATIVE_BLOB_KEY}
+}
+
+# RFC 9449 proof validation: the salt keying this edge's own nonce space, and
+# the two windows. What a proof may be signed with, and whether a nonce is
+# required, come from central.
+dpop {
+  nonce-salt = ${EDGE_DPOP_NONCE_SALT}
+  iat-leeway = "60 seconds"
+  nonce-ttl = "600 seconds"
+}
+`, b.AuthURL, pinList("auth", authPins))
+	}
+	fmt.Fprintf(&conf, "\ninclude file(%q)\n", edgeConfigDir+"/edge.local.conf")
+	files["edge.conf"] = conf.Bytes()
+	files["token"] = []byte(b.EnrollmentToken + "\n")
+	files["compose.yml"] = []byte(edgeCompose(b.EdgeID, version))
+	return files, nil
+}
+
+// edgeCommonConf is the part of edge.conf both kinds of edge share: its own
+// keys, its database and the cleanup of its tables.
+func edgeCommonConf(postgresURL, postgresUser string) string {
+	return fmt.Sprintf(`security {
   token-encryption {
     key = ${EDGE_TOKEN_ENC_KEY}
   }
@@ -740,8 +781,8 @@ security {
 # its schema at start. In env = prod a database that is not on this host must
 # be reached over verified TLS (sslmode=verify-full).
 postgres {
-  url = %[11]q
-  user = %[12]q
+  url = %[1]q
+  user = %[2]q
   password = ${POSTGRES_PASSWORD}
   maximum-pool-size = 10
   minimum-idle = 10
@@ -774,48 +815,29 @@ cleanup {
     }
   ]
 }
-`, b.EdgeID, b.EdgeID, b.VersolaURL, site.EdgeURL,
-		b.CentralURL, pinList("central", centralPins), edgeIdentityDir, group, b.EnrollURL, edgeConfigDir+"/token",
-		site.PostgresURL, site.PostgresUser)
-	if b.AuthURL != "" {
-		// The native flow is DPoP end to end: the edge refuses a native block
-		// without a dpop one.
-		fmt.Fprintf(&conf, `
-# The native-app back channel, straight to auth's mutual-TLS listener. The pin
-# is a list so auth's listener certificate can be rotated with an overlap window.
-native {
-  auth-mutual-tls-url  = %q
-  trusted-certificates = [%s]
-  blob-key             = ${EDGE_NATIVE_BLOB_KEY}
-}
-
-# RFC 9449 proof validation: the salt keying this edge's own nonce space, and
-# the two windows. What a proof may be signed with, and whether a nonce is
-# required, come from central.
-dpop {
-  nonce-salt = ${EDGE_DPOP_NONCE_SALT}
-  iat-leeway = "60 seconds"
-  nonce-ttl = "600 seconds"
-}
-`, b.AuthURL, pinList("auth", authPins))
-	}
-	fmt.Fprintf(&conf, "\ninclude file(%q)\n", edgeConfigDir+"/edge.local.conf")
-	files["edge.conf"] = conf.Bytes()
-	files["token"] = []byte(b.EnrollmentToken + "\n")
-	files["compose.yml"] = []byte(edgeCompose(b.EdgeID, version))
-	return files, nil
+`, postgresURL, postgresUser)
 }
 
 // edgeCompose is the edge's own compose file. host networking: the edge's
 // ports are whatever its edge.local.conf's operator puts a proxy in front of.
 func edgeCompose(id, version string) string {
-	return fmt.Sprintf(`# Generated by `+"`versola edge bootstrap`"+` -- rewritten by it, don't edit by hand.
-name: versola-edge-%[1]s
+	return composeForEdge("`versola edge bootstrap`", "versola-edge-"+id, version,
+		"Secrets (the edge's key, see `versola edge add`, its own keys and the database password).", "")
+}
+
+// composeForEdge is the compose file of one edge, of either kind: generator
+// names the command that writes it, project is the Compose project and
+// container name, secrets the comment on edge.secrets.env, and extraVolumes
+// more entries of the edge's volumes list (each line indented and ending in
+// a newline), mounted before the identity volume.
+func composeForEdge(generator, project, version, secrets, extraVolumes string) string {
+	return fmt.Sprintf(`# Generated by %[5]s -- rewritten by it, don't edit by hand.
+name: %[1]s
 
 services:
   edge:
     image: ghcr.io/versolauth/versola-edge:%[2]s
-    container_name: versola-edge-%[1]s
+    container_name: %[1]s
     restart: unless-stopped
     stop_grace_period: 20s
     network_mode: host
@@ -831,7 +853,7 @@ services:
       # The edge checks its schema at start and stops on an old one: this edge's
       # own database gets its migrations from the edge itself.
       RUN_MIGRATIONS: "true"
-    # Secrets (the edge's key, see `+"`versola edge add`"+`, its own keys and the database password).
+    # %[6]s
     env_file:
       - path: ./edge.secrets.env
         required: false
@@ -840,13 +862,13 @@ services:
       - ./edge.local.conf:%[3]s/edge.local.conf:ro
       - ./token:%[3]s/token:ro
       - ./pins:%[3]s/pins:ro
-      # The identity: key and certificate chain. Without it the edge enrolls
+%[7]s      # The identity: key and certificate chain. Without it the edge enrolls
       # again at every start, and the token is spent -- keep it.
       - edge-identity:%[4]s
 
 volumes:
   edge-identity:
-`, id, version, edgeConfigDir, edgeIdentityDir)
+`, project, version, edgeConfigDir, edgeIdentityDir, generator, secrets, extraVolumes)
 }
 
 // edgeGeneratedSecrets are the edge's own keys: 32 random bytes each,

@@ -2,8 +2,11 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -45,6 +48,10 @@ type BootstrapBundle struct {
 	// VersolaVersion is the release the central side runs: the edge is run
 	// from the same.
 	VersolaVersion string `json:"versolaVersion,omitempty"`
+	// VersolaURL is auth's public URL (the deployment's --auth-url): the
+	// edge's `versola-url`, where browsers are sent to sign in and the issuer
+	// its tokens are checked against.
+	VersolaURL string `json:"authUrl"`
 
 	EnrollmentToken string    `json:"enrollmentToken"`
 	TokenExpiresAt  time.Time `json:"tokenExpiresAt"`
@@ -82,6 +89,9 @@ type edgeAdmin interface {
 	register(id, group string) (keyID, privateKey string, err error)
 	// issueToken creates a one-time enrollment token for an existing edge.
 	issueToken(id string) (token string, expiresAt time.Time, err error)
+	// groupOf is the group a registered edge is in ("" for the default
+	// group); found is false when central has no such edge.
+	groupOf(id string) (group string, found bool, err error)
 }
 
 // EdgeAddOptions: see `versola edge add`.
@@ -127,6 +137,12 @@ func buildEdgeAdd(st *state.State, o EdgeAddOptions, api edgeAdmin, pins pinRead
 	if st.CentralDomain == "" || st.CentralMTLSDomain == "" {
 		return EdgeAddResult{}, fmt.Errorf("a remote edge needs central's enrollment name and its mutual-TLS name: configure with --central-domain central.<domain> and --central-mtls-domain central-mtls.<domain> first (and `versola up`) -- see the README, \"Public names\"")
 	}
+	// The edge's versola-url: without it the edge cannot start, so a bundle
+	// without it is refused here, before anything is registered.
+	authURL := strings.TrimSuffix(st.AuthURL, "/")
+	if err := checkOrigin(authURL, "https", "http"); err != nil {
+		return EdgeAddResult{}, fmt.Errorf("the deployment's auth URL %q (--auth-url, the edge's versola-url) %v -- configure with --auth-url https://id.<domain> first", st.AuthURL, err)
+	}
 	centralPins, authPins, err := pins()
 	if err != nil {
 		return EdgeAddResult{}, err
@@ -136,7 +152,7 @@ func buildEdgeAdd(st *state.State, o EdgeAddOptions, api edgeAdmin, pins pinRead
 	}
 
 	res := EdgeAddResult{Bundle: BootstrapBundle{
-		Version: BundleVersion, EdgeID: o.ID, Group: o.Group, VersolaVersion: st.Version,
+		Version: BundleVersion, EdgeID: o.ID, Group: o.Group, VersolaVersion: st.Version, VersolaURL: authURL,
 		EnrollURL: "https://" + st.CentralDomain, CentralURL: "https://" + st.CentralMTLSDomain, CentralPins: centralPins,
 	}}
 	if st.MTLSDomain != "" {
@@ -146,6 +162,19 @@ func buildEdgeAdd(st *state.State, o EdgeAddOptions, api edgeAdmin, pins pinRead
 		if res.KeyID, res.PrivateKey, err = api.register(o.ID, o.Group); err != nil {
 			return EdgeAddResult{}, err
 		}
+	} else {
+		// The edge names its group when it asks for its certificate, and
+		// central refuses another one than it was registered in: the bundle of
+		// an existing edge carries the group central has for it, asked before
+		// a token is spent on a bundle that cannot enroll.
+		group, found, err := api.groupOf(o.ID)
+		if err != nil {
+			return EdgeAddResult{}, err
+		}
+		if !found {
+			return EdgeAddResult{}, fmt.Errorf("central has no edge %s: register it with `versola edge add %s` (without --existing)", o.ID, o.ID)
+		}
+		res.Bundle.Group = group
 	}
 	token, expires, err := api.issueToken(o.ID)
 	if err != nil {
@@ -405,6 +434,39 @@ func (a *httpEdgeAdmin) register(id, group string) (string, string, error) {
 	return resp.KeyID, resp.PrivateKey, nil
 }
 
+func (a *httpEdgeAdmin) groupOf(id string) (string, bool, error) {
+	var resp struct {
+		Edges []struct {
+			ID        string `json:"id"`
+			GroupID   string `json:"groupId"`
+			GroupKind string `json:"groupKind"`
+		} `json:"edges"`
+	}
+	if err := a.do(http.MethodGet, "/configuration/edges", nil, &resp); err != nil {
+		return "", false, err
+	}
+	for _, e := range resp.Edges {
+		if e.ID != id {
+			continue
+		}
+		// A partner's edge runs another configuration (mode = "partner"),
+		// which `edge bootstrap` does not write.
+		if e.GroupKind != "" && e.GroupKind != "first_party" {
+			return "", false, fmt.Errorf("the edge %s is in a partner's group (%s): a partner's edge is not set up with `versola edge bootstrap`", id, e.GroupID)
+		}
+		if e.GroupID == "default" {
+			return "", true, nil
+		}
+		if e.GroupID != "" {
+			if err := ValidEdgeID(e.GroupID); err != nil {
+				return "", false, fmt.Errorf("central's group for the edge %s: %w", id, err)
+			}
+		}
+		return e.GroupID, true, nil
+	}
+	return "", false, nil
+}
+
 func (a *httpEdgeAdmin) issueToken(id string) (string, time.Time, error) {
 	var resp struct {
 		Token     string    `json:"token"`
@@ -434,6 +496,22 @@ type EdgeBootstrapOptions struct {
 	Version string
 	// NoStart writes the files and stops.
 	NoStart bool
+	// EdgeURL is the origin clients reach this edge on (its `edge-url`).
+	EdgeURL string
+	// PostgresURL (JDBC) and PostgresUser are the edge's own database.
+	PostgresURL, PostgresUser string
+	// PostgresPasswordFile holds the database password, "" to keep (or
+	// later add) POSTGRES_PASSWORD in edge.secrets.env by hand.
+	PostgresPasswordFile string
+}
+
+// EdgeBootstrapResult says where the files went and whether the edge was
+// started: it is not when edge.secrets.env still lacks something the edge
+// cannot start without (Missing names it, a variable and how to supply it).
+type EdgeBootstrapResult struct {
+	Dir     string
+	Started bool
+	Missing []string
 }
 
 // edge's paths inside its container.
@@ -462,14 +540,28 @@ func ReadBundle(path string, now time.Time) (BootstrapBundle, error) {
 	if err := ValidEdgeID(b.EdgeID); err != nil {
 		return BootstrapBundle{}, err
 	}
+	if b.Group != "" {
+		if err := ValidEdgeID(b.Group); err != nil {
+			return BootstrapBundle{}, fmt.Errorf("the bundle's group: %w", err)
+		}
+	}
 	if b.EnrollmentToken == "" {
 		return BootstrapBundle{}, fmt.Errorf("the bundle has no enrollment token")
 	}
 	if !b.TokenExpiresAt.After(now) {
 		return BootstrapBundle{}, fmt.Errorf("the enrollment token expired at %s -- on the central's machine, `versola edge add %s --existing` issues a new one", b.TokenExpiresAt.Local().Format(time.RFC3339), b.EdgeID)
 	}
-	for name, u := range map[string]string{"enrollUrl": b.EnrollURL, "centralMtlsUrl": b.CentralURL} {
-		if err := httpsOrigin(name, u); err != nil {
+	// A bundle from a versola before authUrl was carried: the edge cannot
+	// start without auth's public URL, and nothing on this machine knows it.
+	if b.VersolaURL == "" {
+		return BootstrapBundle{}, fmt.Errorf("the bundle has no authUrl (auth's public URL, the edge's versola-url): it was printed by an older versola -- update versola on the central's machine and run `versola edge add %s --existing` there", b.EdgeID)
+	}
+	if err := checkOrigin(b.VersolaURL, "https", "http"); err != nil {
+		return BootstrapBundle{}, fmt.Errorf("the bundle's authUrl %q %v", b.VersolaURL, err)
+	}
+	b.VersolaURL = strings.TrimSuffix(b.VersolaURL, "/")
+	for _, f := range []struct{ name, url string }{{"enrollUrl", b.EnrollURL}, {"centralMtlsUrl", b.CentralURL}} {
+		if err := httpsOrigin(f.name, f.url); err != nil {
 			return BootstrapBundle{}, err
 		}
 	}
@@ -495,19 +587,79 @@ func ReadBundle(path string, now time.Time) (BootstrapBundle, error) {
 
 // httpsOrigin: an https URL with a host, nothing else a config could carry.
 func httpsOrigin(name, raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
-		return fmt.Errorf("the bundle's %s %q is not an https origin", name, raw)
-	}
-	if strings.ContainsAny(raw, "\"\\\n\r ") {
-		return fmt.Errorf("the bundle's %s has characters a config cannot carry", name)
+	if err := checkOrigin(raw, "https"); err != nil {
+		return fmt.Errorf("the bundle's %s %q %v", name, raw, err)
 	}
 	return nil
 }
 
+// checkOrigin: a URL of one of schemes with a host and nothing else (no
+// path, query, fragment or user), and no character that could end the quoted
+// HOCON string it is written into. The error reads after the value.
+func checkOrigin(raw string, schemes ...string) error {
+	if strings.ContainsAny(raw, "\"\\\n\r\t $") {
+		return errors.New("has characters a config cannot carry")
+	}
+	u, err := url.Parse(raw)
+	ok := err == nil && u.Hostname() != "" && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == "" && u.User == nil && !u.ForceQuery
+	if ok {
+		ok = false
+		for _, s := range schemes {
+			ok = ok || u.Scheme == s
+		}
+	}
+	if !ok {
+		return fmt.Errorf("is not an %s origin (%s://host[:port])", strings.Join(schemes, " or "), schemes[0])
+	}
+	return nil
+}
+
+var (
+	pgUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.@-]{0,62}$`)
+	// a password in the JDBC URL would land in edge.conf, which is 0644 and
+	// rewritten: it belongs in edge.secrets.env.
+	jdbcPasswordPattern = regexp.MustCompile(`(?i)[?&;](ssl)?(password|passwd)=`)
+)
+
+// checkSite validates what `edge bootstrap` is told about this machine,
+// before the bundle is read and anything is written.
+func checkSite(o EdgeBootstrapOptions) error {
+	if o.EdgeURL == "" {
+		return fmt.Errorf("--edge-url is required: the public origin clients reach this edge on (https://edge.<domain>), its edge-url")
+	}
+	if err := checkOrigin(o.EdgeURL, "https", "http"); err != nil {
+		return fmt.Errorf("--edge-url %q %v", o.EdgeURL, err)
+	}
+	if o.PostgresURL == "" {
+		return fmt.Errorf("--postgres-url is required: the JDBC URL of the edge's own database (jdbc:postgresql://<host>:5432/<db>?sslmode=verify-full)")
+	}
+	// Not echoed: whatever it holds is the operator's, and may be a secret.
+	authority := strings.TrimPrefix(o.PostgresURL, "jdbc:postgresql://")
+	if i := strings.IndexAny(authority, "/?"); i >= 0 {
+		authority = authority[:i]
+	}
+	if jdbcPasswordPattern.MatchString(o.PostgresURL) || strings.Contains(authority, "@") {
+		return fmt.Errorf("--postgres-url holds a password: pass it with --postgres-password-file instead (it goes into edge.secrets.env, not the world-readable edge.conf)")
+	}
+	if !strings.HasPrefix(o.PostgresURL, "jdbc:postgresql://") || strings.ContainsAny(o.PostgresURL, "\"\\\n\r\t $") {
+		return fmt.Errorf("--postgres-url is not a JDBC URL a config can carry: jdbc:postgresql://<host>:5432/<db>?sslmode=verify-full, without quotes, spaces or '$'")
+	}
+	if !pgUserPattern.MatchString(o.PostgresUser) {
+		return fmt.Errorf("--postgres-user %q: use letters, digits, '_', '.', '@' and '-', starting with a letter or '_', up to 63 characters", o.PostgresUser)
+	}
+	return nil
+}
+
+// edgeSite is what the bundle cannot know: this machine's side of the edge.
+type edgeSite struct {
+	EdgeURL, PostgresURL, PostgresUser string
+}
+
 // edgeFiles renders what `edge bootstrap` puts in the edge's directory, keyed
-// by name; modes are applied by the writer.
-func edgeFiles(b BootstrapBundle, version string) (map[string][]byte, error) {
+// by name; modes are applied by the writer. edge.conf is complete: every key
+// the edge requires is in it, the secrets as ${VAR} substitutions that
+// edge.secrets.env supplies through the container's environment.
+func edgeFiles(b BootstrapBundle, version string, site edgeSite) (map[string][]byte, error) {
 	centralPins, err := normalizePins(b.CentralPins)
 	if err != nil {
 		return nil, err
@@ -528,34 +680,122 @@ func edgeFiles(b BootstrapBundle, version string) (map[string][]byte, error) {
 		}
 		return strings.Join(paths, ", ")
 	}
+	// Central refuses the certificate request of an edge that names another
+	// group than the one it was registered in (422); the edge's own default
+	// is "default", which is what an edge without --group was registered in.
+	group := ""
+	if b.Group != "" {
+		group = fmt.Sprintf("    group     = %q\n", b.Group)
+	}
 	var conf bytes.Buffer
-	fmt.Fprintf(&conf, `# Generated by `+"`versola edge bootstrap`"+` from the bundle of edge %s -- rewritten by it,
-# don't edit by hand: what is yours goes into edge.local.conf, which is included last.
-#
+	fmt.Fprintf(&conf, `# Generated by `+"`versola edge bootstrap`"+` from the bundle of edge %[1]s -- rewritten by it,
+# don't edit by hand: what is yours goes into edge.local.conf, which is included last
+# and overrides anything here. The ${...} values are the edge's secrets, from
+# edge.secrets.env through the container's environment.
+
+env = prod
+id = %[2]q
+key-id = ${EDGE_KEY_ID}
+private-key = ${EDGE_PRIVATE_KEY}
+
+configuration-cache-refresh-interval = "5 minutes"
+
+# Auth's public URL: where browsers are sent to sign in, and the issuer the
+# edge checks tokens against.
+versola-url = %[3]q
+# The origin clients reach this edge on -- what a DPoP proof's htu is
+# rebuilt against, not trusting a forwarded Host header.
+edge-url = %[4]q
+
 # The edge connects to central over mutual TLS with the identity certificate
 # it enrolls for the first time with the token below and renews on its own
 # (at a third of its lifetime left); the key never leaves the identity directory.
 # Central's and auth's listener certificates are pinned, not trusted through a CA.
 central {
-  url = %q
-  enrollment {
-    url        = %q
-    token-file = %q
-  }
+  url = %[5]q
   mutual-tls {
-    trusted-certificates = [%s]
+    trusted-certificates = [%[6]s]
+  }
+  identity {
+    directory = %[7]q
+%[8]s    enrollment {
+      url        = %[9]q
+      token-file = %[10]q
+    }
   }
 }
 
-identity {
-  directory = %q
+security {
+  token-encryption {
+    key = ${EDGE_TOKEN_ENC_KEY}
+  }
+
+  edge-sessions {
+    secret = ${EDGE_SESSIONS_SECRET}
+    ttl = 30 days
+  }
 }
-`, b.EdgeID, b.CentralURL, b.EnrollURL, edgeConfigDir+"/token", pinList("central", centralPins), edgeIdentityDir)
+
+# The edge's own database; with RUN_MIGRATIONS (compose.yml) the edge applies
+# its schema at start. In env = prod a database that is not on this host must
+# be reached over verified TLS (sslmode=verify-full).
+postgres {
+  url = %[11]q
+  user = %[12]q
+  password = ${POSTGRES_PASSWORD}
+  maximum-pool-size = 10
+  minimum-idle = 10
+  connection-timeout = "30 seconds"
+  max-lifetime = "30 minutes"
+  leak-detection-threshold = "60 seconds"
+  pool-metrics-interval = ${?POSTGRES_POOL_METRICS_INTERVAL}
+}
+
+cleanup {
+  max-threads = 2
+  tables = [
+    {
+      table-name = "pending_logins"
+      batch-size = 1000
+      interval   = "5 minutes"
+      key-column = "state"
+    }
+    {
+      table-name = "edge_sessions"
+      batch-size = 500
+      interval   = "1 hour"
+      key-column = "ctid"
+    }
+    {
+      table-name = "revocations"
+      batch-size = 1000
+      interval   = "1 hour"
+      key-column = "revoked_key"
+    }
+  ]
+}
+`, b.EdgeID, b.EdgeID, b.VersolaURL, site.EdgeURL,
+		b.CentralURL, pinList("central", centralPins), edgeIdentityDir, group, b.EnrollURL, edgeConfigDir+"/token",
+		site.PostgresURL, site.PostgresUser)
 	if b.AuthURL != "" {
+		// The native flow is DPoP end to end: the edge refuses a native block
+		// without a dpop one.
 		fmt.Fprintf(&conf, `
+# The native-app back channel, straight to auth's mutual-TLS listener. The pin
+# is a list so auth's listener certificate can be rotated with an overlap window.
 native {
   auth-mutual-tls-url  = %q
   trusted-certificates = [%s]
+  blob-key             = ${EDGE_NATIVE_BLOB_KEY}
+}
+
+# RFC 9449 proof validation: the salt keying this edge's own nonce space, and
+# the two windows. What a proof may be signed with, and whether a nonce is
+# required, come from central.
+dpop {
+  nonce-salt = ${EDGE_DPOP_NONCE_SALT}
+  iat-leeway = "60 seconds"
+  nonce-ttl = "600 seconds"
 }
 `, b.AuthURL, pinList("auth", authPins))
 	}
@@ -588,7 +828,10 @@ services:
       DPORT: 8096
       CONFIG_PATH: /app/config/env.conf
       BIND_HOST: "127.0.0.1"
-    # Secrets (the edge's key, see `+"`versola edge add`"+`) are the operator's, in this file.
+      # The edge checks its schema at start and stops on an old one: this edge's
+      # own database gets its migrations from the edge itself.
+      RUN_MIGRATIONS: "true"
+    # Secrets (the edge's key, see `+"`versola edge add`"+`, its own keys and the database password).
     env_file:
       - path: ./edge.secrets.env
         required: false
@@ -606,39 +849,80 @@ volumes:
 `, id, version, edgeConfigDir, edgeIdentityDir)
 }
 
+// edgeGeneratedSecrets are the edge's own keys: 32 random bytes each,
+// generated once into edge.secrets.env and never replaced there --
+// EDGE_TOKEN_ENC_KEY encrypts the sessions the edge stores, so a new one
+// makes every stored session unreadable.
+var edgeGeneratedSecrets = []string{"EDGE_TOKEN_ENC_KEY", "EDGE_SESSIONS_SECRET", "EDGE_DPOP_NONCE_SALT", "EDGE_NATIVE_BLOB_KEY"}
+
+const edgeSecretsHeader = "# The edge's secrets. `versola edge bootstrap` keeps every line here: it adds the edge's\n" +
+	"# own keys when they are missing, and replaces EDGE_KEY_ID/EDGE_PRIVATE_KEY only with\n" +
+	"# --key-file and POSTGRES_PASSWORD only with --postgres-password-file.\n"
+
 // EdgeBootstrap puts the edge's configuration and state volume on this
 // machine and starts it. Written under a 0700 directory, the token and the
 // secrets 0600; nothing is overwritten that the operator owns
-// (edge.local.conf, edge.secrets.env).
-func EdgeBootstrap(o EdgeBootstrapOptions, now time.Time) (dir string, err error) {
+// (edge.local.conf; edge.secrets.env is merged, never replaced).
+func EdgeBootstrap(o EdgeBootstrapOptions, now time.Time) (EdgeBootstrapResult, error) {
+	o.EdgeURL = strings.TrimSuffix(o.EdgeURL, "/")
+	if err := checkSite(o); err != nil {
+		return EdgeBootstrapResult{}, err
+	}
 	b, err := ReadBundle(o.File, now)
 	if err != nil {
-		return "", err
+		return EdgeBootstrapResult{}, err
 	}
 	version := o.Version
 	if version == "" {
 		version = b.VersolaVersion
 	}
 	if version == "" || strings.ContainsAny(version, "/:@ \"\\\n") {
-		return "", fmt.Errorf("the bundle names no Versola release (or an unusable one): pass --version")
+		return EdgeBootstrapResult{}, fmt.Errorf("the bundle names no Versola release (or an unusable one): pass --version")
 	}
-	files, err := edgeFiles(b, version)
+	files, err := edgeFiles(b, version, edgeSite{EdgeURL: o.EdgeURL, PostgresURL: o.PostgresURL, PostgresUser: o.PostgresUser})
 	if err != nil {
-		return "", err
+		return EdgeBootstrapResult{}, err
 	}
-	dir = o.Dir
+	// Everything that is read from the operator's files is read before
+	// anything is written: a bad key or password file leaves no half-made
+	// directory behind.
+	var set []envEntry
+	if o.KeyFile != "" {
+		keyID, privateKey, err := keyFileEnv(o.KeyFile)
+		if err != nil {
+			return EdgeBootstrapResult{}, err
+		}
+		set = append(set, envEntry{"EDGE_KEY_ID", keyID, true}, envEntry{"EDGE_PRIVATE_KEY", privateKey, true})
+	}
+	if o.PostgresPasswordFile != "" {
+		pw, err := readPasswordFile(o.PostgresPasswordFile)
+		if err != nil {
+			return EdgeBootstrapResult{}, err
+		}
+		set = append(set, envEntry{"POSTGRES_PASSWORD", pw, true})
+	}
+	for _, name := range edgeGeneratedSecrets {
+		v, err := randomKey()
+		if err != nil {
+			return EdgeBootstrapResult{}, err
+		}
+		set = append(set, envEntry{name, v, false})
+	}
+
+	dir := o.Dir
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", err
+			return EdgeBootstrapResult{}, err
 		}
 		dir = filepath.Join(home, ".versola", "edge", b.EdgeID)
 	}
 	if dir, err = filepath.Abs(dir); err != nil {
-		return "", err
+		return EdgeBootstrapResult{}, err
 	}
+	res := EdgeBootstrapResult{Dir: dir}
 	if err := os.MkdirAll(filepath.Join(dir, "pins"), 0o700); err != nil {
-		return "", err
+		return res, err
 	}
 	// pins/ is replaced as a whole: a pin that is gone from the bundle must not linger.
 	old, _ := filepath.Glob(filepath.Join(dir, "pins", "*.crt"))
@@ -651,36 +935,52 @@ func EdgeBootstrap(o EdgeBootstrapOptions, now time.Time) (dir string, err error
 			mode = 0o600
 		}
 		if err := fsutil.WriteFileAtomic(filepath.Join(dir, name), content, mode); err != nil {
-			return "", fmt.Errorf("couldn't write %s: %w", name, err)
+			return res, fmt.Errorf("couldn't write %s: %w", name, err)
 		}
 	}
-	if err := ensureOwnerFile(filepath.Join(dir, "edge.local.conf"), "# Your own edge configuration (its public URL, keys, whatever the edge needs beyond\n# what `versola edge bootstrap` writes in edge.conf). Never overwritten.\n", 0o644); err != nil {
-		return "", err
+	if err := ensureOwnerFile(filepath.Join(dir, "edge.local.conf"), "# Your own edge configuration: edge.conf includes this file last, so what is set here\n# overrides what `versola edge bootstrap` generates there. Never overwritten.\n#\n# Behind a reverse proxy, and only if the edge is reachable solely through it, read the\n# caller's address for the rate limits from the proxy's header:\n# client-ip = \"forwarded\"\n", 0o644); err != nil {
+		return res, err
 	}
-	secrets := "# The edge's secrets. Never overwritten by `versola edge bootstrap`.\n"
-	if o.KeyFile != "" {
-		kv, err := keyFileEnv(o.KeyFile)
-		if err != nil {
-			return "", err
+	secretsPath := filepath.Join(dir, "edge.secrets.env")
+	existing, err := os.ReadFile(secretsPath)
+	if err != nil && !os.IsNotExist(err) {
+		return res, fmt.Errorf("couldn't read edge.secrets.env: %w", err)
+	}
+	if os.IsNotExist(err) {
+		existing = []byte(edgeSecretsHeader)
+	}
+	// An earlier versola wrote the key as central hands it out (base64url),
+	// which the edge cannot read: re-encoded in place, never printed.
+	if o.KeyFile == "" {
+		if v := envLastValue(string(existing), "EDGE_PRIVATE_KEY"); strings.ContainsAny(v, "-_") {
+			if std, err := standardBase64(v); err == nil {
+				set = append(set, envEntry{"EDGE_PRIVATE_KEY", std, true})
+			}
 		}
-		secrets += kv
 	}
-	if err := ensureOwnerFile(filepath.Join(dir, "edge.secrets.env"), secrets, 0o600); err != nil {
-		return "", err
+	merged := mergeEnv(string(existing), set)
+	if err := fsutil.WriteFileAtomic(secretsPath, []byte(merged), 0o600); err != nil {
+		return res, fmt.Errorf("couldn't write edge.secrets.env: %w", err)
 	}
-	if o.KeyFile != "" {
-		// A key file that was passed is the newest word on the secret.
-		if err := fsutil.WriteFileAtomic(filepath.Join(dir, "edge.secrets.env"), []byte(secrets), 0o600); err != nil {
-			return "", err
-		}
+	if !envHasValue(merged, "EDGE_KEY_ID") || !envHasValue(merged, "EDGE_PRIVATE_KEY") {
+		res.Missing = append(res.Missing, "EDGE_KEY_ID/EDGE_PRIVATE_KEY (the key `versola edge add` wrote: pass --key-file <id>.edge-key.json)")
 	}
-	if o.NoStart {
-		return dir, nil
+	if !envHasValue(merged, "POSTGRES_PASSWORD") {
+		res.Missing = append(res.Missing, "POSTGRES_PASSWORD (the edge's database password: pass --postgres-password-file <file>)")
 	}
-	if err := docker.Run("compose", "-f", filepath.Join(dir, "compose.yml"), "up", "-d"); err != nil {
-		return dir, fmt.Errorf("couldn't start the edge: %w -- the files are in %s", err, dir)
+	// An edge started without them stops at once and is restarted again and
+	// again (restart: unless-stopped): not started until they are there.
+	if o.NoStart || len(res.Missing) > 0 {
+		return res, nil
 	}
-	return dir, nil
+	// --force-recreate: edge.conf is bind-mounted and replaced by a rename,
+	// which Compose does not see as a change; a re-run with other values must
+	// restart the edge on them. Its state is in the identity volume, kept.
+	if err := docker.Run("compose", "-f", filepath.Join(dir, "compose.yml"), "up", "-d", "--force-recreate"); err != nil {
+		return res, fmt.Errorf("couldn't start the edge: %w -- the files are in %s", err, dir)
+	}
+	res.Started = true
+	return res, nil
 }
 
 // ensureOwnerFile creates a file that is the operator's, and leaves it alone
@@ -694,22 +994,156 @@ func ensureOwnerFile(path, content string, mode os.FileMode) error {
 	return fsutil.WriteFileAtomic(path, []byte(content), mode)
 }
 
-// keyFileEnv turns the key file `edge add` wrote into the edge's secret
-// variables, never echoing them.
-func keyFileEnv(path string) (string, error) {
+// envEntry is a variable `edge bootstrap` puts into edge.secrets.env:
+// replace says whether a value already there gives way to this one (the key
+// and password the operator just passed) or is kept (generated keys).
+type envEntry struct {
+	key, value string
+	replace    bool
+}
+
+// envLineKey is the variable a line of an env file sets, "" for a comment
+// or a blank line.
+func envLineKey(line string) string {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "#") {
+		return ""
+	}
+	t = strings.TrimPrefix(t, "export ")
+	k, _, ok := strings.Cut(t, "=")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(k)
+}
+
+// envHasValue: content sets key to something that is not empty.
+func envHasValue(content, key string) bool {
+	return envLastValue(content, key) != ""
+}
+
+// envLastValue is the value content sets key to, unquoted: that of the last
+// line for it, the one Compose uses.
+func envLastValue(content, key string) string {
+	value := ""
+	for _, line := range strings.Split(content, "\n") {
+		if envLineKey(line) != key {
+			continue
+		}
+		_, v, _ := strings.Cut(line, "=")
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		value = v
+	}
+	return value
+}
+
+// mergeEnv keeps every line of content and puts each entry in: a line that
+// sets its key is rewritten in place when the entry replaces, or when the
+// value there is empty; otherwise it is kept. A key with no line is
+// appended.
+func mergeEnv(content string, entries []envEntry) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for _, e := range entries {
+		seen := false
+		// A key kept is kept on every line: with a duplicate left empty,
+		// rewriting that one would change what Compose uses (the last line).
+		keep := false
+		for _, line := range lines {
+			keep = keep || (!e.replace && envLineKey(line) == e.key && envHasValue(line, e.key))
+		}
+		for i, line := range lines {
+			if envLineKey(line) != e.key {
+				continue
+			}
+			seen = true
+			if !keep {
+				lines[i] = e.key + "=" + e.value
+			}
+		}
+		if !seen {
+			lines = append(lines, e.key+"="+e.value)
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// randomKey is 32 random bytes, base64url without padding: what the edge
+// reads as a 32-byte secret.
+func randomKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// readPasswordFile reads the database password, without its final newline.
+// It goes into edge.secrets.env single-quoted (taken literally by Compose),
+// so a quote or a line break cannot be carried. Never echoed.
+func readPasswordFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("couldn't read the key file: %w", err)
+		return "", fmt.Errorf("couldn't read the --postgres-password-file: %w", err)
+	}
+	pw := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	if pw == "" {
+		return "", fmt.Errorf("--postgres-password-file %s is empty", path)
+	}
+	if strings.ContainsAny(pw, "'\n\r\x00") {
+		return "", fmt.Errorf("--postgres-password-file %s holds a password with a quote (') or a line break, which edge.secrets.env cannot carry: choose another password", path)
+	}
+	return "'" + pw + "'", nil
+}
+
+// keyFileEnv reads the key file `edge add` wrote, never echoing it: the key
+// id, and the private key as the edge reads it. Central hands the key out as
+// base64url PKCS#8; the edge decodes private-key with the standard base64
+// alphabet, which refuses '-' and '_', so it is re-encoded (padded) here.
+func keyFileEnv(path string) (keyID, privateKey string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("couldn't read the key file: %w", err)
 	}
 	var k struct {
 		KeyID      string `json:"keyId"`
 		PrivateKey string `json:"privateKey"`
 	}
 	if err := json.Unmarshal(data, &k); err != nil || k.KeyID == "" || k.PrivateKey == "" {
-		return "", fmt.Errorf("%s is not a key file `versola edge add` wrote", path)
+		return "", "", fmt.Errorf("%s is not a key file `versola edge add` wrote", path)
 	}
-	if strings.ContainsAny(k.KeyID+k.PrivateKey, " \n\r\"'\\$") {
-		return "", fmt.Errorf("%s holds a key that cannot be written to an env file", path)
+	if strings.ContainsAny(k.KeyID, " \n\r\"'\\$#=") {
+		return "", "", fmt.Errorf("%s holds a key id that cannot be written to an env file", path)
 	}
-	return fmt.Sprintf("EDGE_KEY_ID=%s\nEDGE_PRIVATE_KEY=%s\n", k.KeyID, k.PrivateKey), nil
+	std, err := standardBase64(k.PrivateKey)
+	if err != nil {
+		return "", "", fmt.Errorf("%s holds a private key that is not base64 PKCS#8 RSA: %w", path, err)
+	}
+	return k.KeyID, std, nil
+}
+
+// standardBase64 re-encodes a base64url (or standard) PKCS#8 RSA private key
+// in the standard alphabet, padded. The key is parsed: a value that is not
+// one is refused here rather than by the edge at start.
+func standardBase64(s string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(s), "=")
+	der, err := base64.RawURLEncoding.DecodeString(trimmed)
+	if err != nil {
+		if der, err = base64.RawStdEncoding.DecodeString(trimmed); err != nil {
+			return "", errors.New("not base64")
+		}
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return "", errors.New("not a PKCS#8 private key")
+	}
+	if _, ok := key.(*rsa.PrivateKey); !ok {
+		return "", errors.New("not an RSA key")
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
 }

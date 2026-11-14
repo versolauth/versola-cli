@@ -1629,39 +1629,89 @@ enrollment token and prints the bundle: the edge's id and group, the token
 (valid for an hour, spent by its first enrollment), `central.<domain>` to enroll
 at, `central-mtls.<domain>` (and `id-mtls.<domain>`) to connect to, and the
 certificates of those listeners to pin, with their fingerprints on stderr to
-compare with what the edge machine shows. The bundle holds nothing that can be
+compare with what the edge machine shows, and auth's public URL (the
+deployment's `--auth-url`, the edge's `versola-url`; a deployment without one
+is refused before anything is registered; it may be http behind a TLS
+terminator of your own, like `--edge-url` below). The bundle holds nothing that can be
 used again. `--group` names a group of edges (central classifies groups:
 first-party, or a partner's; an edge's group does not change); without it the
 default group is used. The key central registers the edge with is shown once:
 it is written to `./<id>.edge-key.json` (mode 0600, never overwritten;
 `--key-out` moves it) and travels by another channel than the bundle.
 `--existing` only issues a new token for an edge that is already registered (a
-lost identity volume, an expired token). `-o` writes the bundle to a file
+lost identity volume, an expired token); the bundle then carries the group
+central has for the edge, which the edge must name when it enrolls (an edge
+in a partner's group is refused: it is not set up with `edge bootstrap`). `-o` writes the bundle to a file
 (0600) instead of stdout; with `> file`, run `umask 077` first, since it holds
 a token (valid an hour) and the key file is created in the current directory:
 keep that out of a git working tree.
 
-On the edge's machine, with Docker and the Compose plugin:
+On the edge's machine, with Docker and the Compose plugin, and a Postgres
+database of the edge's own:
 
 ```
-versola edge bootstrap eu-central.json --key-file eu-central.edge-key.json
+versola edge bootstrap eu-central.json --key-file eu-central.edge-key.json \
+  --edge-url https://edge.example.com \
+  --postgres-url 'jdbc:postgresql://db.example.com:5432/edge?sslmode=verify-full' \
+  --postgres-password-file edge-db.password
 ```
 
 `edge bootstrap <file>` reads the bundle (an expired token, a non-https
-address or a bundle without pins is refused before anything is written) and
-writes `~/.versola/edge/<id>/` (`--dir` moves it): `edge.conf` (where to
-enroll and connect, which certificates to pin -- generated, rewritten on every
-run), the token (0600), the pins, a `compose.yml` with a volume for the edge's
-identity and the edge's image at the bundle's Versola release (`--version`
-overrides), then starts it. The identity volume holds the key and certificate
-the edge enrolled for; keep it, or it enrolls again at every start and the
-token is spent. `edge.local.conf` and `edge.secrets.env` in that directory are
-yours: created empty, never overwritten (the second takes the key from
-`--key-file`); whatever else the edge needs, such as its public URL and its
-keys, goes into the first, which `edge.conf` includes last. `--no-start` writes
-the files and stops. A partner's edge does not use any of this: it has no
-connection to central. (Central's own `edge-identity` setting only matters for
-partners' edges; an operator's own, first-party, edges are always extended by central.)
+address, a bundle without pins or without `authUrl` -- one printed by an older
+versola: run `edge add <id> --existing` again with this one -- is refused
+before anything is written) and writes `~/.versola/edge/<id>/` (`--dir` moves
+it):
+
+- `edge.conf`: the edge's complete configuration, generated and rewritten on
+  every run -- `env = prod`, its id, its key (`${EDGE_KEY_ID}`,
+  `${EDGE_PRIVATE_KEY}`), `versola-url` (auth's public URL, from the bundle),
+  `edge-url` (`--edge-url`, required: the public origin clients reach this
+  edge on), `central` (where to connect, the pins, and `identity`: the
+  directory the enrolled key and certificate are kept in, the edge's group,
+  and where to enroll with the token), `security`, `postgres` and `cleanup`,
+  and, when the bundle has auth's mutual-TLS address, `native` and `dpop`.
+  It ends with `include file(".../edge.local.conf")`.
+- the token (0600), the pins, and a `compose.yml` with a volume for the edge's
+  identity and the edge's image at the bundle's Versola release (`--version`
+  overrides). The edge runs with `RUN_MIGRATIONS=true`: it applies its own
+  schema to its database at start.
+- `edge.local.conf`: yours, created with comments only, never overwritten.
+  `edge.conf` includes it last, so whatever is set there overrides what is
+  generated.
+- `edge.secrets.env` (0600): merged, never replaced. The edge's own keys
+  (`EDGE_TOKEN_ENC_KEY`, `EDGE_SESSIONS_SECRET`, `EDGE_DPOP_NONCE_SALT`,
+  `EDGE_NATIVE_BLOB_KEY`: 32 random bytes each) are generated when missing and
+  kept afterwards -- a new token-encryption key would make every stored session
+  unreadable. `--key-file` replaces only `EDGE_KEY_ID` and `EDGE_PRIVATE_KEY`
+  (the key is converted from the base64url central hands out to the standard
+  base64 the edge reads), `--postgres-password-file` only `POSTGRES_PASSWORD`
+  (written single-quoted; a password with a `'` or a line break is refused).
+  Every other line is kept. A key an earlier versola wrote in base64url is
+  re-encoded in place.
+
+`--postgres-url` (required) is the JDBC URL of the edge's database, written as
+given: in `env = prod` the edge refuses a database that is not on its own host
+unless TLS is verified (`sslmode=verify-full`). A URL with a password in it
+(`password=`, or `user:password@host`) is refused, since edge.conf is
+world-readable: the password goes in `--postgres-password-file`.
+`--postgres-user` defaults to `edge`. While `edge.secrets.env` lacks the key or the database password, the files are
+written but the edge is not started (it could not), and the command says on
+stderr what to pass; it still exits 0, since the files are written. Otherwise
+it starts the edge (recreating its container, so a re-run applies a changed
+`edge.conf`); `--no-start` writes the files and stops.
+
+The edge listens on 127.0.0.1 (ports 8095/8096); put your reverse proxy in
+front of it. Its rate limits read the caller's address from the connection:
+behind the proxy, and only if the edge is reachable solely through it, set
+`client-ip = "forwarded"` in `edge.local.conf` (the proxy's `X-Real-IP`).
+
+The identity volume holds the key and certificate the edge enrolled for; keep
+it, or it enrolls again at every start and the token is spent.
+
+A partner's edge is not set up by `edge bootstrap`: it enrolls with a token of
+its own and runs another configuration (`mode = "partner"`). (Central's own
+`edge-identity` setting only matters for partners' edges; an operator's own,
+first-party, edges are always extended by central.)
 
 ### `backup create` / `backup list` / `backup restore`
 

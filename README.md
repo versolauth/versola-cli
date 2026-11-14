@@ -551,7 +551,7 @@ are then named under it: `<prefix>/versola-tools:<version>`, and — through the
 that `versola-tools` generates, which gets the prefix as `IMAGE_REGISTRY` —
 `<prefix>/versola-central:<version>`, `-auth`, `-edge`. Third-party images
 (OpenBao, Postgres, nginx, step-ca) are not affected, and neither is the
-compose file `versola edge bootstrap` writes for a remote edge, which still
+compose file `versola edge bootstrap` (or `edge partner`) writes for a remote edge, which still
 names `ghcr.io/versolauth/versola-edge` (a known gap). What the registry must
 hold:
 
@@ -1074,15 +1074,27 @@ one of those listeners:
 
 | Flag | Name (by convention) | Publishes | You need it when |
 |---|---|---|---|
-| `--mtls-domain` | `id-mtls.<domain>` | auth's mutual-TLS listener | an edge in another network (or a partner's `tls_client_auth` client, or a FAPI client) calls `/par`, `/token`, `/userinfo`, ... with a client certificate |
-| `--central-mtls-domain` | `central-mtls.<domain>` | central's mutual-TLS listener (the edge surface) | an edge in another network syncs its configuration from central |
-| `--central-domain` | `central.<domain>` | central's enrollment route only | a new remote edge gets its first certificate (`versola edge bootstrap`) |
+| `--mtls-domain` | `id-mtls.<domain>` | auth's mutual-TLS listener | an edge in another network, yours or a partner's (or a partner's `tls_client_auth` client, or a FAPI client) calls `/par`, `/token`, `/userinfo`, ... with a client certificate |
+| `--central-mtls-domain` | `central-mtls.<domain>` | central's mutual-TLS listener (the edge surface) | an edge in another network, yours or a partner's, syncs its configuration from central |
+| `--central-domain` | `central.<domain>` | central's enrollment route only | a new remote edge gets its first certificate (`versola edge bootstrap`), or a partner's edge enrolls (`versola edge partner`) |
 
-A partner's edge ("Sign in with X" on the partner's own domain) is an
-ordinary OAuth client of auth: it uses `id.<domain>`, plus `--mtls-domain`
-when it authenticates with a certificate -- never central. A first-party
-edge in another region or cloud uses all three. A single-host deployment
-uses none.
+A first-party edge in another region or cloud uses all three, and so does a
+partner's edge (one a partner runs on its own host, see `edge partner`): it
+enrolls at the enrollment name -- the address central writes into every
+enrollment token -- then syncs from central's mutual-TLS name and
+authenticates the partner's clients at auth's mutual-TLS name, both of which
+central tells it at enrollment. A deployment that hosts partners needs all
+three names. A single-host deployment uses none.
+
+Central takes the names it tells a partner's edge from its own
+configuration, not from these flags: `public-urls { enroll, mtls }` (its
+enrollment and mutual-TLS names; without them central creates no partner)
+and `auth.mtls-url` (auth's mutual-TLS name). The flags publish the names --
+proxy routes, the listeners' certificate names, the mutual-TLS address auth
+advertises -- but the central configuration `versola-tools` generates for
+vps does not set those keys from them, and this CLI has no place for them
+yet that a later `configure` keeps: a known gap, until `versola-tools`
+writes them.
 
 All three are optional, independent, remembered by the deployment (a later
 `configure`, and `rollout`, keep them; `--mtls-domain=` with an empty value
@@ -1641,7 +1653,7 @@ it is written to `./<id>.edge-key.json` (mode 0600, never overwritten;
 `--existing` only issues a new token for an edge that is already registered (a
 lost identity volume, an expired token); the bundle then carries the group
 central has for the edge, which the edge must name when it enrolls (an edge
-in a partner's group is refused: it is not set up with `edge bootstrap`). `-o` writes the bundle to a file
+in a partner's group is refused: it is not set up with `edge bootstrap`, the partner sets it up with `edge partner`). `-o` writes the bundle to a file
 (0600) instead of stdout; with `> file`, run `umask 077` first, since it holds
 a token (valid an hour) and the key file is created in the current directory:
 keep that out of a git working tree.
@@ -1709,9 +1721,116 @@ The identity volume holds the key and certificate the edge enrolled for; keep
 it, or it enrolls again at every start and the token is spent.
 
 A partner's edge is not set up by `edge bootstrap`: it enrolls with a token of
-its own and runs another configuration (`mode = "partner"`). (Central's own
+its own and runs another configuration (`mode = "partner"`), which `edge
+partner` writes, below. (Central's own
 `edge-identity` setting only matters for partners' edges; an operator's own,
 first-party, edges are always extended by central.)
+
+### `edge partner` (a partner's machine)
+
+A partner -- an organisation outside the operator -- runs only an edge, on its
+own host with its own Postgres, and installs this CLI to set it up. `edge
+partner` writes that edge's configuration and starts it. It is separate from
+`bootstrap`/`configure` (which set up the operator's auth, central and edge
+together) and from `edge add`/`edge bootstrap` (the operator's own remote
+edge, from a bundle): a partner gets no bundle, and the partner's machine never
+talks to the operator's central except through the edge itself.
+
+What the operator hands over:
+
+- the enrollment token, in a file: one string `vtk1.<base64url(address)>.<secret>`,
+  for one use, valid 24 hours;
+- two PEM files: the certificate of central's mutual-TLS listener and the
+  certificate auth's mutual-TLS address presents (the listeners' own leaf
+  certificates, which the edge pins; a CA is refused);
+- the console's files (`partner.html`, `versola-partner.js`,
+  `versola-partner-theme.js`; the edge's image has none);
+- the Versola release to run.
+
+The operator's deployment has to publish central's enrollment and mutual-TLS
+names and auth's mutual-TLS name, and central has to know them (see "Public
+names").
+
+On the partner's machine, with Docker and the Compose plugin, and a Postgres
+database of the edge's own:
+
+```
+versola edge partner enrollment-token.txt --version 0.8.0 \
+  --edge-url https://login.acmepay.example \
+  --central-pin central-mtls.crt --auth-pin id-mtls.crt \
+  --admin '+7 701 000 00 00' --admin it@acmepay.example \
+  --postgres-url 'jdbc:postgresql://db.acmepay.example:5432/edge?sslmode=verify-full' \
+  --postgres-password-file edge-db.password \
+  --console-dir ./console
+```
+
+Everything is checked before anything is written:
+
+- the token file holds one token: `vtk1.`, an address that decodes to an
+  https URL with a host and no user info (as central's own parser has it;
+  the edge sends the token there), and a secret. An error says what is
+  wrong and never shows the secret;
+- `--edge-url` (required) is an https origin: the console runs over TLS, which
+  the partner's reverse proxy ends;
+- `--central-pin` and `--auth-pin` (required, repeatable: two during a
+  rotation) are PEM certificates, none of them a CA (the edge refuses a CA as
+  a pin, since it does no hostname check on these connections);
+- `--admin` (required, repeatable) is a first administrator of the console: an
+  email address or a phone number in international format (`+`, then 7 to 15
+  digits, the first not 0; spaces, hyphens and parentheses are dropped). It is
+  written in the form the edge keeps (an email lowercased, a phone number
+  without separators); the person signs in at the operator's sign-in with it,
+  verified there;
+- `--postgres-url` (required) is a `jdbc:postgresql://` URL without a password
+  (as for `edge bootstrap`); `--postgres-user` defaults to `edge`;
+- `--console-dir` holds `partner.html`; a missing `versola-partner.js` or
+  `versola-partner-theme.js` is a warning (the page then loads but does not
+  work);
+- `--version` is required: there is no bundle to name it.
+
+It writes `~/.versola/edge/<host of --edge-url>/` (`--dir` moves it; a
+directory that holds another edge's `edge.conf`, one `edge bootstrap` wrote, is
+refused):
+
+- `edge.conf`: the complete configuration, rewritten on every run --
+  `mode = "partner"`, `env = prod`, `edge-url`, the pins
+  (`versola-internal-trusted-certificates` for auth,
+  `central.mutual-tls.trusted-certificates` for central), `central.identity`
+  (the identity directory and the token file), `partner` (`admins`, and
+  `console-directory` when `--console-dir` is given; without it `/partner/`
+  answers 404), `security`, `postgres`
+  and `cleanup` as for a first-party edge. It has no `id`, `key-id`,
+  `private-key`, `versola-url`, `central.url`, group or enrollment address:
+  central tells the edge those at enrollment and the edge refuses them in its
+  file. It ends with `include file(".../edge.local.conf")`.
+- the token (0600), the pins, and a `compose.yml` (project
+  `versola-partner-edge-<directory name>`): the edge's image at `--version`,
+  host networking, `RUN_MIGRATIONS=true`, the console's directory mounted
+  read-only at `/app/console`, and a volume for the edge's identity.
+- `edge.local.conf`: yours, created with comments only, never overwritten.
+- `edge.secrets.env` (0600): merged, never replaced. `EDGE_TOKEN_ENC_KEY` and
+  `EDGE_SESSIONS_SECRET` (32 random bytes each) are generated when missing and
+  never replaced (the first keys the stored sessions and the team's
+  identifiers); `--postgres-password-file` replaces only `POSTGRES_PASSWORD`.
+  Without a database password the files are written but the edge is not
+  started, and the command says what to pass.
+
+Then it starts the edge (recreating its container; `--no-start` writes the
+files and stops) and says on stderr where the token enrolls, the fingerprints
+of the pins (to compare with the operator's), and what comes next: the log
+(`docker compose -f <dir>/compose.yml logs -f edge`), the reverse proxy with
+TLS for `--edge-url` in front of `127.0.0.1:8095`, and `<edge-url>/partner/`
+once it runs. No secret is printed.
+
+**Keep the identity volume** (`<project>_edge-identity`; never `docker compose
+down -v`): it holds the certificate and key the edge enrolled for. Without it
+the edge needs a new token at every start, and a token cannot be used twice:
+central refuses a second enrollment of an enrolled edge, so the operator has to
+register the edge anew. After the first start the edge logs that the token is
+no longer read; the spent token can stay. To change the flags later, run `edge
+partner` again with all of them and without the token file: the token file in
+the directory is kept (created empty if it was removed, since Compose mounts
+it).
 
 ### `backup create` / `backup list` / `backup restore`
 

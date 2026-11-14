@@ -34,6 +34,8 @@ The default bundled Postgres path on VPS, and the `postgres`, `backup`,
 Releases are automated (see Releasing below) and installed via the one-line
 scripts below.
 
+The [`e2e-local`](.github/workflows/e2e-local.yml) workflow exercises local bootstrap, restart and uninstall with real images nightly and on PRs labelled `e2e` (no login). The first run passed bootstrap and HTTP probes but exposed a restart failure in released tools 0.7.5: local Postgres has no explicit persistent volume (versolauth/versola#891). Restart coverage remains blocked until a supporting tools release.
+
 ## Install
 
 **macOS/Linux:**

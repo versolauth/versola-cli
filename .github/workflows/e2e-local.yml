@@ -1,0 +1,102 @@
+# End to end: `versola bootstrap local` with the real Versola images, the
+# first command a new customer runs (issue #78). Builds the CLI from the
+# commit and runs e2e/local/run.sh on the runner's Docker: doctor,
+# bootstrap, the proxy's three probes, status, down, up, the probes again,
+# uninstall, nothing named versola* left. See e2e/local/README.md.
+#
+# Not part of ci.yml and not a required check: it pulls real images and takes
+# minutes, so it runs nightly, by hand, and on pull requests labelled `e2e`.
+#
+# Not checked: logging in. The admin login is a multi-step flow (PKCE
+# authorization request, session cookie, CSRF token, then the password and
+# OTP steps), and a curl version of it would break on every change to that
+# flow's shape; a login smoke test is a follow-up. The probes do show auth,
+# edge and central answer through the proxy.
+name: e2e-local
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versola version to deploy (e.g. 0.7.5, no leading v); empty = the latest release"
+        required: false
+        default: ""
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+# Only reads the repository (and the public releases of versolauth/versola).
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  bootstrap-local:
+    # On pull requests only with the `e2e` label; on `labeled`, only when that
+    # label is the one just added (not on every other label).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'e2e') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
+    runs-on: ubuntu-latest
+    # One run per pull request (a new push cancels the old run) or per ref;
+    # scheduled and manual runs do not cancel each other. On the job, not the
+    # workflow: a run whose job is skipped by the `if` above (another label
+    # added to a PR) does not join the group, so it cannot cancel a running
+    # e2e job.
+    concurrency:
+      group: e2e-local-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # The step below has its own, shorter limit: a step timeout is a failure,
+    # so the diagnostics are still uploaded; a job timeout is a cancellation
+    # and `if: failure()` would upload nothing.
+    timeout-minutes: 25
+    steps:
+      # Same pinned-SHA policy and Go setup as ci.yml.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+
+      # The input, or the latest Versola release. Passed through env, never
+      # spliced into the script, so the input cannot inject shell.
+      - name: Resolve the Versola version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          v="${INPUT_VERSION:-}"
+          if [ -z "$v" ]; then
+            v="$(gh api repos/versolauth/versola/releases/latest --jq .tag_name)"
+          fi
+          [ -n "$v" ] || { echo "could not resolve the Versola version"; exit 1; }
+          echo "Versola $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: bootstrap local, restart, uninstall
+        timeout-minutes: 20
+        env:
+          E2E_VERSION: ${{ steps.version.outputs.version }}
+          E2E_ARTIFACTS: ${{ runner.temp }}/e2e-local-artifacts
+          E2E_HOME: ${{ runner.temp }}/versola-e2e-local-home
+          # The runner is thrown away: after a failure run.sh only collects
+          # the diagnostics and skips its own `versola uninstall -y`.
+          E2E_KEEP: "1"
+        run: bash e2e/local/run.sh
+
+      # Only what run.sh's collect wrote: docker ps, container logs (not
+      # step-ca's: it prints its CA administrative password there), versola
+      # status. Never ~/.versola or a bundle file (they hold the secrets).
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-local-diagnostics
+          path: ${{ runner.temp }}/e2e-local-artifacts
+          retention-days: 7
+          if-no-files-found: ignore
